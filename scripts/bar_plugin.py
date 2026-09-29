@@ -6,7 +6,7 @@ enable copies this 2.0.0 tree into the plugin directory, keeps one 1.3.0
 backup, and asks Omarchy to show the chip.
 disable takes the chip off the bar and leaves the files in place.
 
-This does not start fan2go, enable coolercontrold, or run as root.
+This does not enable coolercontrold, and it does not run as root.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ DEST = Path.home() / ".config" / "omarchy" / "plugins" / PLUGIN_ID
 BACKUP = Path.home() / ".config" / "omaflow" / "plugin-1.3.0"
 SKIP_DIRS = {"app", "packaging", "screenshots", ".git", "__pycache__"}
 SKIP_FILES = {"setup", "README.md", "preview.png"}
+# Leftover 1.3.0 writer scripts. Dropped from the plugin directory on enable.
 STALE = (
     "scripts/omaflow_bridge.py",
     "scripts/omaflow_helper.py",

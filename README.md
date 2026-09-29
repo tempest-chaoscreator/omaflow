@@ -1,6 +1,6 @@
 # Omaflow
 
-Omaflow Plugin is the Omarchy bar chip. Omaflow is the cooling window. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` daemon. Fan writes and sensor polls stay on that daemon's own `poll_rate` (default 1 second). Omaflow does not read sysfs and does not run `liquidctl` or `fan2go`.
+Omaflow Plugin is the Omarchy bar chip. Omaflow is the cooling window. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` daemon. Fan writes and sensor polls stay on that daemon's own `poll_rate` (default 1 second). Omaflow does not read sysfs and does not run `liquidctl`.
 
 ![Omaflow settings](screenshots/settings.jpg)
 
@@ -50,7 +50,7 @@ GPU fan control through `nvidia-settings` after you enable **GPU** on Settings. 
 <details>
 <summary>AMD</summary>
 
-CPU package / CCD temps through `k10temp` (Ryzen). Chassis fans through any hwmon PWM device fan2go can see. No AMD GPU fan control in this release (telemetry only if the driver exports hwmon).
+CPU package / CCD temps through `k10temp` (Ryzen). Chassis fans through any hwmon PWM channel CoolerControl exposes. No AMD GPU fan control in this release (telemetry only if the driver exports hwmon).
 
 - Ryzen 3000 / 5000 / 7000 desktop (k10temp Tctl / Tccd)
 - Board fan headers on ASUS, MSI, Gigabyte, ASRock when they appear as hwmon PWM
@@ -59,7 +59,7 @@ CPU package / CCD temps through `k10temp` (Ryzen). Chassis fans through any hwmo
 <details>
 <summary>Intel</summary>
 
-CPU temps through `coretemp` when present. Chassis fans through fan2go hwmon, same as AMD boards.
+CPU temps through `coretemp` when present. Chassis fans through CoolerControl hwmon, same as AMD boards.
 
 - Core i5 / i7 / i9 desktop with `coretemp`
 </details>
@@ -85,7 +85,7 @@ AIO pump / fan profiles through liquidctl when the device is listed by `liquidct
 <details>
 <summary>Other AIOs and hubs</summary>
 
-Anything `liquidctl list` and `fan2go detect` can see. Pump duty is clamped to a 50% floor in every mode.
+Anything CoolerControl lists from liquidctl or hwmon. Pump duty is clamped to a 50% floor in every mode.
 
 - MSI MEG / MPG CoreLiquid
 - EVGA / NZXT Asetek 690LC units
@@ -137,11 +137,11 @@ That deletes the plugin folder and its bar entry. `coolercontrold` and `liquidct
 
 **Settings** — five modes and an NZXT CAM-style graph. CPU-temperature graphs run 28–98 °C. Liquid-temperature graphs (Pump, AIO, and CPU) run 28–60 °C, which is as hot as coolant should get. GPU stays on 20–90 °C. Drag a handle up and the points to its right come with it. Silent / Static / Performance / Hell share one padlock. Custom is always unlocked. Reset restores only the selected channel. Edits on this tab do not change the live mode; pick that on Telemetry.
 
-Pump, AIO, and CPU each have a curve input: CPU temp or liquid temp. GPU and AIO (and CPU, when a CPU fan header is detected) hide their on/off switch until you select that card. The card grows to show a horizontal switch. CPU stays grey when fan2go sees no CPU fan. The info mark next to Reset explains one-cable AIOs: leave the CPU switch off and let the BIOS run `CPU_FAN`, or split the cable so the pump is on `AIO_PUMP` and the radiator fans are on `CPU_FAN`.
+Pump, AIO, and CPU each have a curve input: CPU temp or liquid temp. GPU and AIO (and CPU, when a CPU fan header is detected) hide their on/off switch until you select that card. The card grows to show a horizontal switch. CPU stays grey when CoolerControl sees no CPU fan. The info mark next to Reset explains one-cable AIOs: leave the CPU switch off and let the BIOS run `CPU_FAN`, or split the cable so the pump is on `AIO_PUMP` and the radiator fans are on `CPU_FAN`.
 
 The bottom of Settings exports and imports a JSON file of the stored curves and settings.
 
-Every channel card has a switch. Off does not stop the fan. A motherboard header (chassis, `CPU_FAN`, `AIO_PUMP`) is handed back to the BIOS curve. NVIDIA fans go back to the driver's own curve. A USB cooler has no BIOS curve, so Omaflow simply stops sending new speeds and the device keeps the last duty — never 0%. Silent's AIO curve sits 10–15 points above the chassis curve. The AIO card opens on CPU temperature. If fan2go sees an `AIO_PUMP` header and there is no USB cooler, that header follows the Pump curve. A USB pump and that header are never driven together.
+Every channel card has a switch. Off does not stop the fan. A motherboard header (chassis, `CPU_FAN`, `AIO_PUMP`) is handed back to the BIOS curve. NVIDIA fans go back to the driver's own curve. A USB cooler has no BIOS curve, so Omaflow simply stops sending new speeds and the device keeps the last duty — never 0%. Silent's AIO curve sits 10–15 points above the chassis curve. The AIO card opens on CPU temperature. If CoolerControl sees an `AIO_PUMP` header and there is no USB cooler, that header follows the Pump curve. A USB pump and that header are never driven together.
 
 GPU and AIO stay off until you enable them. Chassis and Pump start on. The CPU switch is shown on its card and stays locked off when no `CPU_FAN` header is detected.
 
@@ -163,19 +163,14 @@ AIO LCD:
 
 ## How it applies
 
-- **fan2go** owns motherboard / NZXT Smart Device chassis fans. The bridge keeps a copy of the curve at `~/.config/omaflow/fan2go.yaml`. The root service does not read that file. It reads `/etc/fan2go/fan2go.yaml`, which the helper republishes after checking the document. The database is `/var/lib/omaflow/fan2go.db`.
-- **nvidia-settings** owns GPU fans only after you enable GPU on Settings. A 0% target returns the card to NVIDIA auto so 3090 zero-RPM idle works.
-- A detected **CPU fan** header is driven by fan2go only after you enable CPU. Off, that header is left to the BIOS.
-- **liquidctl** owns the AIO: pump curve, radiator curve, LCD, optional LEDs. Those profiles live on the device.
-- If fan2go is not running yet, the bridge holds chassis PWM itself so the modes still do something after setup.
-
-Telemetry is always available from hwmon and `nvidia-smi`, even before the stack is installed.
+- `coolercontrold` owns the fans, the pump, and the pump LCD. Omaflow sends channel settings and curves to `127.0.0.1:11987`. It does not write PWM, sysfs, or USB itself.
+- Sensor polls and duty writes stay on the daemon's `poll_rate` (default 1 second). Omaflow does not change that rate on its own.
+- Pump curves stay at or above 50%.
+- Applying a mode puts the saved pump image back with the daemon orientation at 0, so the orientation stored on the mode does not turn the glass.
 
 ## Privileged paths
 
-Setup pins `scripts/omaflow_helper.py` to a SHA-256 in the setup script. It reads that file once, checks the digest, and passes the bytes to a root installer on stdin. The installer does not open the plugin directory. An active local member of `wheel` can run the installed helper without a password. Its commands are fixed: write a PWM value, release a header back to the BIOS, publish a checked curve document, import an existing root-owned fan database once, restart the unit, and check that `/usr/bin/fan2go` is a root-owned binary.
-
-The helper refuses `cmd` and `file` fans, refuses any database path other than `/var/lib/omaflow/fan2go.db`, and binds the API to `127.0.0.1:9001`. The unit sets `ProtectHome` and `PrivateTmp`, so the root daemon cannot read the home directory or `/tmp`.
+Omaflow does not install a root helper and does not run as root. The only secret it stores is the CoolerControl token at `~/.config/omaflow/coolercontrol.token`, mode `0600`. Curve groups, link flags, hidden devices, and the LCD view are local files in that directory, also mode `0600`.
 
 ## License
 

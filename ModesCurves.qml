@@ -33,6 +33,28 @@ Column {
   visible: true
 
   readonly property var modeList: service && service.modes ? service.modes : []
+  readonly property var customModes: {
+    var out = []
+    for (var i = 0; i < modeList.length; i++) {
+      if (isFactoryMode(modeList[i])) continue
+      out.push(modeList[i])
+    }
+    return out
+  }
+  readonly property var listedGroups: {
+    var saved = service && service.groups ? service.groups : []
+    var present = ({})
+    var list = service && service.channels ? service.channels : []
+    for (var i = 0; i < list.length; i++) present[list[i].key] = true
+    var out = []
+    for (var g = 0; g < saved.length; g++) {
+      var members = saved[g].members || []
+      var live = false
+      for (var m = 0; m < members.length; m++) if (present[members[m]]) live = true
+      if (live) out.push(saved[g])
+    }
+    return out
+  }
   readonly property var mode: {
     for (var i = 0; i < modeList.length; i++) if (modeList[i].uid === modeUid) return modeList[i]
     return null
@@ -219,9 +241,9 @@ Column {
         y: 1 + cardRow * (slotRows + 1)
       })
     }
-    var saved = service && service.groups ? service.groups : []
+    var saved = listedGroups
     for (var s = 0; s < saved.length; s++) out.push({ kind: "drop-group", id: saved[s].id, x: s, y: 40 })
-    for (var n = 0; n < modeList.length; n++) out.push({ kind: "drop-mode", uid: modeList[n].uid, x: n, y: 41 })
+    for (var n = 0; n < customModes.length; n++) out.push({ kind: "drop-mode", uid: customModes[n].uid, x: n, y: 41 })
     return out
   }
   readonly property var selected: rowByKey(memberKey)
@@ -469,9 +491,20 @@ Column {
     return jobs
   }
 
+  function isFactoryMode(item) {
+    var name = String(item && item.name || "").replace(/^\s+|\s+$/g, "").toLowerCase()
+    return name === "silent" || name === "performance" || name === "fixed" || name === "hell"
+  }
+
   function removeMode(uid) {
     var target = uid || (mode && mode.uid)
     if (!service || !target) return
+    var found = null
+    for (var i = 0; i < modeList.length; i++) if (modeList[i].uid === target) found = modeList[i]
+    if (isFactoryMode(found)) {
+      service.lastError = "Silent, Performance, Fixed, and Hell stay"
+      return
+    }
     if (target === service.activeModeUid) {
       service.lastError = "The running mode stays"
       return
@@ -1263,14 +1296,17 @@ Column {
     }
   }
 
-  Row {
+  Item {
     id: groupCreateRow
     width: parent.width
-    spacing: Style.space(8)
+    height: Math.max(groupField.implicitHeight, groupFlow.implicitHeight)
 
     TextField {
       id: groupField
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
       width: Style.space(180)
+      height: implicitHeight
       placeholderText: "Group name"
       foreground: root.fg
       accent: root.accent
@@ -1280,40 +1316,53 @@ Column {
 
     Button {
       id: groupButton
+      anchors.left: groupField.right
+      anchors.leftMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      height: groupField.height
       text: "Group"
       bordered: true
       enabled: root.members.length > 1
       foreground: root.fg
       accent: root.accent
       fontFamily: root.fontFamily
-      fontSize: Style.font.caption
+      fontSize: Style.font.body
       onClicked: root.makeGroup()
     }
 
     Flow {
-      width: Math.max(0, groupCreateRow.width - groupField.width - groupButton.width - groupCreateRow.spacing * 2)
+      id: groupFlow
+      anchors.left: groupButton.right
+      anchors.leftMargin: Style.space(8)
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      layoutDirection: Qt.RightToLeft
       spacing: Style.space(8)
-      visible: root.service && root.service.groups && root.service.groups.length > 0
+      visible: root.listedGroups.length > 0
 
       Repeater {
-        model: root.service ? root.service.groups : []
+        model: root.listedGroups
         delegate: Row {
           required property var modelData
-          spacing: Style.space(4)
-          height: Style.space(22)
+          layoutDirection: Qt.LeftToRight
+          spacing: Style.space(6)
+          height: groupField.height
 
           Text {
             anchors.verticalCenter: parent.verticalCenter
             text: modelData.name || "Group"
             color: root.fg
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.body
           }
 
-          Item {
-            width: Style.space(22)
-            height: Style.space(22)
-            anchors.verticalCenter: parent.verticalCenter
+          Rectangle {
+            width: groupField.height
+            height: groupField.height
+            radius: 0
+            color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
+            border.width: 1
+            border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
 
             OpticalGlyph {
               anchors.centerIn: parent
@@ -1321,7 +1370,7 @@ Column {
               height: Style.space(16)
               text: root.trash
               fontFamily: root.fontFamily
-              fontSize: Style.font.caption
+              fontSize: Style.font.body
               color: root.fg
             }
 
@@ -1354,14 +1403,17 @@ Column {
     fontFamily: root.fontFamily
   }
 
-  Row {
+  Item {
     id: modeCreateRow
     width: parent.width
-    spacing: Style.space(8)
+    height: Math.max(modeField.implicitHeight, modeFlow.implicitHeight)
 
     TextField {
       id: modeField
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
       width: Style.space(180)
+      height: implicitHeight
       placeholderText: "Mode name"
       foreground: root.fg
       accent: root.accent
@@ -1375,12 +1427,16 @@ Column {
 
     Button {
       id: modeButton
+      anchors.left: modeField.right
+      anchors.leftMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      height: modeField.height
       text: "Create"
       bordered: true
       foreground: root.fg
       accent: root.accent
       fontFamily: root.fontFamily
-      fontSize: Style.font.caption
+      fontSize: Style.font.body
       onClicked: {
         if (root.service) root.service.createMode(modeField.text)
         root.modeName = ""
@@ -1388,17 +1444,23 @@ Column {
     }
 
     Flow {
-      width: Math.max(0, modeCreateRow.width - modeField.width - modeButton.width - modeCreateRow.spacing * 2)
+      id: modeFlow
+      anchors.left: modeButton.right
+      anchors.leftMargin: Style.space(8)
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      layoutDirection: Qt.RightToLeft
       spacing: Style.space(8)
-      visible: root.modeList.length > 0
+      visible: root.customModes.length > 0
 
       Repeater {
-        model: root.modeList
+        model: root.customModes
         delegate: Row {
           required property var modelData
           readonly property bool running: root.service && modelData.uid === root.service.activeModeUid
-          spacing: Style.space(4)
-          height: Style.space(22)
+          layoutDirection: Qt.LeftToRight
+          spacing: Style.space(6)
+          height: modeField.height
           opacity: running ? 0.38 : 1
 
           Text {
@@ -1406,13 +1468,16 @@ Column {
             text: modelData.name || "Mode"
             color: root.fg
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.body
           }
 
-          Item {
-            width: Style.space(22)
-            height: Style.space(22)
-            anchors.verticalCenter: parent.verticalCenter
+          Rectangle {
+            width: modeField.height
+            height: modeField.height
+            radius: 0
+            color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, running ? 0.03 : 0.06)
+            border.width: 1
+            border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
 
             OpticalGlyph {
               anchors.centerIn: parent
@@ -1420,7 +1485,7 @@ Column {
               height: Style.space(16)
               text: root.trash
               fontFamily: root.fontFamily
-              fontSize: Style.font.caption
+              fontSize: Style.font.body
               color: root.fg
             }
 

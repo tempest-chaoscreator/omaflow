@@ -7,8 +7,8 @@ import "Nav.js" as Nav
 
 // The preview and the angle dial share one stage. The preview grows with the window.
 // Round glass draws a circle. Square panels draw a square frame, and a non-square
-// pixel buffer keeps that aspect. Zero orientation holds the picture level.
-// The dot still shows the dial, and that dial angle is what the pump image is rotated by.
+// pixel buffer keeps that aspect. The axis lock sets the preview level and saves
+// that. The dot still shows the dial, and that dial angle is what the pump image is rotated by.
 Column {
   id: root
 
@@ -246,6 +246,13 @@ Column {
     if (syncOn) push()
   }
 
+  // One shot. Holds the preview level and saves that choice. It does not
+  // change the dial degree the pump image is rotated by, and it does not stay down.
+  function zeroPreview() {
+    zeroOrientation = true
+    saveView()
+  }
+
   function setShape(kind) {
     if (kind !== "round" && kind !== "square") return
     if (shapeChoice === "" && detectedShape === kind) return
@@ -320,7 +327,7 @@ Column {
     if (!item) return
     if (item.id === "face") setFace(faces[item.face].id)
     else if (item.id === "shape") setShape(item.shape)
-    else if (item.id === "zero") zeroOrientation = !zeroOrientation
+    else if (item.id === "zero") zeroPreview()
     else if (item.id === "ccw") stepAngle(-30)
     else if (item.id === "cw") stepAngle(30)
     else if (item.id === "sync") { syncOn = true; push() }
@@ -381,7 +388,7 @@ Column {
   Item {
     id: faceRow
     width: parent.width
-    height: Math.max(faceFlow.implicitHeight, zeroBtn.implicitHeight)
+    height: Math.max(faceFlow.implicitHeight, zeroBtn.height)
 
     Flow {
       id: faceFlow
@@ -389,13 +396,14 @@ Column {
       spacing: Style.space(8)
 
       Repeater {
-        model: 2
+        id: faceRepeat
+        model: root.faces
         delegate: Button {
+          required property var modelData
           required property int index
-          readonly property var face: root.faces[index]
-          text: face.label
+          text: modelData.label
           bordered: true
-          selected: root.face === face.id
+          selected: root.face === modelData.id
           hasCursor: root.aimed("face", index)
           foreground: root.fg
           accent: root.accent
@@ -403,68 +411,62 @@ Column {
           fontSize: Style.font.caption
           onClicked: {
             root.navIndex = index
-            root.setFace(face.id)
+            root.setFace(modelData.id)
           }
-        }
-      }
-
-      Item {
-        width: Style.space(16)
-        height: Style.space(8)
-      }
-
-      Button {
-        readonly property int faceIndex: 2
-        text: root.faces[2].label
-        bordered: true
-        selected: root.face === root.faces[2].id
-        hasCursor: root.aimed("face", faceIndex)
-        foreground: root.fg
-        accent: root.accent
-        fontFamily: root.fontFamily
-        fontSize: Style.font.caption
-        onClicked: {
-          root.navIndex = faceIndex
-          root.setFace(root.faces[2].id)
-        }
-      }
-
-      Item {
-        width: Style.space(28)
-        height: Style.space(8)
-      }
-
-      Button {
-        readonly property int faceIndex: 3
-        text: root.faces[3].label
-        bordered: true
-        selected: root.face === root.faces[3].id
-        hasCursor: root.aimed("face", faceIndex)
-        foreground: root.fg
-        accent: root.accent
-        fontFamily: root.fontFamily
-        fontSize: Style.font.caption
-        onClicked: {
-          root.navIndex = faceIndex
-          root.setFace(root.faces[3].id)
         }
       }
     }
 
-    Button {
+    Item {
       id: zeroBtn
+      readonly property int side: {
+        var sample = faceRepeat.itemAt(0)
+        return sample ? sample.implicitHeight : Style.space(28)
+      }
       anchors.right: parent.right
       anchors.top: parent.top
-      text: "Zero orientation"
-      bordered: true
-      selected: root.zeroOrientation
-      hasCursor: root.aimed("zero")
-      foreground: root.fg
-      accent: root.accent
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      tooltipText: "Hold the preview level, as if the pump screen were horizontal"
-      onClicked: root.zeroOrientation = !root.zeroOrientation
+      width: side
+      height: side
+
+      Rectangle {
+        anchors.fill: parent
+        radius: 0
+        color: zeroMouse.containsMouse || root.aimed("zero")
+          ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+          : "transparent"
+        border.width: 1
+        border.color: root.aimed("zero") ? root.accent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
+      }
+
+      OpticalGlyph {
+        anchors.centerIn: parent
+        width: Style.space(16)
+        height: Style.space(16)
+        text: "\uDB83\uDD4A"
+        fontFamily: root.fontFamily
+        fontSize: Style.space(16)
+        color: root.aimed("zero") || zeroMouse.containsMouse ? root.accent : root.fg
+      }
+
+      MouseArea {
+        id: zeroMouse
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: {
+          root.navIndex = root.indexOf("zero")
+          root.zeroPreview()
+        }
+      }
+
+      PanelToolTip {
+        visible: zeroMouse.containsMouse
+        text: "Zero the preview and save that orientation"
+        fontFamily: root.fontFamily
+        panelBackground: Color.background
+        panelForeground: Color.foreground
+        panelBorder: Color.accent
+      }
     }
   }
 

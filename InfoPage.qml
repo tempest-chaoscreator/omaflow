@@ -205,7 +205,7 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
-    text: "Enter runs the highlighted control. The eye hides a device from Monitoring and the bar. A group made of only that device hides with it. The link beside a Modes name shares one curve. The pump keeps its own. Left and right change a slider when the arrow has nowhere else to go, and the wheel does the same. Saturation deepens the theme colors and keeps their hue."
+    text: "Enter runs the highlighted control. The eye hides a device from Monitoring and the bar. A group made of only that device hides with it. The link beside a Modes name shares one curve. The pump keeps its own. The axis lock on LCD zeroes the preview and saves it. Left and right change a slider when the arrow has nowhere else to go, and the wheel does the same. Saturation deepens the theme colors and keeps their hue."
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

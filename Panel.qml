@@ -3,6 +3,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "CcMap.js" as Cc
+import "Model.js" as Model
 import "Nav.js" as Nav
 
 // Omaflow Plugin. Telemetry and the selected mode. Curve edits stay in
@@ -184,12 +185,38 @@ Panel {
           width: parent.width - Style.space(24)
           spacing: Style.space(8)
 
-          Text {
-            text: "OMAFLOW"
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(16)
-            font.bold: true
+          Item {
+            width: parent.width
+            height: Math.max(brand.implicitHeight, flavor.implicitHeight)
+
+            Text {
+              id: brand
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "OMAFLOW"
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(16)
+              font.bold: true
+            }
+
+            Text {
+              id: flavor
+              anchors.left: brand.right
+              anchors.leftMargin: Style.space(12)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              horizontalAlignment: Text.AlignRight
+              elide: Text.ElideRight
+              text: Model.flavorText(
+                root.mode ? root.mode.name : root.activeModeName,
+                Model.hottest(root.temps)
+              )
+              color: Qt.darker(root.fg, 1.35)
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(13)
+              font.bold: true
+            }
           }
 
           Text {

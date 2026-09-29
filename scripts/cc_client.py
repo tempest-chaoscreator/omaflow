@@ -12,9 +12,11 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -24,6 +26,10 @@ TOKEN_PATH = Path.home() / ".config" / "omaflow" / "coolercontrol.token"
 GROUPS_PATH = TOKEN_PATH.with_name("groups.json")
 LINKS_PATH = TOKEN_PATH.with_name("links.json")
 HIDDEN_PATH = TOKEN_PATH.with_name("hidden.json")
+LCD_VIEW_PATH = TOKEN_PATH.with_name("lcd-view.json")
+THEME_COLORS = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
+_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
+_SSE_LIMIT = 1_000_000
 # Factory password shipped by coolercontrold. Tried once, only when no token
 # exists, and only against localhost. A changed password is left alone.
 FACTORY_PASSWORD = "coolAdmin"
@@ -442,7 +448,13 @@ def push_lcd_image(
         "lcd.png",
         png,
     )
-    path = "/devices/" + device + "/settings/" + channel + "/lcd/images"
+    path = (
+        "/devices/"
+        + urllib.parse.quote(device, safe="")
+        + "/settings/"
+        + urllib.parse.quote(channel, safe="")
+        + "/lcd/images"
+    )
     req = urllib.request.Request(
         BASE + path,
         data=body,
@@ -470,6 +482,250 @@ def push_lcd_image(
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
     except Exception as err:  # noqa: BLE001
         return {"ok": False, "status": 0, "error": str(err), "body": None}
+
+
+def _safe_path(path: str) -> str | None:
+    """A single daemon path. Refuses scheme, host, query, and fragment tricks."""
+    text = str(path or "")
+    if len(text) > 512 or not text.startswith("/") or text.startswith("//"):
+        return None
+    if any(ch in text for ch in ("?", "#", "\\", "\n", "\r", "\t", " ", "@", "\x00")):
+        return None
+    folded = text.lower()
+    if "://" in text or ".." in text.split("/"):
+        return None
+    if "%2e" in folded or "%2f" in folded or "%5c" in folded:
+        return None
+    return text
+
+
+def _own(path: Path) -> None:
+    """Local preference files stay private to this user."""
+    try:
+        if path.is_file():
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _mode_activate(path: str) -> bool:
+    if not path.startswith("/modes-active/"):
+        return False
+    uid = path[len("/modes-active/") :]
+    return bool(uid) and "/" not in uid
+
+
+def _theme_colors() -> tuple[str, str]:
+    palette: dict[str, str] = {}
+    try:
+        raw = THEME_COLORS.read_text(encoding="utf-8")
+    except OSError:
+        raw = ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        value = value.strip()
+        if " #" in value:
+            value = value.split(" #", 1)[0].strip()
+        value = value.strip().strip('"').strip("'")
+        if re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+            palette[key.strip()] = value
+    accent = palette.get("accent") or palette.get("color4") or ""
+    second = palette.get("green") or palette.get("cyan") or palette.get("magenta") or accent
+    return accent, second
+
+
+def _rgb_to_hsl(red: int, green: int, blue: int) -> tuple[float, float, float]:
+    rf, gf, bf = red / 255, green / 255, blue / 255
+    high, low = max(rf, gf, bf), min(rf, gf, bf)
+    light = (high + low) / 2
+    if high == low:
+        return 0.0, 0.0, light
+    delta = high - low
+    sat = delta / (1 - abs(2 * light - 1))
+    if high == rf:
+        hue = ((gf - bf) / delta) % 6
+    elif high == gf:
+        hue = (bf - rf) / delta + 2
+    else:
+        hue = (rf - gf) / delta + 4
+    return hue / 6, sat, light
+
+
+def _hsl_to_rgb(hue: float, sat: float, light: float) -> tuple[int, int, int]:
+    def channel(n: int) -> float:
+        k = (n + hue * 12) % 12
+        a = sat * min(light, 1 - light)
+        return light - a * max(-1, min(k - 3, 9 - k, 1))
+
+    return tuple(max(0, min(255, int(round(channel(n) * 255)))) for n in (0, 8, 4))
+
+
+def _deepen_hex(value: str, amount: int) -> str:
+    """Same deepen as the LCD page: more saturation, a little less lightness."""
+    red, green, blue = _parse_hex(value)
+    hue, sat, light = _rgb_to_hsl(red, green, blue)
+    t = max(0, min(100, int(amount))) / 100
+    sat = min(1.0, sat + (1 - sat) * t * 0.55)
+    light = max(0.2, light * (1 - 0.18 * t))
+    out = _hsl_to_rgb(hue, sat, light)
+    return "#%02x%02x%02x" % out
+
+
+def _history_temps(row: dict) -> list:
+    hist = row.get("status_history") or []
+    if not hist or not isinstance(hist[-1], dict):
+        return []
+    temps = hist[-1].get("temps") or []
+    return temps if isinstance(temps, list) else []
+
+
+def _labeled_temps(device: dict, samples: list) -> list[tuple[str, float]]:
+    info = ((device.get("info") or {}).get("temps") or {}) if isinstance(device, dict) else {}
+    out: list[tuple[str, float]] = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        try:
+            temp = float(sample.get("temp"))
+        except (TypeError, ValueError):
+            continue
+        name = str(sample.get("name") or "")
+        meta = info.get(name) if isinstance(info, dict) else None
+        label = str(meta.get("label") or "") if isinstance(meta, dict) else ""
+        out.append((label or name, temp))
+    return out
+
+
+def _match_temp(rows: list[tuple[str, float]], pattern: str):
+    rx = re.compile(pattern, re.I)
+    for name, temp in rows:
+        if rx.search(name):
+            return temp
+    return None
+
+
+def _pick_temp(rows: list[tuple[str, float]], pattern: str):
+    found = _match_temp(rows, pattern)
+    if found is not None:
+        return found
+    if not rows:
+        return None
+    return max(temp for _, temp in rows)
+
+
+def _whole(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number != number:
+        return "—"
+    return str(int(round(number)))
+
+
+def _screen_numbers(face: str, devices: list, status: dict) -> tuple[str, str]:
+    info_by = {d.get("uid"): d for d in devices if isinstance(d, dict)}
+    cpu = None
+    gpu = None
+    coolant = None
+    for row in status.get("devices") or []:
+        if not isinstance(row, dict):
+            continue
+        device = info_by.get(row.get("uid")) or {}
+        labeled = _labeled_temps(device, _history_temps(row))
+        kind = str(device.get("type") or row.get("type") or "")
+        if kind == "CPU":
+            cpu = _pick_temp(labeled, r"package|tctl|tdie")
+        elif kind == "GPU":
+            gpu = _match_temp(labeled, r"gpu temp$")
+            if gpu is None:
+                gpu = _pick_temp(labeled, r"edge|gpu|temp")
+        for name, temp in labeled:
+            if re.search(r"liquid|coolant|water", name, re.I):
+                coolant = temp
+    if face in ("cpu", "cpu-gpu", "cpu-liquid"):
+        primary = _whole(cpu)
+    else:
+        primary = _whole(coolant)
+    secondary = ""
+    if face == "cpu-gpu":
+        secondary = _whole(gpu)
+    elif face == "cpu-liquid":
+        secondary = _whole(coolant)
+    return primary, secondary
+
+
+def _lcd_target(devices: list):
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        channels = (dev.get("info") or {}).get("channels") or {}
+        if not isinstance(channels, dict):
+            continue
+        for name, info in channels.items():
+            if not isinstance(info, dict) or not info.get("lcd_modes"):
+                continue
+            lcd = info.get("lcd_info") or {}
+            try:
+                width = int(lcd.get("screen_width") or 0)
+                height = int(lcd.get("screen_height") or 0)
+            except (TypeError, ValueError):
+                width, height = 0, 0
+            return str(dev.get("uid") or ""), str(name), width, height
+    return None
+
+
+def restore_saved_lcd() -> None:
+    """Put the saved pump image back at daemon orientation 0.
+
+    A mode stores its own LCD orientation. Applying it turns an image that
+    already carries the dial angle. The image upload keeps the active mode;
+    a plain LCD settings write would clear it.
+    """
+    _own(LCD_VIEW_PATH)
+    try:
+        view = json.loads(LCD_VIEW_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(view, dict):
+        return
+    devices = call("GET", "/devices", None)
+    if not devices.get("ok"):
+        return
+    body = devices.get("body")
+    devs = body if isinstance(body, list) else (body or {}).get("devices") or []
+    if not isinstance(devs, list):
+        return
+    target = _lcd_target(devs)
+    if not target or not target[0]:
+        return
+    uid, channel, width, height = target
+    status = call("GET", "/status", None)
+    status_body = status.get("body") if status.get("ok") and isinstance(status.get("body"), dict) else {"devices": []}
+    face = str(view.get("face") or "liquid")
+    primary, secondary = _screen_numbers(face, devs, status_body)
+    try:
+        brightness = int(view.get("brightness"))
+    except (TypeError, ValueError):
+        brightness = 80
+    try:
+        saturation = int(view.get("saturation"))
+    except (TypeError, ValueError):
+        saturation = 0
+    try:
+        angle = int(view.get("angle") or 0)
+    except (TypeError, ValueError):
+        angle = 0
+    shape = "square" if view.get("shape") == "square" else "round"
+    accent, second = _theme_colors()
+    ink = _deepen_hex(accent, saturation) if accent else ""
+    ink2 = _deepen_hex(second or accent, saturation) if (second or accent) else ""
+    push_lcd_image(uid, channel, brightness, face, angle, ink, ink2, primary, secondary, shape, width, height)
 
 
 def call(method: str, path: str, body) -> dict:
@@ -549,6 +805,8 @@ def watch() -> None:
                     if not chunk:
                         break
                     buf += chunk.decode("utf-8", "replace")
+                    if len(buf) > _SSE_LIMIT:
+                        break
                     while "\n\n" in buf:
                         block, buf = buf.split("\n\n", 1)
                         _parse_sse(block.replace("\r\n", "\n").replace("\r", "\n"))
@@ -562,6 +820,7 @@ def watch() -> None:
 
 
 def main() -> None:
+    _own(LCD_VIEW_PATH)
     if not read_token():
         pair(FACTORY_PASSWORD)
     token = read_token()
@@ -636,7 +895,17 @@ def main() -> None:
             continue
         if op != "call":
             continue
-        result = call(str(msg.get("method") or "GET"), str(msg.get("path") or "/"), msg.get("body"))
+        method = str(msg.get("method") or "GET").upper()
+        path = _safe_path(str(msg.get("path") or "/"))
+        if method not in _METHODS or path is None:
+            emit({"id": msg.get("id"), "ok": False, "status": 0, "error": "request refused", "body": None})
+            continue
+        result = call(method, path, msg.get("body"))
+        if result.get("ok") and method == "POST" and _mode_activate(path):
+            try:
+                restore_saved_lcd()
+            except Exception as err:  # noqa: BLE001 — the mode itself already applied
+                sys.stderr.write("omaflow lcd restore: %s\n" % err)
         result["id"] = msg.get("id")
         emit(result)
 
