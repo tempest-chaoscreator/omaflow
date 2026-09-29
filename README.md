@@ -1,10 +1,10 @@
-# OmaFlow
+# Omaflow
 
-Fan, pump, and AIO control from the [Omarchy](https://omarchy.org/) bar. Chassis fans through [fan2go](https://github.com/markusressel/fan2go), NVIDIA GPU fans through `nvidia-settings` (off until you enable them), AIO pump / radiator / LCD through [liquidctl](https://github.com/liquidctl/liquidctl). Same modes on both tabs, no separate panel for the pump.
+Omaflow Plugin is the Omarchy bar chip. Omaflow is the cooling window. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` daemon. Fan writes and sensor polls stay on that daemon's own `poll_rate` (default 1 second). Omaflow does not read sysfs and does not run `liquidctl` or `fan2go`.
 
-![OmaFlow settings](screenshots/settings.jpg)
+![Omaflow settings](screenshots/settings.jpg)
 
-![OmaFlow telemetry](screenshots/telemetry.jpg)
+![Omaflow telemetry](screenshots/telemetry.jpg)
 
 ## Compatible version
 
@@ -12,26 +12,13 @@ Fan, pump, and AIO control from the [Omarchy](https://omarchy.org/) bar. Chassis
 
 ## Dependencies
 
-OmaFlow needs these to *apply* curves. Telemetry (CPU/GPU/coolant temps, RPM) works without them.
-
 | Package | Role |
 | --- | --- |
-| [liquidctl](https://github.com/liquidctl/liquidctl) | AIO pump, radiator, LCD |
-| [fan2go](https://github.com/markusressel/fan2go) | Chassis / motherboard PWM fans |
-| `nvidia-settings` | GPU fans, only after you enable GPU on Settings |
-| Python 3 | Already on Omarchy. Pillow is used to draw a tinted liquid-temp LCD |
+| `coolercontrold` | The only control daemon. Do not install the `coolercontrol` desktop package. |
+| [liquidctl](https://github.com/liquidctl/liquidctl) | Library the daemon uses for USB coolers. Omaflow never runs it. |
+| Python 3 | Already on Omarchy. The plugin's client speaks HTTP to `127.0.0.1` only. |
 
-Open the widget the first time and press **Install dependencies**. One password installs `liquidctl` and `omaflow-system` from the Omarchy repositories. `omaflow-system` is the helper, the polkit rule, and the fan2go unit. The plugin script does not run its own program as root.
-
-Install **fan2go yourself** so `/usr/bin/fan2go` is the packaged binary. Setup does not download it. Chassis headers stay on the BIOS curve until that binary is installed and you run setup again so the unit can start.
-
-`omarchy plugin add` never runs package managers or sudo. The setup script is the only step that asks for a password.
-
-You can run the same script later:
-
-```bash
-~/.config/omarchy/plugins/tempest-chaoscreator.omaflow/setup
-```
+`coolercontrold` is not in the Omarchy package repositories. Install that package yourself. The plugin does not run a package manager, does not install a root helper, and does not keep your CoolerControl password. Pairing asks for the password once, stores a revocable token at `~/.config/omaflow/coolercontrol.token` with mode `0600`, and drops the password. Revoke the token from CoolerControl's Access Protection page.
 
 ## Hardware
 
@@ -109,10 +96,18 @@ Anything `liquidctl list` and `fan2go detect` can see. Pump duty is clamped to a
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/tempest-chaoscreator/OmaFlow.git --enable
+omarchy plugin add https://github.com/tempest-chaoscreator/omaflow-plugin.git --enable
 ```
 
-Open the chip, then **Install dependencies** if liquidctl / fan2go are not on the machine yet.
+This private repository holds both installs. Omaflow Plugin is the repository root. Omaflow, the cooling window, is `app/`.
+
+Start the daemon for this session if it is not already running. Leave it disabled at boot. Omaflow always uses `127.0.0.1:11987`. There is no address or port to type.
+
+```bash
+sudo systemctl start coolercontrold
+```
+
+A saved token connects with no prompt. If the CoolerControl password was changed, the chip asks for it once, stores a revocable token, and drops the password. When the daemon has no modes yet, Omaflow creates Silent, Performance, Fixed, and Hell from the current channel snapshot. It does not replace modes that already exist, and it does not apply an empty mode.
 
 The widget lands on the right of the bar. Move it with:
 
@@ -126,18 +121,17 @@ omarchy bar move tempest-chaoscreator.omaflow --section right
 omarchy plugin remove tempest-chaoscreator.omaflow
 ```
 
-That deletes the plugin folder and its bar entry. liquidctl and fan2go stay installed; drop liquidctl with `omarchy pkg drop liquidctl`, and remove fan2go with the same package manager you used to install it. The helper is the `omaflow-system` package: `/usr/lib/omaflow/omaflow-helper`. The unit is `/etc/systemd/system/fan2go.service`, the config is `/etc/fan2go/fan2go.yaml`, and the database is `/var/lib/omaflow/fan2go.db`. Remove the package with `omarchy pkg drop omaflow-system`.
+That deletes the plugin folder and its bar entry. `coolercontrold` and `liquidctl` stay installed. The token file stays at `~/.config/omaflow/coolercontrol.token` until you delete it. Revoke the Omaflow token in CoolerControl if you remove the plugin.
 
 ## Using it
 
 | Action | Effect |
 | --- | --- |
-| Left click the chip | Open / close the panel |
-| Right click | Toggle Silent ↔ Performance |
-| Middle click | Switch Telemetry / Settings |
-| `1`–`5` | Silent, Static, Performance, Hell, Custom |
-| `m` / `s` | Telemetry / Settings (`c` still opens Settings) |
-| Escape | Close |
+| Left click the chip | Open / close Omaflow Plugin |
+| Right click | Toggle Silent and Performance, when those modes exist |
+| `1`–`9` | Activate the mode in that position |
+| `o` | Open Omaflow |
+| Escape | Close the popover |
 
 **Telemetry** — CPU (Tctl + CCDs), GPU (temp, load, power, fan), coolant, pump, chassis RPM, one-minute sparkline. The mode buttons on this page are the ones that change the live curve.
 
@@ -147,7 +141,7 @@ Pump, AIO, and CPU each have a curve input: CPU temp or liquid temp. GPU and AIO
 
 The bottom of Settings exports and imports a JSON file of the stored curves and settings.
 
-Every channel card has a switch. Off does not stop the fan. A motherboard header (chassis, `CPU_FAN`, `AIO_PUMP`) is handed back to the BIOS curve. NVIDIA fans go back to the driver's own curve. A USB cooler has no BIOS curve, so OmaFlow simply stops sending new speeds and the device keeps the last duty — never 0%. Silent's AIO curve sits 10–15 points above the chassis curve. The AIO card opens on CPU temperature. If fan2go sees an `AIO_PUMP` header and there is no USB cooler, that header follows the Pump curve. A USB pump and that header are never driven together.
+Every channel card has a switch. Off does not stop the fan. A motherboard header (chassis, `CPU_FAN`, `AIO_PUMP`) is handed back to the BIOS curve. NVIDIA fans go back to the driver's own curve. A USB cooler has no BIOS curve, so Omaflow simply stops sending new speeds and the device keeps the last duty — never 0%. Silent's AIO curve sits 10–15 points above the chassis curve. The AIO card opens on CPU temperature. If fan2go sees an `AIO_PUMP` header and there is no USB cooler, that header follows the Pump curve. A USB pump and that header are never driven together.
 
 GPU and AIO stay off until you enable them. Chassis and Pump start on. The CPU switch is shown on its card and stays locked off when no `CPU_FAN` header is detected.
 
@@ -163,7 +157,7 @@ Pump duty never goes below 50% in any mode, including Custom — dragging a pump
 
 AIO LCD:
 
-- **Liquid temp** — coolant readout. With **Sync with theme accent** on, OmaFlow redraws it in the theme color (stock firmware liquid is white).
+- **Liquid temp** — coolant readout. With **Sync with theme accent** on, Omaflow redraws it in the theme color (stock firmware liquid is white).
 - **Theme accent** — solid fill of the Omarchy accent.
 - **Off** — black screen, brightness 0.
 

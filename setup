@@ -1,25 +1,11 @@
 #!/bin/bash
-# `omarchy plugin add` only clones files. It never installs packages.
-# This script asks Omarchy's package installer, once, for liquidctl and the
-# OmaFlow system package. That package is signed by the Omarchy repository
-# and contains the helper, the polkit rule, and the fan2go unit. This script
-# does not pass a program to sudo and does not carry a digest.
-
-set -euo pipefail
-
-echo "OmaFlow setup"
-echo "-------------"
-echo
-echo "Installing liquidctl and the OmaFlow system package."
-echo "fan2go is not downloaded. Install that package yourself if you want"
-echo "the chassis service. Setup will not fetch it."
-echo
-
-omarchy-pkg-add liquidctl omaflow-system
-
-echo
-echo "OmaFlow setup is done."
-echo "  liquidctl status   — AIO telemetry"
-echo "  fan2go detect      — chassis fans, when /usr/bin/fan2go is installed"
-echo
-echo "Open the bar chip to edit curves."
+# This generation does not install packages or a root helper.
+# coolercontrold is installed by the user. The client always uses
+# http://127.0.0.1:11987. There is no host or port to type.
+echo "Omaflow does not install packages."
+echo "Install coolercontrold yourself. Omaflow talks only to 127.0.0.1:11987."
+echo "Start it for this session. Leave it disabled at boot:"
+echo "  sudo systemctl start coolercontrold"
+echo "A saved token connects with no prompt. A fresh daemon gets Silent, Performance, Fixed, and Hell."
+echo "If the password was changed, Settings asks for it once and does not keep it."
+exit 0

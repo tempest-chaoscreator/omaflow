@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Omaflow
+GenericName=Cooling
+Comment=Fans, pumps, and the Kraken display
+Exec=/home/tempest/src/OmaFlow/app/omaflow-standalone
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Settings;
+Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
+StartupNotify=true
+StartupWMClass=org.quickshell
