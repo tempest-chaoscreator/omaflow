@@ -26,6 +26,9 @@ Item {
   readonly property color accent: Color.accent
   property color accent2: Color.accent
   property string shellRaw: ""
+  property bool uiCaptured: false
+  property real shellSpacing: 1
+  property int shellText: 12
   readonly property color bg: Color.background
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property color muted: Qt.rgba(fg.r, fg.g, fg.b, 0.55)
@@ -164,9 +167,31 @@ Item {
 
   function applyShell(raw) {
     var next = String(raw || "")
-    if (next === shellRaw) return
-    shellRaw = next
-    Color.loadShell(next)
+    if (next !== shellRaw) {
+      shellRaw = next
+      Color.loadShell(next)
+      shellSpacing = Style.spacingScale
+      shellText = Style.font.baseSize
+      uiCaptured = true
+    }
+    applyWindowPrefs()
+  }
+
+  // Text size is this window only. Fill does not change the rail, the LCD,
+  // or this font. The chart, the mode curve, and the speedometers read it.
+  function applyWindowPrefs() {
+    if (!uiCaptured) return
+    var follow = !service || service.textFollow !== false
+    var chosen = follow ? shellText : Math.max(1, Number(service && service.textSize) || shellText)
+    if (Math.abs(Style.spacingScale - shellSpacing) > 0.01) Style.spacingScale = shellSpacing
+    if (Style.fontBaseSize !== chosen) Style.fontBaseSize = chosen
+  }
+
+  Connections {
+    target: root.service
+    function onDynamicScaleChanged() { root.applyWindowPrefs() }
+    function onTextFollowChanged() { root.applyWindowPrefs() }
+    function onTextSizeChanged() { root.applyWindowPrefs() }
   }
 
   function reloadTheme() {
@@ -266,6 +291,8 @@ Item {
     implicitHeight: 680
     minimumSize: Qt.size(760, 520)
     visible: false
+    onWidthChanged: root.applyWindowPrefs()
+    onHeightChanged: root.applyWindowPrefs()
 
     onVisibleChanged: {
       if (visible || root.closingFromHost) return
@@ -285,7 +312,7 @@ Item {
 
         Rectangle {
           id: rail
-          width: 184
+          width: Style.space(184)
           height: parent.height
           color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
 
@@ -442,7 +469,7 @@ Item {
               font.pixelSize: Style.space(13)
               text: root.service && root.service.lastError
                 ? root.service.lastError
-                : "Omaflow reads coolercontrold. Start the daemon, then pair from Settings."
+                : "Omaflow reads coolercontrold. It connects when the daemon is up. Start it with the PC from Settings."
             }
 
             Flickable {
@@ -466,6 +493,8 @@ Item {
                   width: parent.width
                   service: root.service
                   keyed: root.pageKeyed && root.page === "monitor"
+                  fill: root.service && root.service.dynamicScale === true
+                  viewHeight: pageFlick.height
                   fg: root.fg
                   accent: root.accent
                   fontFamily: root.fontFamily
@@ -477,6 +506,8 @@ Item {
                   width: parent.width
                   service: root.service
                   keyed: root.pageKeyed && root.page === "modes"
+                  fill: root.service && root.service.dynamicScale === true
+                  viewHeight: pageFlick.height
                   fg: root.fg
                   accent: root.accent
                   fontFamily: root.fontFamily
@@ -520,6 +551,7 @@ Item {
                   width: parent.width
                   service: root.service
                   keyed: root.pageKeyed && root.page === "settings"
+                  shellTextPx: root.shellText
                   fg: root.fg
                   accent: root.accent
                   fontFamily: root.fontFamily

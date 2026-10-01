@@ -36,6 +36,13 @@ Item {
   property var groups: []
   property var links: ({})
   property var hiddenDevices: ({})
+  property bool dynamicScale: false
+  property bool textFollow: true
+  property int textSize: 12
+  property bool showBar: true
+  property bool uiReady: false
+  property bool showBarHeld: false
+  property var curvePack: ({})
   property bool modesKnown: false
   property bool defaultsPlanted: false
 
@@ -307,25 +314,109 @@ Item {
     return !!(hiddenDevices && hiddenDevices[uid] === true)
   }
 
-  // Names only, and only when the daemon has no modes at all.
-  // Does not activate a mode and does not write a fan curve.
+  // Only when the daemon has no modes at all. A daemon that already has
+  // Silent, Performance, Fixed, or Hell is left alone, including its curves.
   function ensureDefaultModes() {
     if (defaultsPlanted || !modesKnown) return
     if (!devices || devices.length === 0) return
     var names = Cc.missingDefaultModes(modes)
     defaultsPlanted = true
     if (!names.length) return
-    createDefaultModes(names, 0)
+    createDefaultModes(names)
   }
 
-  function createDefaultModes(names, index) {
-    if (index >= names.length) {
-      refresh()
+  // Hell, Fixed, and Performance are snapshotted first. Silent is last and
+  // is the mode left running, so a new install does not stay on Hell.
+  function createDefaultModes(names) {
+    var want = ({})
+    var i
+    for (i = 0; i < names.length; i++) want[String(names[i] || "").toLowerCase()] = true
+    var order = ["Hell", "Fixed", "Performance", "Silent"]
+    var list = []
+    for (i = 0; i < order.length; i++) if (want[order[i].toLowerCase()]) list.push(order[i])
+    plantDefaultMode(list, 0)
+  }
+
+  function plantDefaultMode(order, index) {
+    if (index >= order.length) {
+      finishDefaultModes()
       return
     }
-    call("POST", "/modes", { name: names[index] }, function(res) {
+    var name = order[index]
+    var channels = Cc.speedChannels(devices)
+    var temp = Cc.defaultTempSource(devices) || Cc.tempSourceFor(devices, "GPU")
+    function snapshot() {
+      call("POST", "/modes", { name: name, uid: newUid() }, function(res) {
+        if (!res.ok) return fail(res)
+        plantDefaultMode(order, index + 1)
+      })
+    }
+    if (!channels.length || !temp) {
+      snapshot()
+      return
+    }
+    assignModeDefaults(name, channels, temp, snapshot)
+  }
+
+  function assignModeDefaults(modeName, channels, temp, done) {
+    var fans = []
+    var pumps = []
+    var i
+    for (i = 0; i < channels.length; i++) {
+      if (channels[i].isPump) pumps.push(channels[i])
+      else fans.push(channels[i])
+    }
+    function bindAll(uid, rows, next) {
+      var at = 0
+      function step() {
+        if (at >= rows.length) {
+          next()
+          return
+        }
+        var channel = rows[at++]
+        var path = "/devices/" + encodeURIComponent(channel.deviceUid) + "/settings/" + encodeURIComponent(channel.name) + "/profile"
+        call("PUT", path, { profile_uid: uid }, function(res) {
+          if (!res.ok) return fail(res)
+          step()
+        })
+      }
+      step()
+    }
+    function plantPumps() {
+      if (!pumps.length) {
+        if (done) done()
+        return
+      }
+      createGraph(modeName + " pump", Cc.modeDefaultPoints(modeName, true), temp, 50, function(uid) {
+        bindAll(uid, pumps, done)
+      })
+    }
+    if (!fans.length) {
+      plantPumps()
+      return
+    }
+    createGraph(modeName + " fans", Cc.modeDefaultPoints(modeName, false), temp, 0, function(uid) {
+      bindAll(uid, fans, plantPumps)
+    })
+  }
+
+  function finishDefaultModes() {
+    call("GET", "/modes", null, function(res) {
       if (!res.ok) return fail(res)
-      createDefaultModes(names, index + 1)
+      var found = (res.body && res.body.modes) || []
+      var silent = ""
+      var i
+      for (i = 0; i < found.length; i++) {
+        if (found[i] && String(found[i].name || "").toLowerCase() === "silent") silent = found[i].uid || ""
+      }
+      if (!silent) {
+        refresh()
+        return
+      }
+      call("POST", "/modes-active/" + encodeURIComponent(silent), {}, function(active) {
+        if (!active.ok) return fail(active)
+        refresh()
+      })
     })
   }
 
@@ -488,7 +579,130 @@ Item {
     })
   }
 
-  function saveGraphs(jobs, done) {
+  function loadUi() {
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      var body = res && res.body ? res.body : ({})
+      dynamicScale = body.dynamicScale === true
+      textFollow = body.textFollow !== false
+      var size = Number(body.textSize)
+      if (isFinite(size) && size > 0) textSize = size
+      // A toggle that landed before this read must not be put back.
+      if (!showBarHeld) showBar = body.showBar !== false
+      uiReady = true
+    }
+    pending = next
+    send({ op: "ui-get", id: id })
+  }
+
+  function setUi(patch) {
+    var body = {
+      dynamicScale: dynamicScale,
+      textFollow: textFollow,
+      textSize: textSize
+    }
+    // Leave showBar out until the file has been read, unless this patch sets it.
+    if (uiReady) body.showBar = showBar
+    var src = patch || ({})
+    if (src.dynamicScale !== undefined) body.dynamicScale = src.dynamicScale === true
+    if (src.textFollow !== undefined) body.textFollow = src.textFollow !== false
+    if (src.textSize !== undefined) body.textSize = Number(src.textSize)
+    if (src.showBar !== undefined) {
+      body.showBar = src.showBar !== false
+      showBarHeld = true
+    }
+    dynamicScale = body.dynamicScale
+    textFollow = body.textFollow
+    textSize = body.textSize
+    if (body.showBar !== undefined) showBar = body.showBar
+    var id = rpcId
+    rpcId = rpcId + 1
+    send({ op: "ui-set", id: id, body: body })
+  }
+
+  function loadPack() {
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      var body = res && res.body ? res.body : ({})
+      curvePack = body && body.kind === "omaflow-curves" ? body : ({})
+    }
+    pending = next
+    send({ op: "pack-get", id: id })
+  }
+
+  function setCurvePack(pack) {
+    curvePack = pack || ({})
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      if (!res.ok) fail(res)
+    }
+    pending = next
+    send({ op: "pack-set", id: id, body: pack })
+  }
+
+  function clearCurvePack() {
+    curvePack = ({})
+    send({ op: "pack-clear", id: rpcId })
+    rpcId = rpcId + 1
+  }
+
+  function consumePackMode(name) {
+    var pack = curvePack
+    if (!pack || pack.kind !== "omaflow-curves") return
+    var want = String(name || "").toLowerCase()
+    var kept = []
+    var modesIn = pack.modes || []
+    var i
+    for (i = 0; i < modesIn.length; i++) {
+      var mode = modesIn[i]
+      if (!mode || String(mode.name || "").toLowerCase() === want) continue
+      kept.push(mode)
+    }
+    if (kept.length === (pack.modes || []).length) return
+    if (!kept.length) {
+      clearCurvePack()
+      return
+    }
+    var next = ({})
+    for (var k in pack) next[k] = pack[k]
+    next.modes = kept
+    setCurvePack(next)
+  }
+
+  function writeUserFile(path, body, done) {
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      if (done) done(res)
+    }
+    pending = next
+    send({ op: "file-write", id: id, path: path, body: body })
+  }
+
+  function readUserFile(path, done) {
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      if (done) done(res)
+    }
+    pending = next
+    send({ op: "file-read", id: id, path: path })
+  }
+
+  function saveGraphs(modeUid, jobs, done) {
     var index = 0
     var list = jobs || []
     function step() {
@@ -497,6 +711,12 @@ Item {
         return
       }
       var job = list[index++]
+      // A shared profile is one object. Writing it would move every mode
+      // that still points at it. Those jobs are copied instead.
+      if (Cc.otherModeUsesProfile(modes, job.profileUid, modeUid)) {
+        lastError = "That curve is used by another mode, so it was not written"
+        return
+      }
       var profile = Cc.profileByUid(profiles, job.profileUid)
       if (!profile) {
         lastError = "That curve is not a saved profile"
@@ -511,17 +731,119 @@ Item {
     step()
   }
 
+  // A CoolerControl profile is one object. Two modes that store the same
+  // profile uid share that curve, so a write moves both. Copy the profile
+  // and point only this mode at the copy.
+  function splitCurveJobs(uid, jobs) {
+    var own = []
+    var shared = []
+    var list = jobs || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var job = list[i]
+      if (!job || !job.profileUid) continue
+      if (Cc.otherModeUsesProfile(modes, job.profileUid, uid)) shared.push(job)
+      else own.push(job)
+    }
+    return { own: own, shared: shared }
+  }
+
+  function cloneGraph(profile, points, minDuty, name, done) {
+    var draft = JSON.parse(JSON.stringify(profile))
+    draft.uid = newUid()
+    draft.name = String(name || "Curve").slice(0, 48)
+    var shaped = Cc.withGraphPoints(draft, points, minDuty)
+    call("POST", "/profiles", shaped, function(res) {
+      if (!res.ok) return fail(res)
+      if (done) done(draft.uid)
+    })
+  }
+
+  function assignChannels(channels, profileUid, done) {
+    var index = 0
+    var list = channels || []
+    function step() {
+      if (index >= list.length) {
+        if (done) done()
+        return
+      }
+      var channel = list[index++]
+      if (!channel || !channel.deviceUid || !channel.name) {
+        step()
+        return
+      }
+      var path = "/devices/" + encodeURIComponent(channel.deviceUid) + "/settings/" + encodeURIComponent(channel.name) + "/profile"
+      call("PUT", path, { profile_uid: profileUid }, function(res) {
+        if (!res.ok) return fail(res)
+        step()
+      })
+    }
+    step()
+  }
+
+  // The mode is already the running one, so its live channels match what it
+  // stored. Only the cloned channels differ. The snapshot writes those back.
+  // CoolerControl has no call that retargets one stored channel on its own.
+  function retargetShared(uid, jobs, done) {
+    var index = 0
+    var list = []
+    var seen = ({})
+    var raw = jobs || []
+    var n
+    for (n = 0; n < raw.length; n++) {
+      var item = raw[n]
+      if (!item || !item.profileUid || seen[item.profileUid]) continue
+      seen[item.profileUid] = true
+      list.push(item)
+    }
+    var mode = Cc.modeByUid(modes, uid)
+    var modeName = mode && mode.name ? mode.name : "Mode"
+    function step() {
+      if (index >= list.length) {
+        call("PUT", "/modes/" + encodeURIComponent(uid) + "/settings", {}, function(res) {
+          if (!res.ok) return fail(res)
+          refresh()
+          if (done) done()
+        })
+        return
+      }
+      var job = list[index++]
+      var profile = Cc.profileByUid(profiles, job.profileUid)
+      if (!profile) {
+        lastError = "That curve is not a saved profile"
+        return
+      }
+      var channels = Cc.modeProfileChannels(mode, job.profileUid)
+      if (!channels.length) {
+        step()
+        return
+      }
+      var copyName = (modeName + " " + (profile.name || "curve") + " " + newUid().slice(0, 4)).replace(/\s+/g, " ")
+      cloneGraph(profile, job.points, job.minDuty, copyName, function(newId) {
+        assignChannels(channels, newId, step)
+      })
+    }
+    step()
+  }
+
   // Writes the curves this mode is showing, then runs the mode.
   // An empty mode is refused: activating one makes the daemon reset every channel.
+  // A profile another mode still uses is copied after this mode is running,
+  // so the write does not move the other mode.
   function applyModeCurves(uid, jobs, done) {
     if (!uid) return
-    saveGraphs(jobs || [], function() {
+    var split = splitCurveJobs(uid, jobs)
+    saveGraphs(uid, split.own, function() {
       call("POST", "/modes-active/" + encodeURIComponent(uid), {}, function(res) {
         if (!res.ok) return fail(res)
         activeModeUid = String(uid)
         notice = ""
-        refresh()
-        if (done) done()
+        if (!split.shared.length) {
+          refresh()
+          if (done) done()
+          return
+        }
+        retargetShared(uid, split.shared, done)
       })
     })
   }
@@ -543,6 +865,10 @@ Item {
   }
 
   function saveGraph(profileUid, points, minDuty) {
+    if (Cc.profileModeCount(modes, profileUid) > 1) {
+      lastError = "That curve is used by another mode, so it was not written"
+      return
+    }
     var profile = Cc.profileByUid(profiles, profileUid)
     if (!profile) {
       lastError = "That curve is not a saved profile"
@@ -631,12 +957,19 @@ Item {
     if (msg.event === "hello") {
       restartDelayMs = 2000
       connection = msg.token ? "down" : "need-token"
+      loadUi()
+      loadPack()
       if (msg.token) refresh()
       else lastError = "Pair coolercontrold with ~/.config/omaflow/coolercontrol.token"
       return
     }
     if (msg.event === "up") {
-      if (connection !== "unauthorized" && connection !== "need-token") connection = "ready"
+      if (connection !== "unauthorized" && connection !== "need-token") {
+        connection = "ready"
+        // The daemon can appear after this process started. Status events
+        // alone do not load devices, modes, or profiles.
+        refresh()
+      }
       return
     }
     if (msg.event === "down") {

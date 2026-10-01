@@ -1,11 +1,41 @@
 #!/bin/bash
-# This generation does not install packages or a root helper.
-# coolercontrold is installed by the user. The client always uses
-# http://127.0.0.1:11987. There is no host or port to type.
+# Install the Omaflow desktop launcher for this clone. Does not install
+# packages, does not enable coolercontrold, and does not touch the bar.
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+launcher="$root/app/omaflow-standalone"
+if [[ ! -x "$launcher" ]]; then
+  chmod +x "$launcher"
+fi
+desk_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$desk_dir"
+desk="$desk_dir/omaflow-standalone.desktop"
+cat > "$desk" << EOF
+[Desktop Entry]
+Type=Application
+Name=Omaflow
+GenericName=Cooling
+Comment=Fans, the pump, and an AIO LCD
+Exec=$launcher
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Settings;
+Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
+StartupNotify=true
+StartupWMClass=org.quickshell
+EOF
+chmod 644 "$desk"
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$desk_dir" >/dev/null 2>&1 || true
+fi
+echo "Desktop launcher written to $desk"
 echo "Omaflow does not install packages."
 echo "Install coolercontrold yourself. Omaflow talks only to 127.0.0.1:11987."
-echo "Start it for this session. Leave it disabled at boot:"
+echo "Start it for this session, or enable it so it starts with the PC:"
 echo "  sudo systemctl start coolercontrold"
-echo "A saved token connects with no prompt. A fresh daemon gets Silent, Performance, Fixed, and Hell."
+echo "  sudo systemctl enable --now coolercontrold"
+echo "The bar chip is this same repository:"
+echo "  omarchy plugin add https://github.com/tempest-chaoscreator/omaflow.git --enable"
+echo "A saved token connects with no prompt. A fresh daemon gets Silent, Performance, Fixed, and Hell, each with its own default curve. Silent is left running."
+echo "Modes that already exist are left as they are."
 echo "If the password was changed, Settings asks for it once and does not keep it."
-exit 0

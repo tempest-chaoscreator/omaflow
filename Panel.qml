@@ -55,7 +55,11 @@ Panel {
 
   function openStandalone() {
     var shell = root.bar && root.bar.shell
-    if (shell && typeof shell.summon === "function") shell.summon(root.moduleName, "")
+    if (shell && typeof shell.summon === "function") {
+      shell.summon(root.moduleName, "")
+      return
+    }
+    launchWindow.running = true
   }
 
   function ensureMode() {
@@ -120,6 +124,11 @@ Panel {
     tab = "telemetry"
     ensureMode()
     navIndex = 0
+  }
+
+  Process {
+    id: launchWindow
+    command: ["gtk-launch", "omaflow-standalone"]
   }
 
   IpcHandler {
@@ -187,7 +196,7 @@ Panel {
 
           Item {
             width: parent.width
-            height: Math.max(brand.implicitHeight, flavor.implicitHeight)
+            height: Math.max(brand.implicitHeight, flavor.implicitHeight + Style.space(4))
 
             Text {
               id: brand
@@ -200,19 +209,29 @@ Panel {
               font.bold: true
             }
 
-            Text {
-              id: flavor
-              anchors.left: brand.right
-              anchors.leftMargin: Style.space(12)
+            // The phrase sizes the frame. The frame does not size the phrase,
+            // or the chip collapses and the line disappears.
+            Rectangle {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              horizontalAlignment: Text.AlignRight
-              elide: Text.ElideRight
+              width: flavor.implicitWidth + Style.space(10)
+              height: flavor.implicitHeight + Style.space(4)
+              radius: 0
+              color: "transparent"
+              border.width: 1
+              border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
+            }
+
+            Text {
+              id: flavor
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(5)
+              anchors.verticalCenter: parent.verticalCenter
               text: Model.flavorText(
                 root.mode ? root.mode.name : root.activeModeName,
                 Model.hottest(root.temps)
               )
-              color: Qt.darker(root.fg, 1.35)
+              color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.space(13)
               font.bold: true

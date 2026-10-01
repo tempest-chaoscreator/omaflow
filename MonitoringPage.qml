@@ -16,6 +16,8 @@ Column {
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property string fontFamily: Style.font.family
   property int chartHeight: Style.space(168)
+  property bool fill: false
+  property int viewHeight: 0
 
   property var history: ({ tctl: [], gpu: [], liquid: [] })
   property var stableGauges: []
@@ -121,9 +123,22 @@ Column {
       return map[String(uid || "")] === true
     }
 
+    // A header we are driving that never reports a tach is empty. A GPU fan
+    // at 0% is stopped by the card and spins up with load, so it stays.
+    function presentOnBoard(src) {
+      if (!src) return false
+      var rpm = Number(src.rpm)
+      if (isFinite(rpm) && rpm > 0) return true
+      if (String(src.deviceType || "") === "GPU") return true
+      if (src.duty === null || src.duty === undefined || src.duty === "") return false
+      var duty = Number(src.duty)
+      return isFinite(duty) && duty <= 0
+    }
+
     function keep(src) {
       if (!src || !src.key || byKey[src.key]) return
       if (deviceConcealed(src.deviceUid)) return
+      if (!presentOnBoard(src)) return
       byKey[src.key] = {
         key: src.key,
         label: src.label || src.name || "",
@@ -135,8 +150,7 @@ Column {
     }
     var i
     for (i = 0; i < members.length; i++) keep(members[i])
-    var spinning = Cc.spinningChannels(channels, order)
-    for (i = 0; i < spinning.length; i++) keep(spinning[i])
+    for (i = 0; i < channels.length; i++) keep(channels[i])
 
     var out = []
     var claimed = ({})
@@ -191,7 +205,11 @@ Column {
 
   function dutyOf(key) {
     var live = liveOf(key)
-    if (!live || live.duty === null || live.duty === undefined || live.duty === "") return -1
+    if (!live) return -1
+    if (live.duty === null || live.duty === undefined || live.duty === "") {
+      var rpm = Number(live.rpm)
+      return isFinite(rpm) && rpm <= 0 ? 0 : -1
+    }
     var n = Number(live.duty)
     return isFinite(n) ? Math.max(0, Math.min(100, n)) : -1
   }
@@ -202,7 +220,26 @@ Column {
     return isFinite(n) ? Math.round(n) + " rpm" : "—"
   }
 
-  readonly property int gaugeNatural: Style.space(72)
+  // Graphs take the spare height. Chips grow a little, and stop well short of that.
+  readonly property real chipScale: {
+    if (!fill) return 1
+    var fitW = width > 0 ? width / 1100 : 1
+    var fitH = viewHeight > 0 ? viewHeight / 720 : 1
+    var fit = Math.min(fitW, fitH)
+    if (fit < 1) fit = 1
+    var scale = 1 + (fit - 1) * 0.16
+    if (scale > 1.18) scale = 1.18
+    return scale
+  }
+  readonly property int gaugeNatural: Math.round(Style.space(72) * chipScale)
+  readonly property int chipText: Math.round(Style.space(11) * chipScale)
+  readonly property int drawnChart: {
+    var base = chartHeight
+    if (!fill || !visible || viewHeight < 1) return base
+    var gauges = gaugeRow.visible ? gaugeRow.height : 0
+    var room = viewHeight - tempWrap.height - gauges - spacing * 2
+    return room > base ? room : base
+  }
 
   function gaugeWeight(card) {
     var n = card && card.rows ? card.rows.length : 0
@@ -284,35 +321,14 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         anchors.margins: Style.space(10)
         spacing: Style.space(2)
-        Item {
-          id: cpuTitle
+        ChipTitle {
           width: parent.width
-          height: Math.max(cpuGlyph.height, cpuTitleText.implicitHeight)
-          OpticalGlyph {
-            id: cpuGlyph
-            anchors.left: parent.left
-            anchors.top: parent.top
-            width: Style.space(16)
-            height: Style.space(16)
-            text: "\uF4BC"
-            fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            color: root.fg
-          }
-          Text {
-            id: cpuTitleText
-            anchors.left: cpuGlyph.right
-            anchors.leftMargin: Style.space(6)
-            anchors.right: parent.right
-            text: cpuChip.hot ? root.fullName(root.temps.cpuName, "CPU") : "CPU"
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            wrapMode: Text.WordWrap
-            maximumLineCount: 2
-            elide: Text.ElideRight
-          }
+          mark: "\uF4BC"
+          label: cpuChip.hot ? root.fullName(root.temps.cpuName, "CPU") : "CPU"
+          color: root.fg
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          wrapLines: 2
         }
         Text {
           text: root.tempText(root.temps.cpu)
@@ -350,35 +366,14 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         anchors.margins: Style.space(10)
         spacing: Style.space(2)
-        Item {
-          id: gpuTitle
+        ChipTitle {
           width: parent.width
-          height: Math.max(gpuGlyph.height, gpuTitleText.implicitHeight)
-          OpticalGlyph {
-            id: gpuGlyph
-            anchors.left: parent.left
-            anchors.top: parent.top
-            width: Style.space(16)
-            height: Style.space(16)
-            text: "\uE266"
-            fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            color: root.fg
-          }
-          Text {
-            id: gpuTitleText
-            anchors.left: gpuGlyph.right
-            anchors.leftMargin: Style.space(6)
-            anchors.right: parent.right
-            text: gpuChip.hot ? root.fullName(root.temps.gpuName, "GPU") : "GPU"
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            wrapMode: Text.WordWrap
-            maximumLineCount: 2
-            elide: Text.ElideRight
-          }
+          mark: "\uE266"
+          label: gpuChip.hot ? root.fullName(root.temps.gpuName, "GPU") : "GPU"
+          color: root.fg
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          wrapLines: 2
         }
         Text {
           text: root.tempText(root.temps.gpu)
@@ -419,34 +414,14 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         anchors.margins: Style.space(10)
         spacing: Style.space(2)
-        Item {
-          id: liquidTitle
+        ChipTitle {
           width: parent.width
-          height: Math.max(liquidGlyph.height, liquidTitleText.implicitHeight)
-          OpticalGlyph {
-            id: liquidGlyph
-            anchors.left: parent.left
-            anchors.top: parent.top
-            width: Style.space(16)
-            height: Style.space(16)
-            // nf-md-water_thermometer_outline U+F1A86
-            text: "\uDB86\uDE86"
-            fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            color: root.fg
-          }
-          Text {
-            id: liquidTitleText
-            anchors.left: liquidGlyph.right
-            anchors.leftMargin: Style.space(6)
-            anchors.right: parent.right
-            text: "Liquid"
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            elide: Text.ElideRight
-          }
+          // nf-md-water_thermometer_outline U+F1A86
+          mark: "\uDB86\uDE86"
+          label: "Liquid"
+          color: root.fg
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
         }
         Text {
           text: root.tempText(root.temps.coolant)
@@ -483,7 +458,7 @@ Column {
 
   TimeChart {
     width: parent.width
-    height: root.chartHeight
+    height: root.drawnChart
     series: root.chartSeries()
     foreground: root.fg
     fontFamily: root.fontFamily
@@ -527,7 +502,7 @@ Column {
               : String(gaugeCard.modelData.name || "Device").toUpperCase()
             color: root.fg
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Math.round(Style.font.caption * root.chipScale)
             font.bold: true
             font.letterSpacing: gaugeCard.modelData.kind === "shared" ? 0 : 0.6
             elide: Text.ElideRight
@@ -556,7 +531,7 @@ Column {
                     text: modelData.label || ""
                     color: root.muted
                     font.family: root.fontFamily
-                    font.pixelSize: Style.space(11)
+                    font.pixelSize: root.chipText
                     elide: Text.ElideRight
                   }
 
@@ -569,6 +544,7 @@ Column {
                       width: gaugeCard.side
                       height: gaugeCard.side
                       percent: root.dutyOf(modelData.key)
+                      textScale: root.chipScale
                       foreground: root.fg
                       accent: root.accent
                       fontFamily: root.fontFamily
@@ -581,7 +557,7 @@ Column {
                     text: root.rpmOf(modelData.key)
                     color: root.fg
                     font.family: root.fontFamily
-                    font.pixelSize: Style.space(11)
+                    font.pixelSize: root.chipText
                     elide: Text.ElideRight
                   }
                 }

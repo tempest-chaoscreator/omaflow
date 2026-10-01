@@ -431,6 +431,303 @@ function defaultPoints(isPump) {
   return spreadPoints([[0, 25], [50, 45], [70, 70], [100, 100]], 0)
 }
 
+// Shipped shapes for a daemon that has no modes yet. These are not a
+// machine's saved curves. Pumps stay at or above 50%.
+function modeDefaultPoints(name, isPump) {
+  var key = String(name || "").replace(/^\s+|\s+$/g, "").toLowerCase()
+  if (isPump) {
+    if (key === "silent") return spreadPoints([[0, 50], [60, 58], [80, 70], [100, 80]], 50)
+    if (key === "performance") return spreadPoints([[0, 55], [45, 70], [70, 85], [100, 100]], 50)
+    if (key === "fixed") return spreadPoints([[0, 60], [100, 60]], 50)
+    if (key === "hell") return spreadPoints([[0, 70], [40, 85], [70, 100], [100, 100]], 50)
+    return defaultPoints(true)
+  }
+  if (key === "silent") return spreadPoints([[0, 20], [50, 28], [70, 40], [100, 65]], 0)
+  if (key === "performance") return spreadPoints([[0, 30], [40, 50], [60, 75], [100, 100]], 0)
+  if (key === "fixed") return spreadPoints([[0, 50], [100, 50]], 0)
+  if (key === "hell") return spreadPoints([[0, 45], [35, 70], [55, 100], [100, 100]], 0)
+  return defaultPoints(false)
+}
+
+function speedChannels(devices) {
+  var out = []
+  var devs = devices || []
+  var d
+  for (d = 0; d < devs.length; d++) {
+    var dev = devs[d]
+    if (!dev || !dev.uid || !dev.info) continue
+    var infoChannels = dev.info.channels || {}
+    var name
+    for (name in infoChannels) {
+      if (!Object.prototype.hasOwnProperty.call(infoChannels, name)) continue
+      var info = infoChannels[name] || {}
+      if (!info.speed_options) continue
+      var profilesOn = info.speed_options.profiles_enabled !== false
+      var fixedOn = info.speed_options.fixed_enabled !== false
+      if (!profilesOn && !fixedOn) continue
+      var label = info.label || name
+      var pump = isPumpName(name, label)
+      var deviceMin = Number(info.speed_options.min_duty)
+      if (!isFinite(deviceMin)) deviceMin = 0
+      out.push({
+        deviceUid: dev.uid,
+        name: name,
+        isPump: pump,
+        minDuty: pump ? Math.max(deviceMin, 50) : deviceMin
+      })
+    }
+  }
+  return out
+}
+
+function modeSettingRows(mode) {
+  var rows = mode && mode.device_settings
+  if (!rows) return []
+  if (rows.length !== undefined && typeof rows !== "string") return rows
+  var out = []
+  var key
+  for (key in rows) {
+    if (!Object.prototype.hasOwnProperty.call(rows, key)) continue
+    out.push([key, rows[key]])
+  }
+  return out
+}
+
+function modeUsesProfile(mode, profileUid) {
+  if (!mode || !profileUid) return false
+  var rows = modeSettingRows(mode)
+  var r
+  var s
+  for (r = 0; r < rows.length; r++) {
+    var settings = (rows[r] && rows[r][1]) || []
+    for (s = 0; s < settings.length; s++) {
+      if (settings[s] && settings[s].profile_uid === profileUid) return true
+    }
+  }
+  return false
+}
+
+function otherModeUsesProfile(modes, profileUid, modeUid) {
+  if (!profileUid) return false
+  var list = modes || []
+  var m
+  for (m = 0; m < list.length; m++) {
+    var mode = list[m]
+    if (!mode || mode.uid === modeUid) continue
+    if (modeUsesProfile(mode, profileUid)) return true
+  }
+  return false
+}
+
+function profileModeCount(modes, profileUid) {
+  if (!profileUid) return 0
+  var list = modes || []
+  var count = 0
+  var m
+  for (m = 0; m < list.length; m++) {
+    if (modeUsesProfile(list[m], profileUid)) count++
+  }
+  return count
+}
+
+function modeProfileChannels(mode, profileUid) {
+  var out = []
+  if (!mode || !profileUid) return out
+  var rows = modeSettingRows(mode)
+  var r
+  var s
+  for (r = 0; r < rows.length; r++) {
+    var deviceUid = rows[r] && rows[r][0]
+    var settings = (rows[r] && rows[r][1]) || []
+    for (s = 0; s < settings.length; s++) {
+      var setting = settings[s]
+      if (!setting || setting.profile_uid !== profileUid || !setting.channel_name) continue
+      out.push({ deviceUid: deviceUid, name: setting.channel_name })
+    }
+  }
+  return out
+}
+
+function matchChannel(channels, deviceName, channelName) {
+  var wantDevice = String(deviceName || "").toLowerCase()
+  var wantChannel = String(channelName || "").toLowerCase()
+  if (!wantDevice || !wantChannel) return null
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var row = list[i]
+    if (!row) continue
+    if (String(row.deviceName || "").toLowerCase() !== wantDevice) continue
+    var channel = String(row.name || "").toLowerCase()
+    var label = String(row.label || "").toLowerCase()
+    if (channel === wantChannel || label === wantChannel) return row
+  }
+  return null
+}
+
+function packPoints(pack, modeName, deviceName, channelName) {
+  if (!pack || pack.kind !== "omaflow-curves") return null
+  var want = String(modeName || "").toLowerCase()
+  var modes = pack.modes || []
+  var i
+  var c
+  for (i = 0; i < modes.length; i++) {
+    var mode = modes[i]
+    if (!mode || String(mode.name || "").toLowerCase() !== want) continue
+    var rows = mode.channels || []
+    for (c = 0; c < rows.length; c++) {
+      var row = rows[c]
+      if (!row) continue
+      if (String(row.deviceName || "").toLowerCase() !== String(deviceName || "").toLowerCase()) continue
+      var channel = String(channelName || "").toLowerCase()
+      if (String(row.channel || "").toLowerCase() !== channel && String(row.label || "").toLowerCase() !== channel) continue
+      return row.points && row.points.length > 1 ? row.points : null
+    }
+  }
+  return null
+}
+
+function copyPointList(points) {
+  var copy = []
+  var src = points || []
+  var i
+  for (i = 0; i < src.length; i++) {
+    if (!src[i] || src[i].length < 2) continue
+    var temp = Number(src[i][0])
+    var duty = Number(src[i][1])
+    if (!isFinite(temp) || !isFinite(duty)) continue
+    copy.push([temp, duty])
+  }
+  return copy
+}
+
+function samePointList(a, b) {
+  var left = a || []
+  var right = b || []
+  if (left.length !== right.length) return false
+  var i
+  for (i = 0; i < left.length; i++) {
+    if (!left[i] || !right[i]) return false
+    if (Number(left[i][0]) !== Number(right[i][0])) return false
+    if (Number(left[i][1]) !== Number(right[i][1])) return false
+  }
+  return true
+}
+
+// One curve's undo stack. `entry` is { steps, index } or empty.
+// A new edit drops the redo tail and keeps the curve that was on screen,
+// so the first undo can return to it. No visible change returns null.
+function pushCurveHistory(entry, before, after, limit) {
+  var nextPoints = copyPointList(after)
+  if (nextPoints.length < 2) return null
+  var steps = []
+  var i
+  if (entry && entry.steps && entry.steps.length) {
+    var keep = (Number(entry.index) || 0) + 1
+    if (keep < 1) keep = 1
+    if (keep > entry.steps.length) keep = entry.steps.length
+    for (i = 0; i < keep; i++) steps.push(entry.steps[i])
+  }
+  if (!steps.length) {
+    var base = copyPointList(before)
+    if (base.length > 1) steps.push(base)
+  }
+  if (!steps.length || samePointList(steps[steps.length - 1], nextPoints)) return null
+  steps.push(nextPoints)
+  var index = steps.length - 1
+  var cap = Number(limit) || 40
+  if (cap < 2) cap = 2
+  if (steps.length > cap) {
+    var drop = steps.length - cap
+    steps = steps.slice(drop)
+    index = index - drop
+    if (index < 0) index = 0
+  }
+  return { steps: steps, index: index }
+}
+
+function buildCurvePack(modes, channels, profiles, groups) {
+  var byKey = {}
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) if (list[i] && list[i].key) byKey[list[i].key] = list[i]
+  var modeOut = []
+  var modeList = modes || []
+  for (i = 0; i < modeList.length; i++) {
+    var mode = modeList[i]
+    if (!mode || !mode.name) continue
+    var members = modeMembers(mode, channels, profiles)
+    var rows = []
+    var m
+    for (m = 0; m < members.length; m++) {
+      var member = members[m]
+      if (!member.points || member.points.length < 2) continue
+      rows.push({
+        deviceName: member.deviceName || "",
+        channel: member.name || "",
+        label: member.label || "",
+        points: member.points,
+        minDuty: Number(member.minDuty) || 0,
+        profileName: member.profileName || ""
+      })
+    }
+    modeOut.push({ name: mode.name, channels: rows })
+  }
+  var groupOut = []
+  var saved = groups || []
+  for (i = 0; i < saved.length; i++) {
+    var group = saved[i]
+    if (!group) continue
+    var membersOut = []
+    var keys = group.members || []
+    var k
+    for (k = 0; k < keys.length; k++) {
+      var channel = byKey[keys[k]]
+      if (!channel) continue
+      membersOut.push({
+        deviceName: channel.deviceName || "",
+        channel: channel.name || "",
+        label: channel.label || ""
+      })
+    }
+    if (membersOut.length < 2) continue
+    groupOut.push({ name: group.name || "Group", members: membersOut })
+  }
+  return { kind: "omaflow-curves", version: 1, modes: modeOut, groups: groupOut }
+}
+
+function validCurvePack(pack) {
+  return !!(pack && pack.kind === "omaflow-curves" && Number(pack.version) === 1 && pack.modes && pack.modes.length >= 0)
+}
+
+function remapGroups(pack, channels, newId) {
+  var out = []
+  if (!pack) return out
+  var saved = pack.groups || []
+  var i
+  var k
+  for (i = 0; i < saved.length; i++) {
+    var group = saved[i]
+    if (!group) continue
+    var members = []
+    var rows = group.members || []
+    for (k = 0; k < rows.length; k++) {
+      var row = rows[k]
+      var channel = matchChannel(channels, row && row.deviceName, row && (row.channel || row.label))
+      if (!channel || !channel.key) continue
+      if (members.indexOf(channel.key) < 0) members.push(channel.key)
+    }
+    if (members.length < 2) continue
+    out.push({
+      id: newId ? newId() : ("group-" + i),
+      name: group.name || "Group",
+      profileUid: "",
+      members: members
+    })
+  }
+  return out
+}
+
 function modeMembers(mode, channels, profiles) {
   var byKey = {}
   var list = channels || []

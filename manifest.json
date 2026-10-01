@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "id": "tempest-chaoscreator.omaflow",
-  "name": "Omaflow Plugin",
-  "version": "2.0.0",
+  "name": "Omaflow",
+  "version": "0.1.0",
   "author": "Tempest",
   "license": "MIT",
-  "homepage": "https://github.com/tempest-chaoscreator/omaflow-plugin",
-  "description": "Omaflow Plugin is the bar chip. Omaflow is the cooling window. Both are clients of coolercontrold.",
+  "homepage": "https://github.com/tempest-chaoscreator/omaflow",
+  "description": "Omaflow is the cooling window and the Omarchy bar chip. Both talk to coolercontrold.",
   "kinds": [
     "service",
     "bar-widget",
@@ -18,8 +18,8 @@
     "panel": "Standalone.qml"
   },
   "barWidget": {
-    "displayName": "Omaflow Plugin",
-    "description": "Telemetry and the selected mode. Open Omaflow for everything else.",
+    "displayName": "Omaflow",
+    "description": "Telemetry and the selected mode.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",

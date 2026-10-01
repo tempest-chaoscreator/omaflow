@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Show or hide the Omaflow Plugin bar chip.
+"""Show or hide the Omaflow bar chip.
 
 status prints whether the chip is enabled.
-enable copies this 2.0.0 tree into the plugin directory, keeps one 1.3.0
-backup, and asks Omarchy to show the chip.
+enable installs https://github.com/tempest-chaoscreator/omaflow when the
+plugin directory is missing, and otherwise only asks Omarchy to show it.
+A 1.x install is left in place and reported as an error.
 disable takes the chip off the bar and leaves the files in place.
 
 This does not enable coolercontrold, and it does not run as root.
@@ -18,16 +19,9 @@ import sys
 from pathlib import Path
 
 PLUGIN_ID = "tempest-chaoscreator.omaflow"
-SRC = Path(__file__).resolve().parents[1]
+REPO = "https://github.com/tempest-chaoscreator/omaflow.git"
 DEST = Path.home() / ".config" / "omarchy" / "plugins" / PLUGIN_ID
 BACKUP = Path.home() / ".config" / "omaflow" / "plugin-1.3.0"
-SKIP_DIRS = {"app", "packaging", "screenshots", ".git", "__pycache__"}
-SKIP_FILES = {"setup", "README.md", "preview.png"}
-# Leftover 1.3.0 writer scripts. Dropped from the plugin directory on enable.
-STALE = (
-    "scripts/omaflow_bridge.py",
-    "scripts/omaflow_helper.py",
-)
 
 
 def emit(obj: dict) -> None:
@@ -94,25 +88,14 @@ def backup_legacy() -> None:
     )
 
 
-def install_tree() -> None:
-    DEST.mkdir(parents=True, exist_ok=True)
-    for path in SRC.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(SRC)
-        if any(part in SKIP_DIRS for part in rel.parts):
-            continue
-        if rel.name in SKIP_FILES or rel.suffix == ".pyc":
-            continue
-        if rel.parts and rel.parts[0] == "scripts" and rel.name not in {"cc_client.py", "bar_plugin.py"}:
-            continue
-        target = DEST / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-    for name in STALE:
-        stale = DEST / name
-        if stale.is_file():
-            stale.unlink()
+def installed_version() -> str:
+    manifest = DEST / "manifest.json"
+    if not manifest.is_file():
+        return ""
+    try:
+        return str(json.loads(manifest.read_text()).get("version") or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
 
 
 def omarchy(action: str) -> subprocess.CompletedProcess[str]:
@@ -125,15 +108,36 @@ def omarchy(action: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def fail_state(detail: str) -> dict:
+    state = plugin_state()
+    state["ok"] = False
+    state["error"] = (detail or "could not enable the plugin").splitlines()[-1][:180]
+    return state
+
+
 def enable() -> dict:
-    backup_legacy()
-    install_tree()
+    version = installed_version()
+    if version.startswith("1."):
+        backup_legacy()
+        return fail_state("Remove the old Omaflow plugin, then add the 0.1 repository")
+    if not version:
+        result = subprocess.run(
+            ["omarchy", "plugin", "add", REPO, "--enable", "--yes"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        state = plugin_state()
+        if result.returncode != 0 or not state.get("enabled"):
+            detail = (result.stderr or result.stdout or "could not install the plugin").strip()
+            return fail_state(detail)
+        return state
     result = omarchy("enable")
     state = plugin_state()
     if result.returncode != 0 or not state.get("enabled"):
         detail = (result.stderr or result.stdout or "could not enable the plugin").strip()
-        state["ok"] = False
-        state["error"] = detail.splitlines()[-1][:180] if detail else "could not enable the plugin"
+        return fail_state(detail)
     return state
 
 

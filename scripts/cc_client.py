@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,7 +28,11 @@ GROUPS_PATH = TOKEN_PATH.with_name("groups.json")
 LINKS_PATH = TOKEN_PATH.with_name("links.json")
 HIDDEN_PATH = TOKEN_PATH.with_name("hidden.json")
 LCD_VIEW_PATH = TOKEN_PATH.with_name("lcd-view.json")
+UI_PATH = TOKEN_PATH.with_name("ui.json")
+PACK_PATH = TOKEN_PATH.with_name("curve-pack.json")
 THEME_COLORS = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
+_TEXT_STOPS = {9, 10, 11, 12, 14, 16, 20}
+_FILE_LIMIT = 1_000_000
 _METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
 _SSE_LIMIT = 1_000_000
 # Factory password shipped by coolercontrold. Tried once, only when no token
@@ -171,6 +176,143 @@ def write_hidden(data: dict) -> None:
     finally:
         os.close(fd)
     os.chmod(HIDDEN_PATH, 0o600)
+
+
+def read_ui() -> dict:
+    default = {"dynamicScale": False, "textFollow": True, "textSize": 12, "showBar": True}
+    try:
+        raw = json.loads(UI_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    if not isinstance(raw, dict):
+        return default
+    try:
+        size = int(raw.get("textSize"))
+    except (TypeError, ValueError):
+        size = 12
+    if size not in _TEXT_STOPS:
+        size = 12
+    return {
+        "dynamicScale": raw.get("dynamicScale") is True,
+        "textFollow": raw.get("textFollow") is not False,
+        "textSize": size,
+        # Absent means on. Only an explicit false keeps the chip off.
+        "showBar": raw.get("showBar") is not False,
+    }
+
+
+def write_ui(data: dict) -> None:
+    clean = read_ui()
+    if isinstance(data, dict):
+        if "dynamicScale" in data:
+            clean["dynamicScale"] = data.get("dynamicScale") is True
+        if "textFollow" in data:
+            clean["textFollow"] = data.get("textFollow") is not False
+        if "textSize" in data:
+            try:
+                size = int(data.get("textSize"))
+            except (TypeError, ValueError):
+                size = clean["textSize"]
+            if size in _TEXT_STOPS:
+                clean["textSize"] = size
+        if "showBar" in data:
+            clean["showBar"] = data.get("showBar") is not False
+    _write_private(UI_PATH, json.dumps(clean, indent=2).encode("utf-8"))
+
+
+def read_pack() -> dict:
+    try:
+        raw = json.loads(PACK_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("kind") != "omaflow-curves":
+        return {}
+    return raw
+
+
+def write_pack(data: dict) -> None:
+    if not isinstance(data, dict) or data.get("kind") != "omaflow-curves":
+        raise ValueError("not an omaflow curve pack")
+    payload = json.dumps(data, indent=2).encode("utf-8")
+    if len(payload) > _FILE_LIMIT:
+        raise ValueError("curve pack is too large")
+    _write_private(PACK_PATH, payload)
+
+
+def clear_pack() -> None:
+    try:
+        PACK_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _user_target(path_text: str) -> Path | None:
+    """A regular file under the home directory. No symlink escape."""
+    home = Path.home().resolve()
+    raw = Path(str(path_text or "")).expanduser()
+    if not raw.is_absolute():
+        raw = home / raw
+    if raw.name.startswith(".") or not raw.name or len(raw.name) > 180:
+        return None
+    if raw.suffix.lower() != ".json":
+        return None
+    parent = raw.parent
+    try:
+        parent_resolved = parent.resolve()
+    except OSError:
+        return None
+    if parent_resolved != home and home not in parent_resolved.parents:
+        return None
+    if parent.is_symlink():
+        return None
+    return parent_resolved / raw.name
+
+
+def read_user_json(path_text: str) -> dict:
+    target = _user_target(path_text)
+    if target is None:
+        return {"ok": False, "status": 400, "error": "Choose a .json file inside your home directory", "body": None}
+    try:
+        if not target.is_file() or target.is_symlink():
+            return {"ok": False, "status": 400, "error": "That file is not there", "body": None}
+        if target.stat().st_size > _FILE_LIMIT:
+            return {"ok": False, "status": 400, "error": "That file is too large", "body": None}
+        body = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False, "status": 400, "error": "That file is not readable JSON", "body": None}
+    if not isinstance(body, dict):
+        return {"ok": False, "status": 400, "error": "That file is not a curve pack", "body": None}
+    return {"ok": True, "status": 200, "error": "", "body": body}
+
+
+def write_user_json(path_text: str, body: dict) -> dict:
+    target = _user_target(path_text)
+    if target is None:
+        return {"ok": False, "status": 400, "error": "Choose a .json file inside your home directory", "body": None}
+    if not isinstance(body, dict):
+        return {"ok": False, "status": 400, "error": "Nothing to write", "body": None}
+    payload = json.dumps(body, indent=2).encode("utf-8")
+    if len(payload) > _FILE_LIMIT:
+        return {"ok": False, "status": 400, "error": "Curve pack is too large", "body": None}
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_private(target, payload)
+    except OSError as err:
+        return {"ok": False, "status": 400, "error": str(err), "body": None}
+    return {"ok": True, "status": 200, "error": "", "body": {"path": str(target)}}
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
 
 
 def write_links(data: dict) -> None:
@@ -684,25 +826,36 @@ def restore_saved_lcd() -> None:
     """Put the saved pump image back at daemon orientation 0.
 
     A mode stores its own LCD orientation. Applying it turns an image that
-    already carries the dial angle. The image upload keeps the active mode;
-    a plain LCD settings write would clear it.
+    already carries the dial angle. The Kraken driver bakes the register it
+    reads into the pixels, so the upload that writes 0 is followed by a
+    second upload. The image upload keeps the active mode; a plain LCD
+    settings write would clear it.
     """
+    def give_up(reason: str) -> None:
+        sys.stderr.write("omaflow lcd restore: %s\n" % reason)
+        sys.stderr.flush()
+
     _own(LCD_VIEW_PATH)
     try:
         view = json.loads(LCD_VIEW_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        give_up("saved lcd view is unreadable")
         return
     if not isinstance(view, dict):
+        give_up("saved lcd view is unreadable")
         return
     devices = call("GET", "/devices", None)
     if not devices.get("ok"):
+        give_up(devices.get("error") or "device list rejected")
         return
     body = devices.get("body")
     devs = body if isinstance(body, list) else (body or {}).get("devices") or []
     if not isinstance(devs, list):
+        give_up("device list rejected")
         return
     target = _lcd_target(devs)
     if not target or not target[0]:
+        give_up("no lcd channel")
         return
     uid, channel, width, height = target
     status = call("GET", "/status", None)
@@ -725,7 +878,28 @@ def restore_saved_lcd() -> None:
     accent, second = _theme_colors()
     ink = _deepen_hex(accent, saturation) if accent else ""
     ink2 = _deepen_hex(second or accent, saturation) if (second or accent) else ""
-    push_lcd_image(uid, channel, brightness, face, angle, ink, ink2, primary, secondary, shape, width, height)
+
+    def push_once() -> dict:
+        return push_lcd_image(
+            uid, channel, brightness, face, angle, ink, ink2, primary, secondary, shape, width, height
+        )
+
+    # liquidctl reads the Kraken orientation register and bakes that turn into
+    # the pixels. The upload that writes orientation 0 can still bake the
+    # mode's previous angle. The next upload reads the register after that write.
+    result = push_once()
+    if not result.get("ok"):
+        time.sleep(0.4)
+        result = push_once()
+    if result.get("ok"):
+        time.sleep(0.35)
+        result = push_once()
+    if not result.get("ok"):
+        time.sleep(0.4)
+        result = push_once()
+    if not result.get("ok"):
+        sys.stderr.write("omaflow lcd restore: %s\n" % (result.get("error") or "image rejected"))
+        sys.stderr.flush()
 
 
 def call(method: str, path: str, body) -> dict:
@@ -867,6 +1041,41 @@ def main() -> None:
             body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
             write_hidden(body)
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": None})
+            continue
+        if op == "ui-get":
+            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_ui()})
+            continue
+        if op == "ui-set":
+            body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
+            write_ui(body)
+            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_ui()})
+            continue
+        if op == "pack-get":
+            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_pack()})
+            continue
+        if op == "pack-set":
+            body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
+            try:
+                write_pack(body)
+            except ValueError as err:
+                emit({"id": msg.get("id"), "ok": False, "status": 400, "error": str(err), "body": None})
+                continue
+            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_pack()})
+            continue
+        if op == "pack-clear":
+            clear_pack()
+            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": {}})
+            continue
+        if op == "file-read":
+            result = read_user_json(str(msg.get("path") or ""))
+            result["id"] = msg.get("id")
+            emit(result)
+            continue
+        if op == "file-write":
+            body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
+            result = write_user_json(str(msg.get("path") or ""), body)
+            result["id"] = msg.get("id")
+            emit(result)
             continue
         if op == "pair":
             result = pair(str(msg.get("password") or ""))

@@ -2,8 +2,8 @@
 Type=Application
 Name=Omaflow
 GenericName=Cooling
-Comment=Fans, pumps, and the Kraken display
-Exec=/home/tempest/src/OmaFlow/app/omaflow-standalone
+Comment=Fans, the pump, and an AIO LCD
+Exec=omaflow-standalone
 Icon=utilities-system-monitor
 Terminal=false
 Categories=System;Settings;

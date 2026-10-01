@@ -26,6 +26,27 @@ Column {
   readonly property var curveBoard: buildCurves()
   readonly property string curveSig: curveSignature(curveBoard)
 
+  function concealed(uid) {
+    var map = service && service.hiddenDevices ? service.hiddenDevices : ({})
+    return map[String(uid || "")] === true
+  }
+
+  function groupNames(key) {
+    var names = []
+    var groups = service && service.groups ? service.groups : []
+    var i
+    var m
+    for (i = 0; i < groups.length; i++) {
+      var members = groups[i].members || []
+      for (m = 0; m < members.length; m++) {
+        if (members[m] !== key) continue
+        var name = groups[i].name || "Group"
+        if (names.indexOf(name) < 0) names.push(name)
+      }
+    }
+    return names
+  }
+
   function buildCurves() {
     if (!mode || !service) return []
     var members = Cc.modeMembers(mode, service.channels, service.profiles)
@@ -33,11 +54,13 @@ Column {
     var by = ({})
     for (var i = 0; i < members.length; i++) {
       var row = members[i]
+      if (concealed(row.deviceUid)) continue
       var id = row.profileUid || ("fixed:" + row.key)
       if (!by[id]) {
         by[id] = {
           id: id,
           labels: [],
+          groups: [],
           points: row.points || [],
           fixed: row.fixed,
           minDuty: Number(row.minDuty) || 0,
@@ -45,7 +68,14 @@ Column {
         }
         order.push(id)
       }
-      by[id].labels.push(row.label || row.name || "")
+      var fan = row.label || row.name || ""
+      var device = row.deviceName || ""
+      by[id].labels.push(device ? (device + "  ·  " + fan) : fan)
+      var names = groupNames(row.key)
+      var g
+      for (g = 0; g < names.length; g++) {
+        if (by[id].groups.indexOf(names[g]) < 0) by[id].groups.push(names[g])
+      }
       if (row.isPump) {
         by[id].pump = true
         by[id].minDuty = Math.max(by[id].minDuty, Number(row.minDuty) || 0)
@@ -65,6 +95,7 @@ Column {
       var ends = pts.length ? (pts[0][0] + "," + pts[0][1] + ":" + pts[pts.length - 1][0] + "," + pts[pts.length - 1][1]) : ""
       parts.push([
         card.id || "",
+        (card.groups || []).join("+"),
         (card.labels || []).join("+"),
         String(pts.length),
         ends,
@@ -102,6 +133,17 @@ Column {
       required property var modelData
       width: root.width
       spacing: Style.space(4)
+
+      Text {
+        width: parent.width
+        visible: (modelData.groups || []).length > 0
+        text: (modelData.groups || []).join("  ·  ")
+        color: root.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        elide: Text.ElideRight
+      }
 
       Text {
         width: parent.width

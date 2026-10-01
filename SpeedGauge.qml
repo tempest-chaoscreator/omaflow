@@ -7,6 +7,7 @@ Item {
   id: root
 
   property real percent: -1
+  property real textScale: 1
   property color foreground: Color.foreground
   property color accent: Color.accent
   property string fontFamily: Style.font.family
@@ -17,6 +18,7 @@ Item {
   onPercentChanged: shown = known ? Math.max(0, Math.min(100, percent)) : 0
   Behavior on shown { NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
   onShownChanged: dial.requestPaint()
+  onTextScaleChanged: dial.requestPaint()
   onWidthChanged: dial.requestPaint()
   onHeightChanged: dial.requestPaint()
   Component.onCompleted: dial.requestPaint()
@@ -34,7 +36,7 @@ Item {
       var start = Math.PI * 0.75
       var sweep = Math.PI * 1.5
       var span = root.known ? Math.max(0, Math.min(1, root.shown / 100)) : 0
-      ctx.lineWidth = Math.max(2, Style.space(3))
+      ctx.lineWidth = Math.max(2, Style.space(3) * Math.max(1, root.textScale))
       ctx.lineCap = "butt"
       ctx.strokeStyle = Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
       ctx.beginPath()
@@ -66,7 +68,7 @@ Item {
     text: root.known ? Math.round(root.shown) + "%" : "—"
     color: root.foreground
     font.family: root.fontFamily
-    font.pixelSize: Style.space(12)
+    font.pixelSize: Math.round(Style.space(12) * Math.max(1, root.textScale))
     font.bold: true
   }
 }

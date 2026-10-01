@@ -37,6 +37,8 @@ Column {
   spacing: Style.space(12)
 
   readonly property var screen: service && service.lcdChannels && service.lcdChannels.length ? service.lcdChannels[0] : null
+  // lcdChannels is a new array on every poll. Follow the channel, not that array.
+  readonly property string screenKey: screen ? (String(screen.deviceUid || "") + "/" + String(screen.name || "")) : ""
   readonly property var temps: service && service.temps ? service.temps : ({})
   readonly property color ink: deepen(accent, saturation)
   readonly property color ink2: deepen(accent2, saturation)
@@ -175,7 +177,7 @@ Column {
   function finishView() {
     if (viewReady) return
     viewReady = true
-    if (visible && screen && !lcdReady) pull()
+    if (screen && !lcdReady) pull()
   }
 
   function writeView() {
@@ -212,7 +214,7 @@ Column {
         }
       }
       root.lcdReady = true
-      if (root.syncOn && root.visible) root.push()
+      if (root.syncOn) root.push()
     })
   }
 
@@ -335,10 +337,11 @@ Column {
   }
 
   onVisibleChanged: if (visible && viewReady && screen && !lcdReady) pull()
-  onScreenChanged: {
+  onScreenKeyChanged: {
+    if (!screenKey) return
     lcdReady = false
     pushed = ""
-    if (visible && viewReady && screen) pull()
+    if (viewReady && screen) pull()
   }
   onFaceChanged: {
     saveView()
@@ -372,7 +375,7 @@ Column {
   Timer {
     interval: 5000
     repeat: true
-    running: root.visible && root.syncOn && root.lcdReady && root.viewReady && root.screen !== null
+    running: root.syncOn && root.lcdReady && root.viewReady && root.screen !== null && root.service && root.service.connection === "ready"
     onTriggered: if (root.mark() !== root.pushed) root.push()
   }
 

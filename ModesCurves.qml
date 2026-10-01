@@ -6,11 +6,15 @@ import "Nav.js" as Nav
 
 // Modes page. One curve for the selected fan. Edits stay on that fan's
 // profile when another fan is selected. Apply writes them and runs the mode.
-// A shared group keeps the switch; the original fan row is grey and has none.
+// Undo and redo walk those edits. Reset restores an imported curve, or the
+// curve this mode already has. A shared group keeps the switch; the original
+// fan row is grey and has none.
 Column {
   id: root
 
   property var service: null
+  property bool fill: false
+  property int viewHeight: 0
   property color fg: Color.foreground
   property color accent: Color.accent
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
@@ -25,6 +29,7 @@ Column {
   property bool keyed: false
   property int navIndex: 0
   property var drafts: ({})
+  property var curveHistory: ({})
   property string renamingId: ""
   property string renameText: ""
 
@@ -200,6 +205,14 @@ Column {
   readonly property string eyeOff: "\uDB81\uDED1"
   // nf-md-trash_can_outline U+F0A7A
   readonly property string trash: "\uDB82\uDE7A"
+  // nf-md-undo U+F054C, nf-md-redo U+F044E
+  readonly property string undoGlyph: "\uDB81\uDD4C"
+  readonly property string redoGlyph: "\uDB81\uDC4E"
+  readonly property var curveToolModel: [
+    { kind: "undo" },
+    { kind: "redo" },
+    { kind: "reset" }
+  ]
   readonly property var pickList: {
     var open = []
     var used = []
@@ -244,6 +257,11 @@ Column {
     var saved = listedGroups
     for (var s = 0; s < saved.length; s++) out.push({ kind: "drop-group", id: saved[s].id, x: s, y: 40 })
     for (var n = 0; n < customModes.length; n++) out.push({ kind: "drop-mode", uid: customModes[n].uid, x: n, y: 41 })
+    if (graphLive && graphHistKey) {
+      out.push({ kind: "undo", x: 0, y: 36 })
+      out.push({ kind: "redo", x: 1, y: 36 })
+      out.push({ kind: "reset", x: 2, y: 36 })
+    }
     return out
   }
   readonly property var selected: rowByKey(memberKey)
@@ -267,6 +285,49 @@ Column {
     return []
   }
   readonly property bool graphLive: graphPoints.length > 1
+  // Profiles this graph writes, under this mode. A linked card is one stack,
+  // and Fixed's edits stay off Hell even when they still share a profile uid.
+  readonly property string graphHistKey: {
+    if (!mode || !mode.uid) return ""
+    var row = graphSubject
+    if (!row) return ""
+    var ids = []
+    var seen = ({})
+    var card = cardFor(row.key)
+    if (!row.isPump && card && cardLinked(card)) {
+      var list = card.rows || []
+      var i
+      for (i = 0; i < list.length; i++) {
+        var item = list[i]
+        if (!fanInCard(card, item)) continue
+        var uid = profileUidFor(item)
+        if (!uid || seen[uid]) continue
+        seen[uid] = true
+        ids.push(uid)
+      }
+    }
+    if (!ids.length) {
+      var one = profileUidFor(row)
+      if (one) ids.push(one)
+    }
+    if (!ids.length) return ""
+    ids.sort()
+    return mode.uid + "\n" + ids.join("\n")
+  }
+  readonly property bool canUndo: {
+    var entry = graphHistKey ? curveHistory[graphHistKey] : null
+    return !!(entry && entry.steps && entry.index > 0)
+  }
+  readonly property bool canRedo: {
+    var entry = graphHistKey ? curveHistory[graphHistKey] : null
+    return !!(entry && entry.steps && entry.index < entry.steps.length - 1)
+  }
+  readonly property bool canReset: {
+    if (!graphLive || !graphHistKey) return false
+    var base = baselinePoints()
+    if (!base || base.length < 2) return false
+    return !Cc.samePointList(graphPoints, base)
+  }
   readonly property int modeH: Style.space(32)
   readonly property int applyWidth: modeH + Style.space(20)
   readonly property bool modeApplied: mode && service && mode.uid === service.activeModeUid
@@ -461,18 +522,41 @@ Column {
     return floor
   }
 
+  // Drafts stay on this mode. Two modes can store the same CoolerControl
+  // profile uid, and a shared key would make Fixed's edit draw on Hell.
+  function draftKey(profileUid) {
+    if (!mode || !mode.uid || !profileUid) return ""
+    return mode.uid + "\n" + profileUid
+  }
+
   function pointsFor(row) {
     var uid = profileUidFor(row)
-    if (uid && drafts[uid] && drafts[uid].length) return drafts[uid]
+    var key = draftKey(uid)
+    if (key && drafts[key] && drafts[key].length) return drafts[key]
+    var packed = Cc.packPoints(
+      service && service.curvePack,
+      mode && mode.name,
+      row && row.deviceName,
+      row && row.name
+    )
+    if (packed && packed.length > 1) return packed
     if (row && row.points && row.points.length) return row.points
     return []
   }
 
   function rememberDraft(uid, points) {
-    if (!uid) return
+    var key = draftKey(uid)
+    if (!key) return
     var next = ({})
     for (var k in drafts) next[k] = drafts[k]
-    next[uid] = points
+    var copy = []
+    var src = points || []
+    var i
+    for (i = 0; i < src.length; i++) {
+      if (!src[i] || src[i].length < 2) continue
+      copy.push([Number(src[i][0]), Number(src[i][1])])
+    }
+    next[key] = copy
     drafts = next
   }
 
@@ -524,13 +608,18 @@ Column {
       return
     }
     var jobs = curveJobs()
-    var uids = []
-    for (var i = 0; i < jobs.length; i++) uids.push(jobs[i].profileUid)
+    var appliedUid = mode.uid
+    var appliedName = mode.name
     service.lastError = ""
-    service.applyModeCurves(mode.uid, jobs, function() {
+    service.applyModeCurves(appliedUid, jobs, function() {
+      var prefix = appliedUid + "\n"
       var next = ({})
-      for (var k in drafts) if (uids.indexOf(k) < 0) next[k] = drafts[k]
+      for (var k in drafts) if (String(k).indexOf(prefix) !== 0) next[k] = drafts[k]
       drafts = next
+      var hist = ({})
+      for (var h in curveHistory) if (String(h).indexOf(prefix) !== 0) hist[h] = curveHistory[h]
+      curveHistory = hist
+      if (service.consumePackMode) service.consumePackMode(appliedName)
     })
   }
 
@@ -591,6 +680,8 @@ Column {
       if (service) service.forgetGroup(item.id)
     } else if (item.kind === "drop-mode") {
       removeMode(item.uid)
+    } else if (item.kind === "undo" || item.kind === "redo" || item.kind === "reset") {
+      useCurveTool(item.kind)
     }
   }
 
@@ -740,26 +831,85 @@ Column {
     service.setCardLink(uid, !cardLinked(card))
   }
 
+  // Imported points win. Otherwise the curve saved on this mode, then the
+  // built-in fan or pump curve. Reset does not write coolercontrold.
+  function baselinePoints() {
+    var row = graphSubject
+    if (!row) return []
+    var packed = Cc.packPoints(
+      service && service.curvePack,
+      mode && mode.name,
+      row.deviceName,
+      row.name
+    )
+    if (packed && packed.length > 1) return packed
+    if (row.points && row.points.length > 1) return row.points
+    return Cc.defaultPoints(!!row.isPump)
+  }
+
+  function noteGraphEdit(points) {
+    var key = graphHistKey
+    if (!key) return false
+    var entry = Cc.pushCurveHistory(curveHistory[key], graphPoints, points, 40)
+    if (!entry) return false
+    var next = ({})
+    for (var k in curveHistory) next[k] = curveHistory[k]
+    next[key] = entry
+    curveHistory = next
+    return true
+  }
+
+  function writeGraphDrafts(points) {
+    var key = graphHistKey
+    if (!key) return
+    var parts = key.split("\n")
+    var i
+    for (i = 1; i < parts.length; i++) if (parts[i]) rememberDraft(parts[i], points)
+  }
+
+  function moveGraphHistory(dir) {
+    var key = graphHistKey
+    var entry = key && curveHistory[key]
+    if (!entry || !entry.steps) return
+    var index = (Number(entry.index) || 0) + dir
+    if (index < 0 || index >= entry.steps.length) return
+    var next = ({})
+    for (var k in curveHistory) next[k] = curveHistory[k]
+    next[key] = { steps: entry.steps, index: index }
+    curveHistory = next
+    writeGraphDrafts(entry.steps[index])
+  }
+
+  function undoGraph() {
+    moveGraphHistory(-1)
+  }
+
+  function redoGraph() {
+    moveGraphHistory(1)
+  }
+
+  function resetGraph() {
+    if (!canReset) return
+    var base = baselinePoints()
+    if (!noteGraphEdit(base)) return
+    writeGraphDrafts(base)
+  }
+
+  function useCurveTool(kind) {
+    if (kind === "undo") undoGraph()
+    else if (kind === "redo") redoGraph()
+    else if (kind === "reset") resetGraph()
+  }
+
+  function curveToolTip(kind) {
+    if (kind === "undo") return "Undo the last change to this curve"
+    if (kind === "redo") return "Redo the curve change"
+    return "Restore the imported curve, or the curve this mode already has"
+  }
+
   function storeGraph(points) {
-    var row = graphRow()
-    if (!row) return
-    var card = cardFor(row.key)
-    if (!row.isPump && card && cardLinked(card)) {
-      var list = card.rows || []
-      var seen = ({})
-      var wrote = false
-      for (var i = 0; i < list.length; i++) {
-        var item = list[i]
-        if (!fanInCard(card, item)) continue
-        var uid = profileUidFor(item)
-        if (!uid || seen[uid]) continue
-        seen[uid] = true
-        rememberDraft(uid, points)
-        wrote = true
-      }
-      if (wrote) return
-    }
-    rememberDraft(profileUidFor(row), points)
+    if (!noteGraphEdit(points)) return
+    writeGraphDrafts(points)
   }
 
   readonly property var sharedKeys: {
@@ -911,7 +1061,15 @@ Column {
 
     CurveView {
       width: parent.width
-      height: root.graphLive ? Style.space(200) : 0
+      height: {
+        var base = Style.space(200)
+        if (!root.graphLive) return 0
+        if (!root.fill || !root.visible || root.viewHeight < 1) return base
+        var above = modeRow.height + deviceFlow.height + Style.space(28)
+        var below = groupCreateRow.height + modeCreateRow.height + Style.space(170)
+        var room = root.viewHeight - above - below
+        return room > base ? room : base
+      }
       visible: height > 0
       interactive: root.graphLive
       points: root.graphPoints
@@ -923,17 +1081,110 @@ Column {
       onPointsEdited: function(points) { root.storeGraph(points) }
     }
 
-    Text {
+    Item {
+      id: captionRow
       width: parent.width
-      wrapMode: Text.WordWrap
-      text: root.graphLive
-        ? root.graphCaption()
-        : (root.graphSubject && root.graphSubject.inMode
-          ? "This channel has no curve in " + root.mode.name + " yet."
-          : "Switch this fan on to keep a curve for it in " + (root.mode ? root.mode.name : "this mode") + ".")
-      color: root.muted
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+      height: Math.max(captionText.implicitHeight, curveTools.visible ? curveTools.height : 0)
+
+      Text {
+        id: captionText
+        width: curveTools.visible
+          ? Math.max(0, captionRow.width - curveTools.width - Style.space(8))
+          : captionRow.width
+        anchors.verticalCenter: parent.verticalCenter
+        elide: root.graphLive ? Text.ElideRight : Text.ElideNone
+        wrapMode: root.graphLive ? Text.NoWrap : Text.WordWrap
+        text: root.graphLive
+          ? root.graphCaption()
+          : (root.graphSubject && root.graphSubject.inMode
+            ? "This channel has no curve in " + root.mode.name + " yet."
+            : "Switch this fan on to keep a curve for it in " + (root.mode ? root.mode.name : "this mode") + ".")
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Row {
+        id: curveTools
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.graphLive
+        spacing: Style.space(4)
+        height: Style.space(22)
+
+        Repeater {
+          model: root.curveToolModel
+          delegate: Item {
+            id: tool
+            required property var modelData
+            readonly property string kind: modelData.kind
+            readonly property bool on: kind === "undo" ? root.canUndo : (kind === "redo" ? root.canRedo : root.canReset)
+            readonly property bool aimed: {
+              var item = root.navAt()
+              return root.keyed && item && item.kind === kind
+            }
+            width: kind === "reset" ? toolWord.implicitWidth + Style.space(12) : Style.space(22)
+            height: Style.space(22)
+
+            Item {
+              anchors.fill: parent
+              opacity: tool.on ? 1 : 0.35
+
+              Rectangle {
+                anchors.fill: parent
+                radius: 0
+                color: tool.aimed
+                  ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                  : (toolMouse.containsMouse && tool.on
+                    ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
+                    : "transparent")
+                border.width: tool.kind === "reset" ? 1 : 0
+                border.color: tool.aimed ? root.accent : root.line
+              }
+
+              OpticalGlyph {
+                visible: tool.kind !== "reset"
+                anchors.centerIn: parent
+                width: Style.space(16)
+                height: Style.space(16)
+                text: tool.kind === "undo" ? root.undoGlyph : root.redoGlyph
+                fontFamily: root.fontFamily
+                fontSize: Style.space(16)
+                color: tool.aimed || (toolMouse.containsMouse && tool.on) ? root.accent : root.fg
+              }
+
+              Text {
+                id: toolWord
+                anchors.centerIn: parent
+                visible: tool.kind === "reset"
+                text: "Reset"
+                color: tool.aimed || (toolMouse.containsMouse && tool.on) ? root.accent : root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            MouseArea {
+              id: toolMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: tool.on ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onClicked: {
+                if (tool.on) root.useCurveTool(tool.kind)
+              }
+            }
+
+            PanelToolTip {
+              visible: toolMouse.containsMouse
+              text: root.curveToolTip(tool.kind)
+              fontFamily: root.fontFamily
+              panelBackground: Color.background
+              panelForeground: Color.foreground
+              panelBorder: Color.accent
+            }
+          }
+        }
+      }
     }
   }
 
