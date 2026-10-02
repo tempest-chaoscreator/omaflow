@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """JSON-line client for coolercontrold on 127.0.0.1.
 
-Speaks HTTP only. It does not open sysfs, USB, or liquidctl.
-Sensor reads and fan writes stay on the daemon's poll_rate
-(default 1 second). This client never changes that setting.
+Speaks HTTP only to 127.0.0.1:11987. The password and the bearer token
+are written only after the accepted socket is identified as coolercontrold.
+Redirects are refused, so those credentials are not forwarded. The client
+does not open sysfs, USB, or liquidctl. Sensor reads and fan writes stay
+on the daemon's poll_rate (default 1 second). This client never changes
+that setting.
 """
 
 from __future__ import annotations
 
 import base64
+import errno
+import http.client
 import io
 import json
 import os
 import re
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +30,10 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 
 BASE = "http://127.0.0.1:11987"
+_DAEMON_HOST = "127.0.0.1"
+_DAEMON_PORT = 11987
+_DAEMON_CGROUP = "/system.slice/coolercontrold.service"
+_LISTENER_REJECTED = "listener on 127.0.0.1:11987 is not coolercontrold"
 TOKEN_PATH = Path.home() / ".config" / "omaflow" / "coolercontrol.token"
 GROUPS_PATH = TOKEN_PATH.with_name("groups.json")
 LINKS_PATH = TOKEN_PATH.with_name("links.json")
@@ -59,6 +70,249 @@ def _store_token(token: str) -> None:
     os.chmod(TOKEN_PATH, 0o600)
 
 
+def _proc_addr(ip: str, port: int) -> str:
+    """Address column of /proc/net/tcp. The kernel prints IPv4 little-endian."""
+    raw = socket.inet_aton(ip)
+    return raw[::-1].hex().upper() + ":%04X" % port
+
+
+def _service_cgroup(path: str) -> bool:
+    return path == _DAEMON_CGROUP or path.startswith(_DAEMON_CGROUP + "/")
+
+
+def _trusted_peer(uid: int, cgroup: str | None, exe: str | None) -> bool:
+    """Root must be the coolercontrold service. The same user must be that binary.
+
+    Another account cannot own either socket. A copied binary run by this
+    user is outside the attack the marketplace review described: that user
+    can already read the mode 0600 token file.
+    """
+    if uid == 0:
+        return _service_cgroup(cgroup or "")
+    if uid != os.getuid() or not exe:
+        return False
+    return os.path.basename(exe) == "coolercontrold"
+
+
+def _established_peer(local_port: int) -> tuple[int, str] | None:
+    """Uid and inode of the socket that accepted this connection."""
+    want_local = _proc_addr(_DAEMON_HOST, _DAEMON_PORT)
+    want_remote = _proc_addr(_DAEMON_HOST, local_port)
+    found: list[tuple[int, str]] = []
+    try:
+        lines = open("/proc/net/tcp", encoding="ascii", errors="replace")
+    except OSError:
+        return None
+    with lines:
+        next(lines, None)
+        for line in lines:
+            cols = line.split()
+            if len(cols) < 10:
+                continue
+            if cols[1].upper() != want_local or cols[2].upper() != want_remote:
+                continue
+            if cols[3] != "01":
+                continue
+            try:
+                uid = int(cols[7])
+            except ValueError:
+                continue
+            found.append((uid, cols[9]))
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def _socket_cgroup(local_port: int) -> tuple[str, str] | None:
+    """Cgroup and inode of the daemon side of this TCP connection."""
+    filt = "src %s:%d and dst %s:%d" % (_DAEMON_HOST, _DAEMON_PORT, _DAEMON_HOST, local_port)
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    try:
+        out = subprocess.run(
+            ["/usr/bin/ss", "-H", "-tnpe", filt],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    rows = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    if len(rows) != 1:
+        return None
+    cgroup = re.search(r"cgroup:(\S+)", rows[0])
+    inode = re.search(r"\bino:(\d+)\b", rows[0])
+    if not cgroup or not inode:
+        return None
+    return cgroup.group(1), inode.group(1)
+
+
+def _exe_for_inode(inode: str) -> str | None:
+    """Executable holding this socket. Unreadable processes are skipped."""
+    needle = "socket:[%s]" % inode
+    found: list[str] = []
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return None
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        fd_dir = "/proc/%s/fd" % pid
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink("%s/%s" % (fd_dir, fd))
+            except OSError:
+                continue
+            if target != needle:
+                continue
+            try:
+                exe = os.readlink("/proc/%s/exe" % pid)
+            except OSError:
+                return None
+            found.append(exe)
+            break
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def _daemon_process_present() -> bool:
+    """The service cgroup must contain the coolercontrold binary."""
+    proc_file = "/sys/fs/cgroup" + _DAEMON_CGROUP + "/cgroup.procs"
+    try:
+        with open(proc_file, encoding="ascii") as handle:
+            pids = handle.read().split()
+    except OSError:
+        return False
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        command = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+        if os.path.basename(command) == "coolercontrold":
+            return True
+    return False
+
+
+def _peer_trusted(sock: socket.socket) -> tuple[bool, str]:
+    """Identify the process that accepted this socket. Fail closed."""
+    try:
+        local = sock.getsockname()
+        peer = sock.getpeername()
+    except OSError:
+        return False, _LISTENER_REJECTED
+    if sock.family != socket.AF_INET:
+        return False, _LISTENER_REJECTED
+    if local[0] != _DAEMON_HOST or peer != (_DAEMON_HOST, _DAEMON_PORT):
+        return False, _LISTENER_REJECTED
+    established = _established_peer(int(local[1]))
+    if established is None:
+        return False, "could not identify the listener"
+    uid, inode = established
+    if uid == 0:
+        described = _socket_cgroup(int(local[1]))
+        if described is None:
+            return False, _LISTENER_REJECTED
+        try:
+            same_socket = int(described[1]) == int(inode)
+        except ValueError:
+            same_socket = False
+        if not same_socket or not _trusted_peer(uid, described[0], None):
+            return False, _LISTENER_REJECTED
+        if not _daemon_process_present():
+            return False, _LISTENER_REJECTED
+        return True, ""
+    if uid == os.getuid() and _trusted_peer(uid, None, _exe_for_inode(inode)):
+        return True, ""
+    return False, _LISTENER_REJECTED
+
+
+class _DaemonConnection(http.client.HTTPConnection):
+    """Loopback connection that stays silent until the peer is coolercontrold."""
+
+    def connect(self) -> None:
+        if self.host != _DAEMON_HOST or int(self.port or 0) != _DAEMON_PORT:
+            raise OSError("coolercontrold address is fixed")
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            raw.settimeout(self.timeout)
+            raw.bind((_DAEMON_HOST, 0))
+            raw.connect((_DAEMON_HOST, _DAEMON_PORT))
+            ok, reason = _peer_trusted(raw)
+            if not ok:
+                raise OSError(reason or _LISTENER_REJECTED)
+            try:
+                raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError as err:
+                if err.errno != errno.ENOPROTOOPT:
+                    raise
+        except Exception:
+            raw.close()
+            raise
+        self.sock = raw
+
+
+class _DaemonHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        parsed = urllib.parse.urlsplit(req.full_url)
+        if parsed.scheme != "http" or parsed.hostname != _DAEMON_HOST or parsed.port != _DAEMON_PORT:
+            raise urllib.error.URLError("coolercontrold address is fixed")
+        return self.do_open(_DaemonConnection, req)
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx must not carry the password, the token, or the session cookie."""
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        try:
+            fp.read(65536)
+        except Exception:
+            pass
+        try:
+            fp.close()
+        except Exception:
+            pass
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "redirect refused",
+            headers,
+            io.BytesIO(b""),
+        )
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _daemon_opener(jar: CookieJar | None = None) -> urllib.request.OpenerDirector:
+    # Passing a ProxyHandler suppresses the default one. An empty mapping
+    # installs no proxy methods, so http_proxy cannot receive the token.
+    handlers: list = [
+        urllib.request.ProxyHandler({}),
+        _DaemonHTTPHandler(),
+        _RefuseRedirect(),
+    ]
+    if jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
+    return urllib.request.build_opener(*handlers)
+
+
+def _open(req: urllib.request.Request, timeout: float | None, jar: CookieJar | None = None):
+    return _daemon_opener(jar).open(req, timeout=timeout)
+
+
 def pair(password: str) -> dict:
     """Log in once, mint a revocable Omaflow token, forget the password."""
     if BASE != "http://127.0.0.1:11987":
@@ -66,7 +320,7 @@ def pair(password: str) -> dict:
     if not password:
         return {"ok": False, "status": 0, "error": "password required", "body": None}
     jar = CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    opener = _daemon_opener(jar)
     basic = base64.b64encode(b"CCAdmin:" + password.encode("utf-8")).decode("ascii")
     login = urllib.request.Request(
         BASE + "/login",
@@ -75,7 +329,9 @@ def pair(password: str) -> dict:
     )
     try:
         opener.open(login, timeout=8).read()
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as err:
+        if err.code in (301, 302, 303, 307, 308):
+            return {"ok": False, "status": err.code, "error": "redirect refused", "body": None}
         return {"ok": False, "status": 401, "error": "CoolerControl rejected that password", "body": None}
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
@@ -90,6 +346,8 @@ def pair(password: str) -> dict:
         with opener.open(create, timeout=8) as res:
             payload = json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as err:
+        if err.code in (301, 302, 303, 307, 308):
+            return {"ok": False, "status": err.code, "error": "redirect refused", "body": None}
         return {"ok": False, "status": err.code, "error": "Could not create an access token", "body": None}
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
@@ -608,7 +866,7 @@ def push_lcd_image(
         method="PUT",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as res:
+        with _open(req, 30) as res:
             raw = res.read()
             parsed = None
             if raw:
@@ -918,7 +1176,7 @@ def call(method: str, path: str, body) -> dict:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(BASE + path, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=8) as res:
+        with _open(req, 8) as res:
             raw = res.read()
             parsed = None
             if raw:
@@ -971,7 +1229,7 @@ def watch() -> None:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=None) as res:
+            with _open(req, None) as res:
                 emit({"event": "up"})
                 buf = ""
                 while not _STOP.is_set():
