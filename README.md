@@ -2,27 +2,44 @@
 
 Omaflow is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, and does not store the CoolerControl password.
 
-OmaFlow 1.3.0 is no longer maintained. That release used fan2go and a root helper. Do not run fan2go while `coolercontrold` is up. The last 1.3.0 tree is [omaflow-plugin](https://github.com/tempest-chaoscreator/omaflow-plugin) at tag `v1.3.0`.
-
 ![Omaflow](screenshots/banner-app.jpg)
 
-## Install from nothing
+## Install
 
-Install `coolercontrold` yourself. Do not install the `coolercontrol` desktop package. Omaflow does not install packages and does not run as root.
+### Plugin
 
-```bash
-sudo systemctl enable --now coolercontrold
-omarchy plugin add https://github.com/tempest-chaoscreator/omaflow.git --enable
-```
+1. Install `coolercontrold` yourself. Do not install the `coolercontrol` desktop package. Omaflow does not install packages and does not run as root.
+2. Enable the daemon.
 
-That clone is the bar chip and the window. Open the chip and press the Omaflow button, or run `./setup` inside the clone. `./setup` writes a desktop launcher whose `Exec` is that clone. It does not enable the daemon.
+   ```bash
+   sudo systemctl enable --now coolercontrold
+   ```
 
-```bash
-git clone https://github.com/tempest-chaoscreator/omaflow.git
-cd omaflow
-./setup
-./app/omaflow-standalone
-```
+3. Add the plugin. That clone is the bar chip and the window.
+
+   ```bash
+   omarchy plugin add https://github.com/tempest-chaoscreator/omaflow.git --enable
+   ```
+
+4. Open the chip and press the Omaflow button.
+
+### Git clone
+
+1. Install `coolercontrold` yourself. Do not install the `coolercontrol` desktop package. Omaflow does not install packages and does not run as root.
+2. Enable the daemon.
+
+   ```bash
+   sudo systemctl enable --now coolercontrold
+   ```
+
+3. Clone the repository and write the launcher. `./setup` writes a desktop launcher whose `Exec` is that clone. It does not enable the daemon.
+
+   ```bash
+   git clone https://github.com/tempest-chaoscreator/omaflow.git
+   cd omaflow
+   ./setup
+   ./app/omaflow-standalone
+   ```
 
 A saved token at `~/.config/omaflow/coolercontrol.token` (mode `0600`) connects with no prompt. The password is asked once, used to create the token, and dropped. A changed CoolerControl password is left alone. The password and the token are sent only after the listener on `127.0.0.1:11987` is identified as the `coolercontrold` service. If that check fails, nothing is sent. Authenticated requests are not followed across redirects.
 
@@ -58,11 +75,9 @@ That removes the chip. `coolercontrold` stays installed. The token file stays un
 
 **Settings.** Fill gives spare height to the graphs. Text size can follow Omarchy or stay at a chosen size. Export and import write `~/Documents/omaflow-curves.json`. The bar switch installs this repository when the chip is missing.
 
-## The bar
+## The bar plugin
 
-![Omaflow on the Omarchy bar](screenshots/banner-plugin.jpg)
-
-![Telemetry and Mode](screenshots/plugin-themes.jpg)
+![Omaflow bar plugin](screenshots/bar.jpg)
 
 Left click opens the chip. Right click toggles Silent and Performance when those modes exist. `1`–`9` select a mode. Apply runs it. `o` opens the window. Escape closes the popover.
 

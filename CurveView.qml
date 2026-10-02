@@ -2,7 +2,7 @@ import QtQuick
 import qs.Commons
 
 // Draggable plot of coolercontrold graph points: [temp, duty].
-// Same shape as the 1.3.0 curve: duty grid, floor band, fill, round handles.
+// Duty grid, floor band, fill, and round handles.
 Item {
   id: root
 
