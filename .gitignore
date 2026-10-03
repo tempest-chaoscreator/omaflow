@@ -4,4 +4,5 @@
 __pycache__/
 *.pyc
 .preview-work/
+# Older launchers linked qs modules here. Validate rejects those symlinks.
 app/qml/qs/

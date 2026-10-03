@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import http.client
 import io
 import json
@@ -29,6 +30,8 @@ import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
 
+import lcd_logo
+
 BASE = "http://127.0.0.1:11987"
 _DAEMON_HOST = "127.0.0.1"
 _DAEMON_PORT = 11987
@@ -39,10 +42,16 @@ GROUPS_PATH = TOKEN_PATH.with_name("groups.json")
 LINKS_PATH = TOKEN_PATH.with_name("links.json")
 HIDDEN_PATH = TOKEN_PATH.with_name("hidden.json")
 LCD_VIEW_PATH = TOKEN_PATH.with_name("lcd-view.json")
+LCD_LEASE_PATH = TOKEN_PATH.with_name("lcd-lease.json")
 UI_PATH = TOKEN_PATH.with_name("ui.json")
 PACK_PATH = TOKEN_PATH.with_name("curve-pack.json")
 THEME_COLORS = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
 _TEXT_STOPS = {9, 10, 11, 12, 14, 16, 20}
+_LCD_STOPS = {2, 5, 10, 30, 60}
+_LCD_FACES = ("liquid", "cpu", "cpu-gpu", "cpu-liquid", "omarchy", "omarchy-time")
+_LOGO_FACES = ("omarchy", "omarchy-time")
+# First look at a channel whose saved view never recorded Sync or Off.
+_lcd_mode_cache: dict[str, str] = {}
 _FILE_LIMIT = 1_000_000
 _METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
 _SSE_LIMIT = 1_000_000
@@ -436,8 +445,25 @@ def write_hidden(data: dict) -> None:
     os.chmod(HIDDEN_PATH, 0o600)
 
 
+def _lcd_seconds(value: object) -> int:
+    try:
+        seconds = int(str(value))
+    except (TypeError, ValueError):
+        return 5
+    return seconds if seconds in _LCD_STOPS else 5
+
+
 def read_ui() -> dict:
-    default = {"dynamicScale": False, "textFollow": True, "textSize": 12, "showBar": True}
+    default = {
+        "dynamicScale": False,
+        "textFollow": True,
+        "textSize": 12,
+        "showBar": True,
+        # Absent means the plugin keeps drawing the pump. Only an explicit false stops it.
+        "lcdBackground": True,
+        "lcdSeconds": 5,
+        "lcdThemeSync": False,
+    }
     try:
         raw = json.loads(UI_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -456,6 +482,9 @@ def read_ui() -> dict:
         "textSize": size,
         # Absent means on. Only an explicit false keeps the chip off.
         "showBar": raw.get("showBar") is not False,
+        "lcdBackground": raw.get("lcdBackground") is not False,
+        "lcdSeconds": _lcd_seconds(raw.get("lcdSeconds")),
+        "lcdThemeSync": raw.get("lcdThemeSync") is True,
     }
 
 
@@ -475,6 +504,12 @@ def write_ui(data: dict) -> None:
                 clean["textSize"] = size
         if "showBar" in data:
             clean["showBar"] = data.get("showBar") is not False
+        if "lcdBackground" in data:
+            clean["lcdBackground"] = data.get("lcdBackground") is not False
+        if "lcdSeconds" in data:
+            clean["lcdSeconds"] = _lcd_seconds(data.get("lcdSeconds"))
+        if "lcdThemeSync" in data:
+            clean["lcdThemeSync"] = data.get("lcdThemeSync") is True
     _write_private(UI_PATH, json.dumps(clean, indent=2).encode("utf-8"))
 
 
@@ -669,35 +704,44 @@ def _draw_at(draw, cx: float, y: float, text: str, font, fill) -> None:
 
 
 def _render_round(face: str, primary: str, secondary: str, accent: str, accent2: str, angle: int, size: int) -> bytes:
-    """Upright frame, then turned clockwise by `angle`. The daemon orientation stays 0."""
+    """Upright frame, then turned clockwise by `angle`. The daemon orientation stays 0.
+
+    Stroke and type scale from the 320 design so a 240 circle and a 640 circle match it.
+    """
     from PIL import Image, ImageDraw
     image = Image.new("RGB", (size, size), _LCD_BG)
     draw = ImageDraw.Draw(image)
     ink = _parse_hex(accent)
     ink2 = _parse_hex(accent2 or accent)
-    margin = 22
+    scale = size / 320
+    margin = max(8, int(round(22 * scale)))
+    stroke = max(4, int(round(14 * scale)))
     box = [margin, margin, size - margin - 1, size - margin - 1]
     combo = face in ("cpu-gpu", "cpu-liquid")
     if combo:
         # Pillow measures arcs clockwise from 3 o'clock. Left half, then right half.
-        draw.arc(box, start=90, end=270, fill=ink, width=14)
-        draw.arc(box, start=270, end=90, fill=ink2, width=14)
+        draw.arc(box, start=90, end=270, fill=ink, width=stroke)
+        draw.arc(box, start=270, end=90, fill=ink2, width=stroke)
     else:
-        draw.ellipse(box, outline=ink, width=14)
+        draw.ellipse(box, outline=ink, width=stroke)
     left, right = _face_labels(face)
     number = primary if primary else "—"
     if combo:
         other = secondary if secondary else "—"
-        number_font = _lcd_font(78)
-        label_font = _lcd_font(22)
+        number_font = _lcd_font(max(12, int(round(78 * scale))))
+        label_font = _lcd_font(max(10, int(round(22 * scale))))
         _draw_at(draw, size * 0.34, size * 0.40, number, number_font, ink)
         _draw_at(draw, size * 0.66, size * 0.40, other, number_font, ink2)
         _draw_at(draw, size * 0.34, size * 0.62, left, label_font, ink)
         _draw_at(draw, size * 0.66, size * 0.62, right, label_font, ink2)
-        draw.line([(size / 2, size * 0.34), (size / 2, size * 0.70)], fill=(250, 252, 251), width=2)
+        draw.line(
+            [(size / 2, size * 0.34), (size / 2, size * 0.70)],
+            fill=(250, 252, 251),
+            width=max(1, int(round(2 * scale))),
+        )
     else:
-        number_font = _lcd_font(104)
-        label_font = _lcd_font(26)
+        number_font = _lcd_font(max(16, int(round(104 * scale))))
+        label_font = _lcd_font(max(10, int(round(26 * scale))))
         _draw_center(draw, size, number, size * 0.36, number_font, ink)
         _draw_center(draw, size, left, size * 0.62, label_font, ink)
     turned = int(angle) % 360
@@ -773,6 +817,17 @@ def render_lcd_png(
     side = max(32, min(1280, int(size or 320)))
     w = max(32, min(1280, int(width))) if width else side
     h = max(32, min(1280, int(height))) if height else side
+    if face in _LOGO_FACES:
+        theme_accent, _second, _background, _foreground = _theme_fields()
+        lit = accent if re.fullmatch(r"#[0-9A-Fa-f]{6}", str(accent or "")) else (theme_accent or "#b59790")
+        return lcd_logo.render_logo_png(
+            face,
+            lit or "#b59790",
+            w,
+            h,
+            "square" if str(shape or "round") == "square" else "round",
+            int(angle or 0),
+        )
     if str(shape or "round") != "square":
         if w == h:
             return _render_round(face, primary, secondary, accent, accent2, angle, w)
@@ -812,6 +867,335 @@ def _multipart(fields: list[tuple[str, str]], filename: str, payload: bytes) -> 
     return b"".join(chunks), "multipart/form-data; boundary=" + boundary
 
 
+def _lcd_mark(
+    shape: str,
+    width: int,
+    height: int,
+    face: str,
+    primary: str,
+    secondary: str,
+    ink: str,
+    ink2: str,
+    brightness: int,
+    angle: int,
+) -> str:
+    return "|".join(
+        [
+            shape,
+            "%sx%s" % (width, height),
+            face,
+            primary,
+            secondary,
+            ink,
+            ink2,
+            str(brightness),
+            str(angle),
+        ]
+    )
+
+
+def _upload_mark(
+    shape: str,
+    width: int,
+    height: int,
+    face: str,
+    accent: str,
+    accent2: str,
+    primary: str,
+    secondary: str,
+    brightness: int,
+    angle: int,
+) -> str:
+    """The lease key. Logo faces ignore temperatures. The clock changes once a minute."""
+    if face in _LOGO_FACES:
+        theme_accent, _second, _background, _foreground = _theme_fields()
+        lit = accent if re.fullmatch(r"#[0-9A-Fa-f]{6}", str(accent or "")) else (theme_accent or "#b59790")
+        # The field is the temperature-face black. The clock uses that same accent, so the
+        # theme background and foreground are not part of the plate.
+        field = "#%02x%02x%02x" % _LCD_BG
+        minute = time.strftime("%H:%M") if face == "omarchy-time" else ""
+        return _lcd_mark(
+            shape, width, height, face, minute, field, lit or "#b59790", "", brightness, angle,
+        )
+    return _lcd_mark(
+        shape, width, height, face, primary, secondary, accent, accent2, brightness, angle,
+    )
+
+
+def _with_lcd_lease(update):
+    """Exclusive access to the one-writer stamp shared by the window and the plugin."""
+    LCD_LEASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LCD_LEASE_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.chmod(LCD_LEASE_PATH, 0o600)
+        blob = b""
+        while len(blob) <= 16384:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            blob += chunk
+        prev: dict = {}
+        try:
+            parsed = json.loads(blob.decode("utf-8") or "{}")
+            if isinstance(parsed, dict):
+                prev = parsed
+        except json.JSONDecodeError:
+            prev = {}
+        nxt = update(prev)
+        if nxt is not None:
+            raw = json.dumps(nxt).encode("utf-8")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, raw)
+        return prev
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def lcd_claim(mark: str, interval: float) -> bool:
+    """True when this picture is not already on its way from the other process."""
+    now = time.time()
+    window = max(1.0, float(interval)) * 0.75
+    decision = {"go": False}
+
+    def update(prev: dict):
+        try:
+            prev_at = float(prev.get("at") or 0)
+        except (TypeError, ValueError):
+            prev_at = 0.0
+        if str(prev.get("mark") or "") == mark and now - prev_at < window:
+            decision["go"] = False
+            return None
+        decision["go"] = True
+        return {"mark": mark, "at": now}
+
+    _with_lcd_lease(update)
+    return bool(decision["go"])
+
+
+def lcd_remember(mark: str) -> None:
+    now = time.time()
+
+    def update(prev: dict):
+        return {"mark": mark, "at": now}
+
+    _with_lcd_lease(update)
+
+
+def lcd_release(mark: str) -> None:
+    def update(prev: dict):
+        if str(prev.get("mark") or "") != mark:
+            return None
+        return {"mark": "", "at": 0}
+
+    _with_lcd_lease(update)
+
+
+def lcd_current_mark() -> str:
+    prev = _with_lcd_lease(lambda _prev: None)
+    if isinstance(prev, dict):
+        return str(prev.get("mark") or "")
+    return ""
+
+
+def detect_shape(device_name: str, width: int, height: int) -> str:
+    """Round or square from the cooler. A saved override is not consulted.
+
+    Equal buffers need the name: 240 square panels and 320 or 640 round glass
+    report the same kind of square pixel size. Unequal sides are square.
+    """
+    blob = str(device_name or "").lower()
+    if re.search(r"ryujin|coreliquid", blob):
+        return "square"
+    if "kraken" in blob and re.search(r"2023|2024", blob) and "elite" not in blob:
+        return "square"
+    if width > 0 and height > 0 and width != height:
+        return "square"
+    return "round"
+
+
+def _lcd_dim(value: object) -> int:
+    try:
+        number = int(str(value))
+    except (TypeError, ValueError):
+        return 0
+    if number < 0 or number > 1280:
+        return 0
+    return number
+
+
+def _face_text(face: str, cpu: object, gpu: object, coolant: object) -> tuple[str, str]:
+    if face in _LOGO_FACES:
+        return "", ""
+    if face in ("cpu", "cpu-gpu", "cpu-liquid"):
+        primary = _whole(cpu)
+    else:
+        primary = _whole(coolant)
+    secondary = ""
+    if face == "cpu-gpu":
+        secondary = _whole(gpu)
+    elif face == "cpu-liquid":
+        secondary = _whole(coolant)
+    return primary, secondary
+
+
+def _channel_lcd_mode(device: str, channel: str) -> str | None:
+    path = (
+        "/devices/"
+        + urllib.parse.quote(device, safe="")
+        + "/settings"
+    )
+    result = call("GET", path, None)
+    if not result.get("ok"):
+        return None
+    body = result.get("body") if isinstance(result.get("body"), dict) else {}
+    rows = body.get("settings") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("channel_name") or "") != channel:
+            continue
+        lcd = row.get("lcd")
+        if isinstance(lcd, dict):
+            return str(lcd.get("mode") or "")
+        return ""
+    return ""
+
+
+def _view_is_live(view: dict, device: str, channel: str) -> bool | None:
+    """False leaves a cooler that is off, or one still on a built-in face, alone."""
+    if "live" in view:
+        return view.get("live") is True
+    key = device + "/" + channel
+    if key not in _lcd_mode_cache:
+        mode = _channel_lcd_mode(device, channel)
+        if mode is None:
+            return None
+        _lcd_mode_cache[key] = mode
+    return _lcd_mode_cache[key] == "image"
+
+
+def _lcd_skip(reason: str) -> dict:
+    return {"ok": True, "status": 200, "error": "", "body": {"skipped": True, "reason": reason}}
+
+
+def lcd_keep(msg: dict) -> dict:
+    """Draw the saved pump face again when the numbers changed.
+
+    The window and the bar plugin both call this. The lease keeps one upload.
+    """
+    if read_ui().get("lcdBackground") is False:
+        return _lcd_skip("background-off")
+    try:
+        view = json.loads(LCD_VIEW_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _lcd_skip("no-view")
+    if not isinstance(view, dict):
+        return _lcd_skip("no-view")
+    device = str(msg.get("device") or "")
+    channel = str(msg.get("channel") or "")
+    if not device or not channel or len(device) > 80 or len(channel) > 80:
+        return _lcd_skip("no-channel")
+    if any(ch in device or ch in channel for ch in ("/", "?", "#", "\\", "\n", "\r")):
+        return _lcd_skip("no-channel")
+    live = _view_is_live(view, device, channel)
+    if live is None:
+        return _lcd_skip("unknown")
+    if not live:
+        return _lcd_skip("lcd-off")
+    face = str(view.get("face") or "liquid")
+    if face not in _LCD_FACES:
+        face = "liquid"
+    try:
+        brightness = int(view.get("brightness"))
+    except (TypeError, ValueError):
+        brightness = 80
+    brightness = max(0, min(100, brightness))
+    try:
+        saturation = int(view.get("saturation"))
+    except (TypeError, ValueError):
+        saturation = 0
+    saturation = max(0, min(100, saturation))
+    try:
+        angle = int(view.get("angle") or 0)
+    except (TypeError, ValueError):
+        angle = 0
+    angle = angle % 360
+    width = _lcd_dim(msg.get("width"))
+    height = _lcd_dim(msg.get("height"))
+    device_name = str(msg.get("deviceName") or "")
+    shape = detect_shape(device_name, width, height)
+    primary, secondary = _face_text(face, msg.get("cpu"), msg.get("gpu"), msg.get("coolant"))
+    if face not in _LOGO_FACES:
+        if primary == "—":
+            return _lcd_skip("no-temp")
+        if face in ("cpu-gpu", "cpu-liquid") and secondary == "—":
+            return _lcd_skip("no-temp")
+    accent, second = _theme_colors()
+    ink = _deepen_hex(accent, saturation) if accent else ""
+    ink2 = _deepen_hex(second or accent, saturation) if (second or accent) else ""
+    mark = _upload_mark(shape, width, height, face, ink, ink2, primary, secondary, brightness, angle)
+    # A logo plate stays up until its mark changes. Temperature faces still
+    # refresh on the interval so a quiet sensor does not look frozen.
+    if face in _LOGO_FACES and lcd_current_mark() == mark:
+        return _lcd_skip("fresh")
+    if not lcd_claim(mark, _lcd_seconds(msg.get("interval"))):
+        return _lcd_skip("fresh")
+    result = push_lcd_image(
+        device, channel, brightness, face, angle, ink, ink2, primary, secondary,
+        shape, width, height, device_name,
+    )
+    if not result.get("ok"):
+        lcd_release(mark)
+    return result
+
+
+def _preview_pixels(width: int, height: int) -> tuple[int, int]:
+    """Largest plate the dial can show. The cooler still receives its own size."""
+    long_side = 1280
+    w = max(1, int(width or 320))
+    h = max(1, int(height or 320))
+    scale = long_side / max(w, h)
+    return max(32, int(round(w * scale))), max(32, int(round(h * scale)))
+
+
+def lcd_preview(msg: dict) -> dict:
+    """Write an upright transparent plate for the dial. This does not touch the cooler."""
+    face = str(msg.get("face") or "omarchy")
+    if face not in _LOGO_FACES:
+        face = "omarchy"
+    width = _lcd_dim(msg.get("width")) or 320
+    height = _lcd_dim(msg.get("height")) or 320
+    device_name = str(msg.get("deviceName") or "")
+    if device_name:
+        shape = detect_shape(device_name, width, height)
+    else:
+        shape = "square" if str(msg.get("shape") or "") == "square" else "round"
+    theme_accent, _second, _background, _foreground = _theme_fields()
+    accent = str(msg.get("accent") or "")
+    lit = accent if re.fullmatch(r"#[0-9A-Fa-f]{6}", accent) else (theme_accent or "#b59790")
+    preview_w, preview_h = _preview_pixels(width, height)
+    path = Path.home() / ".cache" / "omaflow" / "lcd-preview.png"
+    try:
+        png = lcd_logo.render_logo_png(
+            face,
+            lit or "#b59790",
+            preview_w,
+            preview_h,
+            shape,
+            0,
+            clear=True,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(png)
+        os.chmod(path, 0o600)
+    except OSError as err:
+        return {"ok": False, "status": 0, "error": str(err), "body": None}
+    return {"ok": True, "status": 200, "error": "", "body": {"path": str(path)}}
+
+
 def push_lcd_image(
     device: str,
     channel: str,
@@ -825,11 +1209,15 @@ def push_lcd_image(
     shape: str = "round",
     width: int = 0,
     height: int = 0,
+    device_name: str = "",
 ) -> dict:
     token = read_token()
     if not token:
         return {"ok": False, "status": 0, "error": "need-token", "body": None}
     level = max(0, min(100, int(brightness)))
+    painted = detect_shape(device_name, int(width or 0), int(height or 0)) if device_name else (
+        "square" if str(shape or "round") == "square" else "round"
+    )
     # The frame already carries the dial angle. A second daemon orientation would turn it again.
     png = render_lcd_png(
         face or "liquid",
@@ -839,7 +1227,7 @@ def push_lcd_image(
         accent2 or "#87a9b0",
         int(angle or 0),
         320,
-        "square" if str(shape or "round") == "square" else "round",
+        painted,
         int(width or 0) or None,
         int(height or 0) or None,
     )
@@ -874,6 +1262,23 @@ def push_lcd_image(
                     parsed = json.loads(raw.decode("utf-8"))
                 except json.JSONDecodeError:
                     parsed = {"raw": raw.decode("utf-8", "replace")[:400]}
+            try:
+                lcd_remember(
+                    _upload_mark(
+                        painted,
+                        int(width or 0),
+                        int(height or 0),
+                        str(face or "liquid"),
+                        str(accent or ""),
+                        str(accent2 or ""),
+                        str(temp_text or "—"),
+                        str(temp2 or ""),
+                        level,
+                        int(angle or 0) % 360,
+                    )
+                )
+            except OSError:
+                pass
             return {"ok": True, "status": res.status, "error": "", "body": parsed}
     except urllib.error.HTTPError as err:
         detail = err.read().decode("utf-8", "replace")[:400]
@@ -915,7 +1320,8 @@ def _mode_activate(path: str) -> bool:
     return bool(uid) and "/" not in uid
 
 
-def _theme_colors() -> tuple[str, str]:
+def _theme_fields() -> tuple[str, str, str, str]:
+    """Accent, second ink, background, and foreground from the active theme."""
     palette: dict[str, str] = {}
     try:
         raw = THEME_COLORS.read_text(encoding="utf-8")
@@ -934,6 +1340,13 @@ def _theme_colors() -> tuple[str, str]:
             palette[key.strip()] = value
     accent = palette.get("accent") or palette.get("color4") or ""
     second = palette.get("green") or palette.get("cyan") or palette.get("magenta") or accent
+    background = palette.get("background") or palette.get("color0") or "#0a0c0b"
+    foreground = palette.get("foreground") or palette.get("color7") or "#fafcfb"
+    return accent, second, background, foreground
+
+
+def _theme_colors() -> tuple[str, str]:
+    accent, second, _background, _foreground = _theme_fields()
     return accent, second
 
 
@@ -1029,6 +1442,8 @@ def _whole(value) -> str:
 
 
 def _screen_numbers(face: str, devices: list, status: dict) -> tuple[str, str]:
+    if face in _LOGO_FACES:
+        return "", ""
     info_by = {d.get("uid"): d for d in devices if isinstance(d, dict)}
     cpu = None
     gpu = None
@@ -1076,7 +1491,7 @@ def _lcd_target(devices: list):
                 height = int(lcd.get("screen_height") or 0)
             except (TypeError, ValueError):
                 width, height = 0, 0
-            return str(dev.get("uid") or ""), str(name), width, height
+            return str(dev.get("uid") or ""), str(name), width, height, str(dev.get("name") or "")
     return None
 
 
@@ -1115,7 +1530,7 @@ def restore_saved_lcd() -> None:
     if not target or not target[0]:
         give_up("no lcd channel")
         return
-    uid, channel, width, height = target
+    uid, channel, width, height, device_name = target
     status = call("GET", "/status", None)
     status_body = status.get("body") if status.get("ok") and isinstance(status.get("body"), dict) else {"devices": []}
     face = str(view.get("face") or "liquid")
@@ -1132,14 +1547,15 @@ def restore_saved_lcd() -> None:
         angle = int(view.get("angle") or 0)
     except (TypeError, ValueError):
         angle = 0
-    shape = "square" if view.get("shape") == "square" else "round"
+    shape = detect_shape(device_name, width, height)
     accent, second = _theme_colors()
     ink = _deepen_hex(accent, saturation) if accent else ""
     ink2 = _deepen_hex(second or accent, saturation) if (second or accent) else ""
 
     def push_once() -> dict:
         return push_lcd_image(
-            uid, channel, brightness, face, angle, ink, ink2, primary, secondary, shape, width, height
+            uid, channel, brightness, face, angle, ink, ink2, primary, secondary,
+            shape, width, height, device_name,
         )
 
     # liquidctl reads the Kraken orientation register and bakes that turn into
@@ -1251,6 +1667,55 @@ def watch() -> None:
         _STOP.wait(2)
 
 
+def lcd_face_check() -> None:
+    """Every temperature face on the four liquidctl buffers, plus shape detection."""
+    from PIL import Image
+
+    devices = (
+        ("NZXT Kraken Z (Z53, Z63 or Z73)", 320, 320, "round"),
+        ("NZXT Kraken 2024 Elite RGB", 640, 640, "round"),
+        ("NZXT Kraken 2023", 240, 240, "square"),
+        ("NZXT Kraken 2024 Plus", 240, 240, "square"),
+        ("MSI MPG CoreLiquid K360", 240, 320, "square"),
+        ("ASUS Ryujin II 360", 240, 240, "square"),
+    )
+    for name, width, height, shape in devices:
+        got = detect_shape(name, width, height)
+        if got != shape:
+            raise SystemExit("%s detected %s" % (name, got))
+    buffers = ((320, 320, "round"), (640, 640, "round"), (240, 240, "square"), (240, 320, "square"))
+    faces = ("liquid", "cpu", "cpu-gpu", "cpu-liquid")
+    out = Path("/tmp/omaflow-lcd-check")
+    out.mkdir(parents=True, exist_ok=True)
+    for width, height, shape in buffers:
+        for face in faces:
+            secondary = "61" if face in ("cpu-gpu", "cpu-liquid") else ""
+            raw = render_lcd_png(face, "54", secondary, "#7fbbb3", "#a7c080", 0, 320, shape, width, height)
+            image = Image.open(io.BytesIO(raw))
+            if image.size != (width, height) or image.mode != "RGB":
+                raise SystemExit("%s %s is %s" % (face, shape, image.size))
+            pixels = image.load()
+            for x, y in ((0, 0), (width - 1, 0), (0, height - 1), (1, height // 2), (width // 2, 1)):
+                if pixels[x, y] != _LCD_BG:
+                    raise SystemExit("%s %sx%s edge %s,%s %s" % (face, width, height, x, y, pixels[x, y]))
+            image.save(out / ("temp-%s-%sx%s.png" % (face, width, height)))
+            image.close()
+    preview = _preview_pixels(320, 320)
+    if preview != (1280, 1280):
+        raise SystemExit("round preview is %s" % (preview,))
+    tall = _preview_pixels(240, 320)
+    if tall != (960, 1280):
+        raise SystemExit("portrait preview is %s" % (tall,))
+    quiet = _upload_mark("round", 320, 320, "omarchy", "#7fbbb3", "", "10", "20", 50, 0)
+    hot = _upload_mark("round", 320, 320, "omarchy", "#7fbbb3", "", "99", "88", 50, 0)
+    if quiet != hot:
+        raise SystemExit("omarchy mark followed the temperature")
+    clock = _upload_mark("round", 320, 320, "omarchy-time", "#7fbbb3", "", "10", "20", 50, 0)
+    if clock == quiet or time.strftime("%H:%M") not in clock:
+        raise SystemExit("clock mark missed the minute")
+    print("lcd faces ok")
+
+
 def main() -> None:
     _own(LCD_VIEW_PATH)
     if not read_token():
@@ -1342,6 +1807,16 @@ def main() -> None:
             if result.get("ok"):
                 emit({"event": "hello", "token": True})
             continue
+        if op == "lcd-keep":
+            result = lcd_keep(msg if isinstance(msg, dict) else {})
+            result["id"] = msg.get("id")
+            emit(result)
+            continue
+        if op == "lcd-preview":
+            result = lcd_preview(msg if isinstance(msg, dict) else {})
+            result["id"] = msg.get("id")
+            emit(result)
+            continue
         if op == "lcd-image":
             result = push_lcd_image(
                 str(msg.get("device") or ""),
@@ -1356,6 +1831,7 @@ def main() -> None:
                 str(msg.get("shape") or "round"),
                 int(msg.get("width") or 0),
                 int(msg.get("height") or 0),
+                str(msg.get("deviceName") or ""),
             )
             result["id"] = msg.get("id")
             emit(result)

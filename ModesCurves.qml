@@ -331,6 +331,7 @@ Column {
   readonly property int modeH: Style.space(32)
   readonly property int applyWidth: modeH + Style.space(20)
   readonly property bool modeApplied: mode && service && mode.uid === service.activeModeUid
+  readonly property bool calibrationBusy: !!(service && service.calibrationBusy)
   readonly property int modeSlot: {
     var count = modeList.length
     if (!count) return Style.space(72)
@@ -1022,6 +1023,7 @@ Column {
       visible: root.mode !== null
       width: root.modeH
       height: root.modeH
+      opacity: root.calibrationBusy ? 0.45 : 1
       iconText: root.modeApplied ? "\uf058" : "\uf05d"
       iconSize: Style.space(15)
       bordered: true
@@ -1033,12 +1035,14 @@ Column {
       fontFamily: root.fontFamily
       horizontalPadding: 0
       verticalPadding: 0
-      tooltipText: !root.mode ? ""
-        : (root.members.length === 0
-          ? "Add a channel before applying"
-          : (root.modeApplied
-            ? "Save curves. " + root.mode.name + " is running"
-            : "Save curves and run " + root.mode.name))
+      tooltipText: root.calibrationBusy
+        ? "A fan is being calibrated. Apply waits until that sweep finishes."
+        : (!root.mode ? ""
+          : (root.members.length === 0
+            ? "Add a channel before applying"
+            : (root.modeApplied
+              ? "Save curves. " + root.mode.name + " is running"
+              : "Save curves and run " + root.mode.name)))
       onClicked: root.applyMode()
     }
   }

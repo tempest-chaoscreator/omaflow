@@ -51,6 +51,12 @@ Item {
     return out
   }
   readonly property bool pageKeyed: zone === "page"
+  readonly property bool promptKeyed: {
+    if (!service || service.connection === "ready") return false
+    if (service.daemonGate === "up" && (service.connection === "need-token" || service.connection === "unauthorized"))
+      return false
+    return page === "monitor" || page === "modes" || page === "devices" || page === "lcd"
+  }
   readonly property string pageTitle: {
     for (var i = 0; i < pages.length; i++) if (pages[i].id === page) return pages[i].name
     return "Omaflow"
@@ -123,6 +129,8 @@ Item {
   // The shell recolors itself over IPC. This process never hears that, so it
   // re-reads the theme file and writes the singleton the pages already bind.
   function applyThemeColors(raw) {
+    // Inside the bar this singleton is the shell's. Leave it alone.
+    if (!ownsProcess) return
     var lines = String(raw || "").split("\n")
     var foundAccent = false
     var foundMuted = false
@@ -166,6 +174,7 @@ Item {
   }
 
   function applyShell(raw) {
+    if (!ownsProcess) return
     var next = String(raw || "")
     if (next !== shellRaw) {
       shellRaw = next
@@ -180,7 +189,7 @@ Item {
   // Text size is this window only. Fill does not change the rail, the LCD,
   // or this font. The chart, the mode curve, and the speedometers read it.
   function applyWindowPrefs() {
-    if (!uiCaptured) return
+    if (!ownsProcess || !uiCaptured) return
     var follow = !service || service.textFollow !== false
     var chosen = follow ? shellText : Math.max(1, Number(service && service.textSize) || shellText)
     if (Math.abs(Style.spacingScale - shellSpacing) > 0.01) Style.spacingScale = shellSpacing
@@ -229,7 +238,7 @@ Item {
       if (down || up || left || right) event.accepted = true
       return
     }
-    var host = activePage()
+    var host = promptKeyed ? daemonPrompt : activePage()
     if (!host) return
     var dx = right ? 1 : (left ? -1 : 0)
     var dy = down ? 1 : (up ? -1 : 0)
@@ -460,16 +469,29 @@ Item {
               font.bold: true
             }
 
+            DaemonPrompt {
+              id: daemonPrompt
+              width: parent.width
+              visible: (!root.service || root.service.connection !== "ready")
+                && !(root.service
+                  && root.service.daemonGate === "up"
+                  && (root.service.connection === "need-token" || root.service.connection === "unauthorized"))
+              service: root.service
+              keyed: root.zone === "page" && root.promptKeyed
+              fg: root.fg
+              accent: root.accent
+              fontFamily: root.fontFamily
+            }
+
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              visible: !root.service || root.service.connection !== "ready"
+              visible: root.service && root.service.daemonGate === "up"
+                && (root.service.connection === "need-token" || root.service.connection === "unauthorized")
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.space(13)
-              text: root.service && root.service.lastError
-                ? root.service.lastError
-                : "Omaflow reads coolercontrold. It connects when the daemon is up. Start it with the PC from Settings."
+              text: "Enter the CoolerControl password once in Settings. Omaflow uses 127.0.0.1:11987. The token is saved and the password is not."
             }
 
             Flickable {
@@ -485,11 +507,9 @@ Item {
                 id: body
                 width: parent.width
                 spacing: Style.space(8)
-                visible: root.service && root.service.connection === "ready"
-
                 MonitoringPage {
                   id: monitorPage
-                  visible: root.page === "monitor"
+                  visible: root.page === "monitor" && root.service && root.service.connection === "ready"
                   width: parent.width
                   service: root.service
                   keyed: root.pageKeyed && root.page === "monitor"
@@ -502,7 +522,7 @@ Item {
 
                 ModesCurves {
                   id: modesPage
-                  visible: root.page === "modes"
+                  visible: root.page === "modes" && root.service && root.service.connection === "ready"
                   width: parent.width
                   service: root.service
                   keyed: root.pageKeyed && root.page === "modes"
@@ -515,7 +535,7 @@ Item {
 
                 DevicesPage {
                   id: devicesPage
-                  visible: root.page === "devices"
+                  visible: root.page === "devices" && root.service && root.service.connection === "ready"
                   width: parent.width
                   service: root.service
                   keyed: root.pageKeyed && root.page === "devices"
@@ -526,7 +546,7 @@ Item {
 
                 LcdPage {
                   id: lcdPage
-                  visible: root.page === "lcd"
+                  visible: root.page === "lcd" && root.service && root.service.connection === "ready"
                   width: parent.width
                   height: visible ? pageFlick.height : 0
                   service: root.service

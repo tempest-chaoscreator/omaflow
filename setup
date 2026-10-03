@@ -29,8 +29,10 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$desk_dir" >/dev/null 2>&1 || true
 fi
 echo "Desktop launcher written to $desk"
-echo "Omaflow does not install packages."
-echo "Install coolercontrold yourself. Omaflow talks only to 127.0.0.1:11987."
+echo "Omaflow talks only to 127.0.0.1:11987 and does not run as root."
+echo "The window and the bar chip can install the daemon package after you approve it:"
+echo "  omarchy pkg add coolercontrold"
+echo "That does not install the CoolerControl desktop package, and it does not enable the daemon."
 echo "Start it for this session, or enable it so it starts with the PC:"
 echo "  sudo systemctl start coolercontrold"
 echo "  sudo systemctl enable --now coolercontrold"

@@ -11,7 +11,7 @@ Column {
   property color fg: Color.foreground
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
-  property string version: "0.1.0"
+  property string version: "0.2.0"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)

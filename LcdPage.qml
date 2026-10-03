@@ -20,13 +20,14 @@ Column {
   property int angle: 0
   property bool zeroOrientation: true
   property string face: "liquid"
-  property string shapeChoice: ""
   property bool syncOn: false
+  property bool liveKnown: false
   property bool lcdReady: false
   property bool touched: false
   property bool pushing: false
   property bool viewReady: false
   property string pushed: ""
+  property int previewGen: 0
   property color fg: Color.foreground
   property color accent: Color.accent
   property color accent2: Color.accent
@@ -44,31 +45,40 @@ Column {
   readonly property color ink2: deepen(accent2, saturation)
   readonly property bool combo: face === "cpu-gpu" || face === "cpu-liquid"
   readonly property int previewAngle: zeroOrientation ? 0 : angle
-  readonly property string detectedShape: detectShape()
-  readonly property string shownShape: (shapeChoice === "round" || shapeChoice === "square") ? shapeChoice : detectedShape
-  readonly property real frameAspect: frameRatio()
+  readonly property string detectedShape: screen ? detectShape() : "round"
+  readonly property string shownShape: detectedShape
+  readonly property real frameAspect: screen ? frameRatio() : 1
+  readonly property bool logoFace: face === "omarchy" || face === "omarchy-time"
+  readonly property bool keepOn: !service || service.lcdBackground !== false
+  property string previewSource: ""
+  property string clockShown: ""
   readonly property var faces: [
     { id: "liquid", label: "Liquid" },
     { id: "cpu", label: "CPU" },
     { id: "cpu-gpu", label: "CPU | GPU" },
-    { id: "cpu-liquid", label: "CPU | Liquid" }
+    { id: "cpu-liquid", label: "CPU | Liquid" },
+    { id: "omarchy", label: "Omarchy" },
+    { id: "omarchy-time", label: "Omarchy | Time" }
   ]
-  // Round and Square sit on the bottom row, opposite Sync and Off.
-  readonly property var navItems: [
-    { id: "face", face: 0, x: 0, y: 0 },
-    { id: "face", face: 1, x: 1, y: 0 },
-    { id: "face", face: 2, x: 2, y: 0 },
-    { id: "face", face: 3, x: 3, y: 0 },
-    { id: "zero", x: 6, y: 0 },
-    { id: "ccw", x: 0, y: 1 },
-    { id: "cw", x: 2, y: 1 },
-    { id: "sync", x: 0, y: 2 },
-    { id: "off", x: 1, y: 2 },
-    { id: "shape", shape: "round", x: 5, y: 2 },
-    { id: "shape", shape: "square", x: 6, y: 2 },
-    { id: "bright", x: 0, y: 3 },
-    { id: "sat", x: 1, y: 3 }
-  ]
+  // Face cells keep their column when Keep updating is off so the dimmed
+  // buttons stay in place while the keyboard skips them.
+  readonly property var navItems: {
+    var allowAll = keepOn
+    var out = []
+    var i
+    for (i = 0; i < faces.length; i++) {
+      if (!allowAll && faces[i].id !== "omarchy") continue
+      out.push({ id: "face", face: i, x: i, y: 0 })
+    }
+    out.push({ id: "zero", x: 6, y: 0 })
+    out.push({ id: "ccw", x: 0, y: 1 })
+    out.push({ id: "cw", x: 2, y: 1 })
+    out.push({ id: "sync", x: 0, y: 2 })
+    out.push({ id: "off", x: 1, y: 2 })
+    out.push({ id: "bright", x: 0, y: 3 })
+    out.push({ id: "sat", x: 1, y: 3 })
+    return out
+  }
 
   // Same hue as the theme. Higher values raise saturation and lower lightness a little.
   function deepen(base, amount) {
@@ -142,17 +152,31 @@ Column {
     return { w: 320, h: 320 }
   }
 
-  function shapeTip(kind) {
-    var auto = shapeChoice !== "round" && shapeChoice !== "square"
-    var word = kind === "square" ? "Square panel" : "Round glass"
-    if (shapeChoice === kind) return word + ". Click again to follow the cooler automatically."
-    if (auto && detectedShape === kind) return word + ", detected from this cooler."
-    return "Show a " + (kind === "square" ? "square" : "round") + " frame."
+  function clockNow() {
+    return Qt.formatTime(new Date(), "HH:mm")
   }
 
+  function faceEnabled(id) {
+    if (keepOn) return true
+    return id === "omarchy"
+  }
+
+  function faceNavIndex(faceIndex) {
+    for (var i = 0; i < navItems.length; i++) {
+      if (navItems[i].id === "face" && navItems[i].face === faceIndex) return i
+    }
+    return navIndex
+  }
+
+  // Logo plates ignore temperatures. The field is the Liquid black, and the clock uses the accent.
   function mark() {
     var px = pixelSize()
-    return shownShape + "|" + px.w + "x" + px.h + "|" + face + "|" + primaryText() + "|" + secondaryText() + "|" + hexOf(ink) + "|" + hexOf(ink2) + "|" + brightness + "|" + saturation + "|" + angle
+    var head = shownShape + "|" + px.w + "x" + px.h + "|" + face + "|"
+    if (face === "omarchy" || face === "omarchy-time") {
+      var minute = face === "omarchy-time" ? clockNow() : ""
+      return head + minute + "|#0a0c0b|" + hexOf(ink) + "||" + brightness + "|" + angle
+    }
+    return head + primaryText() + "|" + secondaryText() + "|" + hexOf(ink) + "|" + hexOf(ink2) + "|" + brightness + "|" + angle
   }
 
   function indexOf(id) {
@@ -168,7 +192,10 @@ Column {
       if (isFinite(Number(obj.brightness))) brightness = Math.max(0, Math.min(100, Math.round(Number(obj.brightness))))
       if (isFinite(Number(obj.saturation))) saturation = Math.max(0, Math.min(100, Math.round(Number(obj.saturation))))
       if (obj.zeroOrientation !== undefined) zeroOrientation = !!obj.zeroOrientation
-      if (obj.shape === "round" || obj.shape === "square") shapeChoice = String(obj.shape)
+      if (obj.live !== undefined) {
+        syncOn = obj.live === true
+        liveKnown = true
+      }
       touched = true
     } catch (e) {}
     finishView()
@@ -176,8 +203,16 @@ Column {
 
   function finishView() {
     if (viewReady) return
+    var snap = !keepOn && face !== "omarchy"
+    if (snap) face = "omarchy"
     viewReady = true
+    if (snap) saveView()
     if (screen && !lcdReady) pull()
+  }
+
+  function enforceKeepFace() {
+    if (!viewReady || keepOn || face === "omarchy") return
+    setFace("omarchy")
   }
 
   function writeView() {
@@ -189,7 +224,7 @@ Column {
       face: face,
       zeroOrientation: zeroOrientation
     }
-    if (shapeChoice === "round" || shapeChoice === "square") obj.shape = shapeChoice
+    if (liveKnown) obj.live = syncOn
     lcdFile.setText(JSON.stringify(obj))
   }
 
@@ -211,6 +246,8 @@ Column {
           var lcd = rows[i].lcd
           if (!root.touched && isFinite(Number(lcd.brightness))) root.brightness = Number(lcd.brightness)
           root.syncOn = String(lcd.mode || "") !== "none"
+          root.liveKnown = true
+          root.saveView()
         }
       }
       root.lcdReady = true
@@ -226,7 +263,7 @@ Column {
     service.pushLcdImage(
       screen.deviceUid, screen.name, brightness, face, angle,
       hexOf(ink), hexOf(ink2), primaryText(), secondaryText(),
-      shownShape, px.w, px.h,
+      shownShape, px.w, px.h, screen.deviceName || "",
       function(res) {
         root.pushing = false
         if (res && res.ok) root.pushed = token
@@ -234,9 +271,29 @@ Column {
     )
   }
 
+  function schedulePreview() {
+    if (!logoFace || !service) return
+    previewDelay.restart()
+  }
+
+  function requestPreview() {
+    if (!logoFace || !service || !service.previewLcd) return
+    previewGen = previewGen + 1
+    var gen = previewGen
+    var px = pixelSize()
+    var name = screen ? String(screen.deviceName || "") : ""
+    service.previewLcd(name, px.w, px.h, face, hexOf(ink), function(res) {
+      if (gen !== root.previewGen || !root.logoFace) return
+      if (!res || !res.ok) return
+      root.previewSource = "file://" + Quickshell.env("HOME") + "/.cache/omaflow/lcd-preview.png?v=" + gen
+    })
+  }
+
   function turnOff() {
     syncOn = false
+    liveKnown = true
     pushed = ""
+    saveView()
     if (!service || !screen) return
     service.setLcd(screen.deviceUid, screen.name, {
       brightness: brightness, orientation: 0, colors: [], mode: "none"
@@ -253,23 +310,6 @@ Column {
   function zeroPreview() {
     zeroOrientation = true
     saveView()
-  }
-
-  function setShape(kind) {
-    if (kind !== "round" && kind !== "square") return
-    if (shapeChoice === "" && detectedShape === kind) return
-    var next = shapeChoice === kind ? "" : kind
-    var after = (next === "round" || next === "square") ? next : detectedShape
-    var before = shownShape
-    shapeChoice = next
-    if (syncOn && after !== before) push()
-  }
-
-  function shapeIndex(kind) {
-    for (var i = 0; i < navItems.length; i++) {
-      if (navItems[i].id === "shape" && navItems[i].shape === kind) return i
-    }
-    return 0
   }
 
   function setAngle(deg) {
@@ -303,7 +343,6 @@ Column {
     var item = navAt()
     if (!item || item.id !== id) return false
     if (id === "face") return item.face === extra
-    if (id === "shape") return item.shape === extra
     return true
   }
 
@@ -327,34 +366,58 @@ Column {
   function activateNav() {
     var item = navAt()
     if (!item) return
-    if (item.id === "face") setFace(faces[item.face].id)
-    else if (item.id === "shape") setShape(item.shape)
+    if (item.id === "face") {
+      var picked = faces[item.face] ? faces[item.face].id : ""
+      if (!faceEnabled(picked)) return
+      setFace(picked)
+    }
     else if (item.id === "zero") zeroPreview()
     else if (item.id === "ccw") stepAngle(-30)
     else if (item.id === "cw") stepAngle(30)
-    else if (item.id === "sync") { syncOn = true; push() }
+    else if (item.id === "sync") {
+      syncOn = true
+      liveKnown = true
+      saveView()
+      push()
+    }
     else if (item.id === "off") turnOff()
   }
 
-  onVisibleChanged: if (visible && viewReady && screen && !lcdReady) pull()
+  onVisibleChanged: {
+    if (visible && viewReady && screen && !lcdReady) pull()
+    if (visible && logoFace) schedulePreview()
+  }
   onScreenKeyChanged: {
     if (!screenKey) return
     lcdReady = false
     pushed = ""
     if (viewReady && screen) pull()
+    if (logoFace) schedulePreview()
   }
+  onKeepOnChanged: enforceKeepFace()
   onFaceChanged: {
     saveView()
     if (ring) ring.requestPaint()
+    if (logoFace) {
+      clockShown = clockNow()
+      schedulePreview()
+    }
   }
-  onAccent2Changed: if (syncOn && viewReady && visible) pushDelay.restart()
+  onAccent2Changed: if (syncOn && keepOn && viewReady && visible) pushDelay.restart()
   onAngleChanged: saveView()
   onBrightnessChanged: saveView()
   onSaturationChanged: saveView()
   onZeroOrientationChanged: saveView()
-  onShapeChoiceChanged: saveView()
-  onShownShapeChanged: if (ring) ring.requestPaint()
-  onInkChanged: if (ring) ring.requestPaint()
+  onShownShapeChanged: {
+    if (ring) ring.requestPaint()
+    if (logoFace) schedulePreview()
+  }
+  onInkChanged: {
+    if (ring) ring.requestPaint()
+    if (!logoFace) return
+    schedulePreview()
+    if (syncOn && keepOn && viewReady && visible) pushDelay.restart()
+  }
   onInk2Changed: if (ring) ring.requestPaint()
   onPreviewAngleChanged: if (ring) ring.requestPaint()
 
@@ -373,10 +436,26 @@ Column {
   }
 
   Timer {
-    interval: 5000
+    id: previewDelay
+    interval: 180
+    repeat: false
+    onTriggered: root.requestPreview()
+  }
+
+  Timer {
+    id: clockTick
+    interval: 1000
     repeat: true
-    running: root.syncOn && root.lcdReady && root.viewReady && root.screen !== null && root.service && root.service.connection === "ready"
-    onTriggered: if (root.mark() !== root.pushed) root.push()
+    running: root.visible && root.face === "omarchy-time"
+    triggeredOnStart: true
+    onTriggered: {
+      var now = root.clockNow()
+      var changed = now !== root.clockShown
+      if (!changed && root.previewSource !== "") return
+      root.clockShown = now
+      root.schedulePreview()
+      if (changed && root.syncOn && root.keepOn && root.viewReady) root.push()
+    }
   }
 
   FileView {
@@ -407,13 +486,18 @@ Column {
           text: modelData.label
           bordered: true
           selected: root.face === modelData.id
+          opacity: {
+            var on = root.keepOn
+            return root.faceEnabled(modelData.id) ? 1 : 0.38
+          }
           hasCursor: root.aimed("face", index)
           foreground: root.fg
           accent: root.accent
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           onClicked: {
-            root.navIndex = index
+            if (!root.faceEnabled(modelData.id)) return
+            root.navIndex = root.faceNavIndex(index)
             root.setFace(modelData.id)
           }
         }
@@ -534,8 +618,20 @@ Column {
             angle: root.previewAngle
           }
 
+          Image {
+            anchors.fill: parent
+            visible: root.logoFace && root.previewSource !== ""
+            source: root.previewSource
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            mipmap: true
+            cache: false
+            asynchronous: true
+          }
+
           Canvas {
             id: ring
+            visible: !root.logoFace
             anchors.fill: parent
             onWidthChanged: requestPaint()
             onHeightChanged: requestPaint()
@@ -585,7 +681,7 @@ Column {
 
           Column {
             anchors.centerIn: parent
-            visible: !root.combo
+            visible: !root.logoFace && !root.combo
             spacing: Style.space(2)
             Text {
               anchors.horizontalCenter: parent.horizontalCenter
@@ -608,7 +704,7 @@ Column {
 
           Row {
             anchors.centerIn: parent
-            visible: root.combo
+            visible: !root.logoFace && root.combo
             spacing: Style.space(16)
 
             Column {
@@ -876,7 +972,7 @@ Column {
   Item {
     id: actionRow
     width: parent.width
-    height: Math.max(syncCluster.implicitHeight, shapeCluster.implicitHeight)
+    height: Math.max(syncCluster.implicitHeight, deviceCaption.implicitHeight)
 
     Row {
       id: syncCluster
@@ -894,6 +990,8 @@ Column {
         tooltipText: "Keep the pump on this frame"
         onClicked: {
           root.syncOn = true
+          root.liveKnown = true
+          root.saveView()
           root.push()
         }
       }
@@ -912,51 +1010,49 @@ Column {
 
     Text {
       anchors.left: syncCluster.right
-      anchors.right: shapeCluster.left
+      anchors.right: deviceCaption.left
       anchors.leftMargin: Style.space(12)
       anchors.rightMargin: Style.space(12)
       anchors.verticalCenter: parent.verticalCenter
       elide: Text.ElideRight
-      text: root.angle + "°    " + (root.zeroOrientation ? "Preview held level" : "Preview follows the dial") + "    " + (root.shownShape === "square" ? "Square" : "Round") + (root.shapeChoice === "" ? " · auto" : "")
+      text: root.angle + "°    " + (root.zeroOrientation ? "Preview held level" : "Preview follows the dial")
       color: root.muted
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }
 
     Row {
-      id: shapeCluster
+      id: deviceCaption
       anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(8)
 
-      Button {
-        text: "Round"
-        bordered: true
-        selected: root.shownShape === "round"
-        hasCursor: root.aimed("shape", "round")
-        foreground: root.fg
-        accent: root.accent
-        fontFamily: root.fontFamily
-        fontSize: Style.font.caption
-        tooltipText: root.shapeTip("round")
-        onClicked: {
-          root.navIndex = root.shapeIndex("round")
-          root.setShape("round")
-        }
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.min(implicitWidth, Math.max(Style.space(72), actionRow.width * 0.26))
+        elide: Text.ElideRight
+        text: root.screen ? String(root.screen.deviceName || "Display") : ""
+        color: root.muted
+        opacity: 0.72
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
-      Button {
-        text: "Square"
-        bordered: true
-        selected: root.shownShape === "square"
-        hasCursor: root.aimed("shape", "square")
-        foreground: root.fg
-        accent: root.accent
-        fontFamily: root.fontFamily
-        fontSize: Style.font.caption
-        tooltipText: root.shapeTip("square")
-        onClicked: {
-          root.navIndex = root.shapeIndex("square")
-          root.setShape("square")
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: {
+          var screen = root.screen
+          if (!screen) return ""
+          var w = Number(screen.screenWidth) || 0
+          var h = Number(screen.screenHeight) || 0
+          var pxW = w > 0 && h > 0 ? Math.round(w) : 320
+          var pxH = w > 0 && h > 0 ? Math.round(h) : 320
+          var kind = root.shownShape === "square" ? "Square" : "Round"
+          return pxW + "×" + pxH + "  ·  " + kind
         }
+        color: root.muted
+        opacity: 0.72
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
     }
   }

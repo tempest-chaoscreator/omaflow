@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -25,6 +26,14 @@ Column {
   property bool bootBusy: false
   property string bootLine: ""
   readonly property var textStops: [9, 10, 11, 12, 14, 16, 20]
+  // Buttons call into functions, so this key is what makes them repaint.
+  readonly property string lcdSpeedKey: {
+    var face = service && service.lcdFace ? service.lcdFace : "liquid"
+    var seconds = service ? service.lcdSeconds : 5
+    var theme = service && service.lcdThemeSync === true
+    var keep = !service || service.lcdBackground !== false
+    return face + "|" + seconds + "|" + theme + "|" + keep
+  }
 
   width: parent ? parent.width : 0
   spacing: Style.space(12)
@@ -59,18 +68,23 @@ Column {
       item.y = out.length
       out.push(item)
     }
-    if (bootState !== "enabled") place({ kind: "boot", index: 0 })
+    if (bootState !== "enabled" && service && service.daemonGate !== "install" && service.daemonGate !== "unknown")
+      place({ kind: "boot", index: 0 })
+    place({ kind: "lcd", index: 0 })
+    if (!service || service.lcdBackground !== false) place({ kind: "lcdSpeed", index: 0 })
     place({ kind: "fill", index: 0 })
     place({ kind: "textFollow", index: 0 })
     place({ kind: "textSize", index: 0 })
     place({ kind: "export", index: 0 })
     place({ kind: "import", index: 0 })
     place({ kind: "bar", index: 0 })
-    for (i = 0; i < switches.length; i++) place({ kind: "daemon", index: i })
-    var fns = service && service.functions ? service.functions : []
-    for (i = 0; i < fns.length; i++) place({ kind: "function", index: i })
-    var alerts = service && service.alerts ? service.alerts : []
-    for (i = 0; i < alerts.length; i++) place({ kind: "alert", index: i })
+    if (service && service.connection === "ready") {
+      for (i = 0; i < switches.length; i++) place({ kind: "daemon", index: i })
+      var fns = service.functions ? service.functions : []
+      for (i = 0; i < fns.length; i++) place({ kind: "function", index: i })
+      var alerts = service.alerts ? service.alerts : []
+      for (i = 0; i < alerts.length; i++) place({ kind: "alert", index: i })
+    }
     return out
   }
 
@@ -123,6 +137,55 @@ Column {
     if (index < 0) index = 0
     if (index > span) index = span
     service.setUi({ textFollow: false, textSize: textStops[index] })
+  }
+
+  function lcdFace() {
+    return service && service.lcdFace ? String(service.lcdFace) : "liquid"
+  }
+
+  function secondsLookSelected(seconds) {
+    if (!service) return seconds === 5
+    if (lcdFace() === "omarchy-time") return seconds === 60
+    if (lcdFace() === "omarchy" && service.lcdThemeSync === true) return false
+    return service.lcdSeconds === seconds
+  }
+
+  function secondsDimmed(seconds) {
+    return lcdFace() === "omarchy-time" && seconds !== 60
+  }
+
+  function themeSyncDimmed() {
+    if (!service || service.lcdBackground === false) return true
+    return lcdFace() !== "omarchy"
+  }
+
+  function pickLcdSeconds(seconds) {
+    if (!service || lcdFace() === "omarchy-time") return
+    if (lcdFace() === "omarchy") service.setUi({ lcdSeconds: seconds, lcdThemeSync: false })
+    else service.setUi({ lcdSeconds: seconds })
+  }
+
+  function pickThemeSync() {
+    if (!service || themeSyncDimmed()) return
+    service.setUi({ lcdThemeSync: true })
+  }
+
+  function stepLcd(dx) {
+    if (!service || lcdFace() === "omarchy-time") return
+    var theme = lcdFace() === "omarchy"
+    var stops = theme ? [2, 5, 10, 30, 60, "theme"] : [2, 5, 10, 30, 60]
+    var index = 1
+    var i
+    if (theme && service.lcdThemeSync === true) index = stops.length - 1
+    else {
+      for (i = 0; i < stops.length; i++) if (stops[i] === service.lcdSeconds) index = i
+    }
+    index = index + dx
+    if (index < 0) index = 0
+    if (index > stops.length - 1) index = stops.length - 1
+    if (stops[index] === "theme") service.setUi({ lcdThemeSync: true })
+    else if (theme) service.setUi({ lcdSeconds: stops[index], lcdThemeSync: false })
+    else service.setUi({ lcdSeconds: stops[index] })
   }
 
   function enableBoot() {
@@ -205,6 +268,10 @@ Column {
       stepText(dx)
       return
     }
+    if (item && item.kind === "lcdSpeed" && dx && !dy) {
+      stepLcd(dx)
+      return
+    }
     navIndex = Nav.step(navItems, navIndex, dx, dy)
   }
 
@@ -275,6 +342,14 @@ Column {
     if (!item) return
     if (item.kind === "boot") {
       enableBoot()
+      return
+    }
+    if (item.kind === "lcd") {
+      if (service) service.setUi({ lcdBackground: !(service.lcdBackground !== false) })
+      return
+    }
+    if (item.kind === "lcdSpeed") {
+      stepLcd(1)
       return
     }
     if (item.kind === "fill") {
@@ -393,9 +468,11 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
-    text: root.bootState === "enabled"
-      ? "The daemon starts with the PC. Omaflow connects when it is up, including a window or bar chip that opened first."
-      : "The daemon is not enabled at boot. One approval turns it on now and at the next start. If the prompt does not appear, run: sudo systemctl enable --now coolercontrold"
+    text: root.service && root.service.daemonGate === "install"
+      ? "Install coolercontrold from the button above. Start with the PC stays off until you turn it on."
+      : root.bootState === "enabled"
+        ? "The daemon starts with the PC. Omaflow connects when it is up, including a window or bar chip that opened first."
+        : "The daemon is not enabled at boot. One approval turns it on now and at the next start. If the prompt does not appear, run: sudo systemctl enable --now coolercontrold"
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -403,7 +480,7 @@ Column {
 
   Row {
     spacing: Style.space(10)
-    visible: root.bootState !== "enabled"
+    visible: root.bootState !== "enabled" && root.service && root.service.daemonGate !== "install" && root.service.daemonGate !== "unknown"
     Button {
       text: root.bootBusy ? "Waiting" : "Start with the PC"
       bordered: true
@@ -424,6 +501,114 @@ Column {
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
+  }
+
+  Text {
+    text: "AIO LCD"
+    color: root.fg
+    font.family: root.fontFamily
+    font.pixelSize: Style.space(14)
+    font.bold: true
+    topPadding: Style.space(8)
+  }
+
+  Row {
+    spacing: Style.space(10)
+    SquareSwitch {
+      anchors.verticalCenter: parent.verticalCenter
+      on: !root.service || root.service.lcdBackground !== false
+      foreground: root.fg
+      accent: root.aimed("lcd", 0) ? root.accent : root.fg
+      onClicked: if (root.service) root.service.setUi({ lcdBackground: !(root.service.lcdBackground !== false) })
+    }
+    Text {
+      anchors.verticalCenter: parent.verticalCenter
+      text: "Keep updating"
+      color: root.aimed("lcd", 0) ? root.accent : root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+    }
+  }
+
+  Text {
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: "The cooler keeps the last picture it was sent. With this on, a new picture goes out on the interval below, including while this window is closed. Omarchy waits for a theme change. Omarchy | Time updates once a minute. Only theme sync sends that logo when the theme changes and ignores the interval."
+    color: root.muted
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  Flow {
+    width: parent.width
+    spacing: Style.space(8)
+    visible: !root.service || root.service.lcdBackground !== false
+    Button {
+      text: "2s"
+      bordered: true
+      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(2)
+      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(2) ? 0.38 : 1
+      foreground: root.fg
+      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.pickLcdSeconds(2)
+    }
+    Button {
+      text: "5s"
+      bordered: true
+      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(5)
+      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(5) ? 0.38 : 1
+      foreground: root.fg
+      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.pickLcdSeconds(5)
+    }
+    Button {
+      text: "10s"
+      bordered: true
+      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(10)
+      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(10) ? 0.38 : 1
+      foreground: root.fg
+      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.pickLcdSeconds(10)
+    }
+    Button {
+      text: "30s"
+      bordered: true
+      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(30)
+      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(30) ? 0.38 : 1
+      foreground: root.fg
+      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.pickLcdSeconds(30)
+    }
+    Button {
+      text: "60s"
+      bordered: true
+      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(60)
+      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(60) ? 0.38 : 1
+      foreground: root.fg
+      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.pickLcdSeconds(60)
+    }
+    Button {
+      text: "Only theme sync"
+      bordered: true
+      selected: root.lcdSpeedKey.length > 0 && root.service && root.service.lcdFace === "omarchy" && root.service.lcdThemeSync === true
+      opacity: root.lcdSpeedKey.length > 0 && root.themeSyncDimmed() ? 0.38 : 1
+      foreground: root.fg
+      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.pickThemeSync()
+    }
   }
 
   Text {
@@ -672,6 +857,7 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
+    visible: root.service && root.service.connection === "ready"
     text: "Fan writes and sensor polls stay on coolercontrold. These are the daemon's own options."
     color: root.fg
     font.family: root.fontFamily
@@ -679,7 +865,7 @@ Column {
   }
 
   Repeater {
-    model: root.switches
+    model: root.service && root.service.connection === "ready" ? root.switches : []
     delegate: Row {
       required property var modelData
       required property int index
@@ -773,6 +959,7 @@ Column {
   }
 
   Text {
+    visible: root.service && root.service.connection === "ready"
     text: "Alerts"
     color: root.fg
     font.family: root.fontFamily
@@ -781,7 +968,7 @@ Column {
   }
 
   Text {
-    visible: !root.service || !root.service.alerts || root.service.alerts.length === 0
+    visible: root.service && root.service.connection === "ready" && (!root.service.alerts || root.service.alerts.length === 0)
     text: "No alerts yet."
     color: root.muted
     font.family: root.fontFamily

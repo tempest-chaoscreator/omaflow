@@ -4,16 +4,17 @@
 status prints whether the chip is enabled.
 enable installs https://github.com/tempest-chaoscreator/omaflow when the
 plugin directory is missing, and otherwise only asks Omarchy to show it.
-A 1.x install is left in place and reported as an error.
+An install from the previous major version is left in place and reported
+as an error, so this switch does not replace that directory.
 disable takes the chip off the bar and leaves the files in place.
 
-This does not enable coolercontrold, and it does not run as root.
+This does not install coolercontrold, does not enable it, and does not run as root.
+The chip has its own Install and Start buttons.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,6 @@ from pathlib import Path
 PLUGIN_ID = "tempest-chaoscreator.omaflow"
 REPO = "https://github.com/tempest-chaoscreator/omaflow.git"
 DEST = Path.home() / ".config" / "omarchy" / "plugins" / PLUGIN_ID
-BACKUP = Path.home() / ".config" / "omaflow" / "plugin-1.3.0"
 
 
 def emit(obj: dict) -> None:
@@ -38,7 +38,7 @@ def plugin_rows() -> list:
             text=True,
             timeout=20,
         )
-    except (OSError, subprocess.TimeoutExpired) as err:
+    except (OSError, subprocess.TimeoutExpired):
         return []
     if out.returncode != 0:
         return []
@@ -68,24 +68,6 @@ def plugin_state() -> dict:
             enabled = row.get("enabled") is True
             break
     return {"ok": True, "enabled": enabled, "version": version}
-
-
-def backup_legacy() -> None:
-    manifest = DEST / "manifest.json"
-    if not manifest.is_file() or BACKUP.exists():
-        return
-    try:
-        version = str(json.loads(manifest.read_text()).get("version") or "")
-    except (OSError, json.JSONDecodeError):
-        return
-    if not version.startswith("1."):
-        return
-    BACKUP.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        DEST,
-        BACKUP,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-    )
 
 
 def installed_version() -> str:
@@ -118,8 +100,7 @@ def fail_state(detail: str) -> dict:
 def enable() -> dict:
     version = installed_version()
     if version.startswith("1."):
-        backup_legacy()
-        return fail_state("Remove the old Omaflow plugin, then add the 0.1 repository")
+        return fail_state("An older Omaflow plugin is installed. Remove it, then turn this on again.")
     if not version:
         result = subprocess.run(
             ["omarchy", "plugin", "add", REPO, "--enable", "--yes"],

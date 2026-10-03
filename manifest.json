@@ -2,20 +2,18 @@
   "schemaVersion": 1,
   "id": "tempest-chaoscreator.omaflow",
   "name": "Omaflow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Tempest",
   "license": "MIT",
   "homepage": "https://github.com/tempest-chaoscreator/omaflow",
-  "description": "Omaflow is the cooling window and the Omarchy bar chip. Both talk to coolercontrold.",
+  "description": "Omaflow is the cooling window and the Omarchy bar chip. Both talk to coolercontrold. The chip can install or start the daemon after you approve it.",
   "kinds": [
     "service",
-    "bar-widget",
-    "panel"
+    "bar-widget"
   ],
   "entryPoints": {
     "service": "Service.qml",
-    "barWidget": "Panel.qml",
-    "panel": "Standalone.qml"
+    "barWidget": "Panel.qml"
   },
   "barWidget": {
     "displayName": "Omaflow",

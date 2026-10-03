@@ -6,6 +6,8 @@ import "Nav.js" as Nav
 
 // Device list. Spinning headers stay open. Stopped headers stay folded.
 // Calibrate sits on the row that owns those fans, including a shared curve.
+// The daemon sweeps one fan at a time. The card follows that batch and
+// shows the saved speed map. Modes are left as they are.
 Column {
   id: root
 
@@ -191,6 +193,16 @@ Column {
     return rpm ? duty + "    " + rpm : duty
   }
 
+  Text {
+    width: parent.width
+    wrapMode: Text.WordWrap
+    visible: root.service && root.service.lastError !== ""
+    text: root.service ? root.service.lastError : ""
+    color: Color.urgent
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
   Column {
     width: parent.width
     spacing: Style.space(8)
@@ -266,30 +278,46 @@ Column {
 
         Repeater {
           model: sharedBlock.modelData.rows
-          delegate: Item {
+          delegate: Column {
+            id: sharedRow
             required property var modelData
             width: sharedBlock.width
-            height: Style.space(22)
-            Text {
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(16)
-              anchors.right: sharedDuty.left
-              anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              text: modelData.label || modelData.name
-              color: Number(modelData.rpm) > 0 ? root.fg : root.muted
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(12)
-              elide: Text.ElideRight
+            spacing: Style.space(2)
+
+            Item {
+              width: parent.width
+              height: Style.space(22)
+              Text {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(16)
+                anchors.right: sharedDuty.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: sharedRow.modelData.label || sharedRow.modelData.name
+                color: Number(sharedRow.modelData.rpm) > 0 ? root.fg : root.muted
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(12)
+                elide: Text.ElideRight
+              }
+              Text {
+                id: sharedDuty
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.dutyText(sharedRow.modelData)
+                color: root.muted
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(12)
+              }
             }
-            Text {
-              id: sharedDuty
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.dutyText(modelData)
-              color: root.muted
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(12)
+
+            CalibNote {
+              width: parent.width
+              channel: sharedRow.modelData
+              service: root.service
+              fg: root.fg
+              accent: root.accent
+              muted: root.muted
+              fontFamily: root.fontFamily
             }
           }
         }
@@ -399,32 +427,48 @@ Column {
 
       Repeater {
         model: deviceBlock.modelData.shown || []
-        delegate: Item {
+        delegate: Column {
+          id: shownRow
           required property var modelData
           width: deviceBlock.width
-          height: Style.space(22)
+          spacing: Style.space(2)
 
-          Text {
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(16)
-            anchors.right: dutyLabel.left
-            anchors.rightMargin: Style.space(8)
-            anchors.verticalCenter: parent.verticalCenter
-            text: modelData.label || modelData.name
-            color: Number(modelData.rpm) > 0 ? root.fg : root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-            elide: Text.ElideRight
+          Item {
+            width: parent.width
+            height: Style.space(22)
+
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(16)
+              anchors.right: dutyLabel.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: shownRow.modelData.label || shownRow.modelData.name
+              color: Number(shownRow.modelData.rpm) > 0 ? root.fg : root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(12)
+              elide: Text.ElideRight
+            }
+
+            Text {
+              id: dutyLabel
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.dutyText(shownRow.modelData)
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(12)
+            }
           }
 
-          Text {
-            id: dutyLabel
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.dutyText(modelData)
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
+          CalibNote {
+            width: parent.width
+            channel: shownRow.modelData
+            service: root.service
+            fg: root.fg
+            accent: root.accent
+            muted: root.muted
+            fontFamily: root.fontFamily
           }
         }
       }
@@ -464,30 +508,46 @@ Column {
 
       Repeater {
         model: root.opened[deviceBlock.modelData.uid] === true ? deviceBlock.modelData.hidden : []
-        delegate: Item {
+        delegate: Column {
+          id: hiddenRow
           required property var modelData
           width: deviceBlock.width
-          height: Style.space(22)
-          Text {
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(16)
-            anchors.right: hiddenDuty.left
-            anchors.rightMargin: Style.space(8)
-            anchors.verticalCenter: parent.verticalCenter
-            text: modelData.label || modelData.name
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-            elide: Text.ElideRight
+          spacing: Style.space(2)
+
+          Item {
+            width: parent.width
+            height: Style.space(22)
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(16)
+              anchors.right: hiddenDuty.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: hiddenRow.modelData.label || hiddenRow.modelData.name
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(12)
+              elide: Text.ElideRight
+            }
+            Text {
+              id: hiddenDuty
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.dutyText(hiddenRow.modelData)
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(12)
+            }
           }
-          Text {
-            id: hiddenDuty
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.dutyText(modelData)
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
+
+          CalibNote {
+            width: parent.width
+            channel: hiddenRow.modelData
+            service: root.service
+            fg: root.fg
+            accent: root.accent
+            muted: root.muted
+            fontFamily: root.fontFamily
           }
         }
       }

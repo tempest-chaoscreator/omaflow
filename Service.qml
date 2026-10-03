@@ -1,6 +1,8 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import "CcMap.js" as Cc
+import "Calib.js" as Calib
 
 // Headless CoolerControl client. One per shell. Omaflow Plugin and
 // Omaflow both read this object. Fan writes and sensor polls
@@ -19,6 +21,23 @@ Item {
   property string connection: "down"
   property string notice: ""
   property string lastError: ""
+  // True only for a refused or dropped connection. A later successful read
+  // clears it. Action errors stay on screen.
+  property bool transportError: false
+  property string daemonPkg: "unknown"
+  property string daemonActive: "unknown"
+  property bool daemonBusy: false
+  property string daemonNote: ""
+  property int pkgCode: -1
+  property string unitBuf: ""
+  property bool lcdBackground: true
+  property int lcdSeconds: 5
+  property bool lcdThemeSync: false
+  property string lcdFace: "liquid"
+  property int lcdClockWait: 60000
+  property bool lcdKeepBusy: false
+
+  onConnectionChanged: if (connection === "ready") lcdKick.restart()
   property var modes: []
   property var profiles: []
   property var devices: []
@@ -36,6 +55,12 @@ Item {
   property var groups: []
   property var links: ({})
   property var hiddenDevices: ({})
+  property var calibrations: []
+  property var calibrationBatch: ({ active: false, started_at: "", entries: [] })
+  property var calibrationStatus: ({})
+  property bool calibrationAwait: false
+  property int calibrationMiss: 0
+  readonly property bool calibrationBusy: !!(calibrationBatch && calibrationBatch.active === true)
   property bool dynamicScale: false
   property bool textFollow: true
   property int textSize: 12
@@ -83,21 +108,129 @@ Item {
     var error = res && res.error ? String(res.error) : ""
     if (error === "need-token") {
       connection = "need-token"
+      transportError = false
       lastError = "Pair coolercontrold with ~/.config/omaflow/coolercontrol.token"
       return
     }
     if (status === 401 || status === 403) {
       connection = "unauthorized"
+      transportError = false
       lastError = "CoolerControl rejected the access token"
       return
     }
     if (status === 0) {
       connection = "down"
+      transportError = true
       lastError = error || "coolercontrold is not running"
       return
     }
+    transportError = false
     lastError = error || ("HTTP " + status)
     notice = lastError
+  }
+
+  // A successful read means the refused connection is over. Leave a real
+  // action error, such as a rejected curve, where the page can still show it.
+  function noteReady() {
+    if (connection === "need-token" || connection === "unauthorized") return
+    connection = "ready"
+    if (transportError) {
+      transportError = false
+      lastError = ""
+      notice = ""
+    }
+  }
+
+  readonly property string daemonGate: {
+    if (daemonPkg === "missing") return "install"
+    if (daemonActive === "active") return "up"
+    if (daemonActive === "activating" || daemonActive === "reloading") return "starting"
+    if (daemonPkg === "installed") return "start"
+    return "unknown"
+  }
+
+  function probeDaemon() {
+    if (pkgProbe.running || unitProbe.running || daemonBusy) return
+    unitBuf = ""
+    pkgCode = -1
+    pkgProbe.running = true
+    unitProbe.running = true
+  }
+
+  function finishProbe() {
+    if (pkgProbe.running || unitProbe.running || pkgCode < 0) return
+    var load = ""
+    var active = ""
+    var lines = unitBuf.split("\n")
+    var i
+    for (i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/^\s+|\s+$/g, "")
+      if (line.indexOf("LoadState=") === 0) load = line.substring(10)
+      else if (line.indexOf("ActiveState=") === 0) active = line.substring(12)
+    }
+    if (load === "loaded" || pkgCode === 0) daemonPkg = "installed"
+    else daemonPkg = "missing"
+    if (load === "not-found" && pkgCode !== 0) daemonPkg = "missing"
+    if (active === "active") daemonActive = "active"
+    else if (active === "activating" || active === "reloading") daemonActive = active
+    else if (active === "failed") daemonActive = "failed"
+    else if (daemonPkg === "installed") daemonActive = "inactive"
+    else daemonActive = "unknown"
+  }
+
+  function installDaemon() {
+    if (daemonGate !== "install" || daemonBusy || daemonInstall.running) return
+    daemonBusy = true
+    daemonNote = ""
+    daemonInstall.running = true
+  }
+
+  function startDaemon() {
+    if (daemonGate !== "start" || daemonBusy || daemonStart.running) return
+    daemonBusy = true
+    daemonNote = ""
+    daemonStart.running = true
+  }
+
+  function finishDaemonAction(code, fallback) {
+    daemonBusy = false
+    if (code !== 0 && !daemonNote)
+      daemonNote = fallback
+    probeDaemon()
+  }
+
+  function keepLcd() {
+    if (stopping || !lcdBackground || connection !== "ready" || lcdKeepBusy) return
+    if (!lcdChannels || !lcdChannels.length) return
+    var screen = lcdChannels[0]
+    if (!screen || !screen.deviceUid || !screen.name) return
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      root.lcdKeepBusy = false
+      if (res && res.ok === false) console.warn("omaflow lcd: " + (res.error || "image rejected"))
+    }
+    pending = next
+    lcdKeepBusy = true
+    var sample = temps || ({})
+    if (!send({
+      op: "lcd-keep",
+      id: id,
+      device: screen.deviceUid,
+      channel: screen.name,
+      deviceName: screen.deviceName || "",
+      width: Math.round(Number(screen.screenWidth) || 0),
+      height: Math.round(Number(screen.screenHeight) || 0),
+      cpu: sample.cpu === undefined ? null : sample.cpu,
+      gpu: sample.gpu === undefined ? null : sample.gpu,
+      coolant: sample.coolant === undefined ? null : sample.coolant,
+      interval: lcdFace === "omarchy-time" ? 60 : lcdSeconds
+    })) {
+      dropPending(id)
+      lcdKeepBusy = false
+    }
   }
 
   function rebuild() {
@@ -114,9 +247,10 @@ Item {
     call("GET", "/devices", null, function(res) {
       if (!res.ok) return fail(res)
       devices = (res.body && res.body.devices) || []
-      if (connection !== "need-token" && connection !== "unauthorized") connection = "ready"
+      noteReady()
       rebuild()
       ensureDefaultModes()
+      lcdKick.restart()
     })
     call("GET", "/profiles", null, function(res) {
       if (!res.ok) return fail(res)
@@ -150,10 +284,12 @@ Item {
     loadGroups()
     loadLinks()
     loadHidden()
+    loadCalibrations()
+    loadCalibrationBatch()
     call("GET", "/status", null, function(res) {
       if (!res.ok) return fail(res)
       statusDevices = (res.body && res.body.devices) || []
-      if (connection !== "need-token" && connection !== "unauthorized") connection = "ready"
+      noteReady()
       notice = ""
       rebuild()
     })
@@ -592,6 +728,10 @@ Item {
       if (isFinite(size) && size > 0) textSize = size
       // A toggle that landed before this read must not be put back.
       if (!showBarHeld) showBar = body.showBar !== false
+      lcdBackground = body.lcdBackground !== false
+      var seconds = Number(body.lcdSeconds)
+      lcdSeconds = root.lcdSecondsOk(seconds) ? seconds : 5
+      lcdThemeSync = body.lcdThemeSync === true
       uiReady = true
     }
     pending = next
@@ -602,7 +742,10 @@ Item {
     var body = {
       dynamicScale: dynamicScale,
       textFollow: textFollow,
-      textSize: textSize
+      textSize: textSize,
+      lcdBackground: lcdBackground,
+      lcdSeconds: lcdSeconds,
+      lcdThemeSync: lcdThemeSync
     }
     // Leave showBar out until the file has been read, unless this patch sets it.
     if (uiReady) body.showBar = showBar
@@ -614,9 +757,18 @@ Item {
       body.showBar = src.showBar !== false
       showBarHeld = true
     }
+    if (src.lcdBackground !== undefined) body.lcdBackground = src.lcdBackground !== false
+    if (src.lcdSeconds !== undefined) {
+      var seconds = Number(src.lcdSeconds)
+      if (lcdSecondsOk(seconds)) body.lcdSeconds = seconds
+    }
+    if (src.lcdThemeSync !== undefined) body.lcdThemeSync = src.lcdThemeSync === true
     dynamicScale = body.dynamicScale
     textFollow = body.textFollow
     textSize = body.textSize
+    lcdBackground = body.lcdBackground !== false
+    lcdSeconds = lcdSecondsOk(body.lcdSeconds) ? body.lcdSeconds : 5
+    lcdThemeSync = body.lcdThemeSync === true
     if (body.showBar !== undefined) showBar = body.showBar
     var id = rpcId
     rpcId = rpcId + 1
@@ -830,8 +982,15 @@ Item {
   // An empty mode is refused: activating one makes the daemon reset every channel.
   // A profile another mode still uses is copied after this mode is running,
   // so the write does not move the other mode.
+  // A running calibration owns the channel. The daemon rejects other writes
+  // until that sweep finishes, so Apply waits.
   function applyModeCurves(uid, jobs, done) {
     if (!uid) return
+    if (calibrationBusy) {
+      lastError = "A fan is being calibrated. Apply waits until that sweep finishes."
+      notice = lastError
+      return
+    }
     var split = splitCurveJobs(uid, jobs)
     saveGraphs(uid, split.own, function() {
       call("POST", "/modes-active/" + encodeURIComponent(uid), {}, function(res) {
@@ -849,10 +1008,83 @@ Item {
   }
 
   function startCalibration(deviceUid, channel) {
-    var path = "/calibrations/" + encodeURIComponent(deviceUid) + "/channels/" + encodeURIComponent(channel) + "/start"
-    call("POST", path, {}, function(res) {
-      if (!res.ok) return fail(res)
-      notice = "Calibration started for " + channel
+    startCalibrations([{ deviceUid: deviceUid, name: channel }])
+  }
+
+  function loadCalibrations() {
+    call("GET", "/calibrations", null, function(res) {
+      if (!res.ok) {
+        if (Number(res.status) === 404) {
+          calibrations = []
+          return
+        }
+        return fail(res)
+      }
+      calibrations = (res.body && res.body.calibrations) || []
+    })
+  }
+
+  // GET /calibrations/batch is JSON null when this daemon has never swept.
+  // A start that just returned 202 can beat the first read, so a few empty
+  // replies keep the queued card instead of dropping the sweep.
+  function loadCalibrationBatch() {
+    call("GET", "/calibrations/batch", null, function(res) {
+      if (!res.ok) {
+        if (Number(res.status) === 404) {
+          calibrationAwait = false
+          calibrationMiss = 0
+          calibrationBatch = Calib.emptyBatch()
+          calibrationStatus = ({})
+          return
+        }
+        if (calibrationAwait) {
+          calibrationMiss = calibrationMiss + 1
+          if (calibrationMiss < 3) return
+          calibrationAwait = false
+        }
+        return fail(res)
+      }
+      var was = calibrationBusy
+      var next = Calib.normalizeBatch(res.body)
+      if (!next.active && calibrationAwait && !(next.entries && next.entries.length)) {
+        calibrationMiss = calibrationMiss + 1
+        if (calibrationMiss < 3) return
+        calibrationAwait = false
+        calibrationBatch = Calib.emptyBatch()
+        calibrationStatus = ({})
+        loadCalibrations()
+        return
+      }
+      calibrationMiss = 0
+      calibrationAwait = false
+      calibrationBatch = next
+      if (next.active) {
+        var entries = next.entries || []
+        var i
+        for (i = 0; i < entries.length; i++) {
+          var row = entries[i]
+          if (row && String(row.phase) === "running")
+            loadCalibrationStatus(row.device_uid, row.channel_name)
+        }
+      } else if (was) {
+        calibrationStatus = ({})
+        loadCalibrations()
+      }
+    })
+  }
+
+  function loadCalibrationStatus(deviceUid, channel) {
+    if (!deviceUid || !channel) return
+    var path = "/calibrations/" + encodeURIComponent(deviceUid) + "/channels/" + encodeURIComponent(channel) + "/status"
+    call("GET", path, null, function(res) {
+      if (!res.ok || !calibrationBusy) return
+      var key = String(deviceUid) + "\n" + String(channel)
+      var copy = ({})
+      var cur = calibrationStatus || ({})
+      var name
+      for (name in cur) copy[name] = cur[name]
+      copy[key] = res.body || ({})
+      calibrationStatus = copy
     })
   }
 
@@ -882,29 +1114,104 @@ Item {
     })
   }
 
+  // One batch, one fan at a time. The daemon keeps sweeping if this
+  // window closes. A second start is refused until that batch ends.
   function startCalibrations(list) {
-    var index = 0
-    var jobs = list || []
-    function step() {
-      if (index >= jobs.length) {
-        notice = jobs.length ? "Calibration started" : ""
-        return
-      }
-      var item = jobs[index++]
-      if (!item || !item.deviceUid || !item.name) {
-        step()
-        return
-      }
-      var path = "/calibrations/" + encodeURIComponent(item.deviceUid) + "/channels/" + encodeURIComponent(item.name) + "/start"
-      call("POST", path, {}, function(res) {
-        if (!res.ok) return fail(res)
-        step()
-      })
+    if (calibrationBusy) {
+      lastError = "A calibration is already running."
+      notice = lastError
+      return
     }
-    step()
+    var channels = []
+    var jobs = list || []
+    var i
+    for (i = 0; i < jobs.length; i++) {
+      var item = jobs[i]
+      if (!item || !item.deviceUid || !item.name) continue
+      channels.push({ device_uid: String(item.deviceUid), channel_name: String(item.name) })
+    }
+    if (!channels.length) return
+    lastError = ""
+    call("POST", "/calibrations/batch/start", { channels: channels, concurrency: 1 }, function(res) {
+      if (!res.ok) {
+        loadCalibrationBatch()
+        return fail(res)
+      }
+      var entries = []
+      var n
+      for (n = 0; n < channels.length; n++) {
+        entries.push({
+          device_uid: channels[n].device_uid,
+          channel_name: channels[n].channel_name,
+          phase: "queued",
+          percent: null,
+          stage: null,
+          message: null
+        })
+      }
+      calibrationAwait = true
+      calibrationMiss = 0
+      calibrationBatch = { active: true, started_at: "", entries: entries }
+      notice = "Calibration started"
+      loadCalibrationBatch()
+    })
   }
 
-  function pushLcdImage(deviceUid, channel, brightness, face, angle, accent, accent2, tempText, temp2, shape, width, height, done) {
+  function lcdSecondsOk(seconds) {
+    return seconds === 2 || seconds === 5 || seconds === 10 || seconds === 30 || seconds === 60
+  }
+
+  function msUntilNextMinute() {
+    var now = new Date()
+    var wait = (60 - now.getSeconds()) * 1000 - now.getMilliseconds() + 250
+    if (wait < 1000) wait = wait + 60000
+    return wait
+  }
+
+  function readLcdFace(raw) {
+    var face = "liquid"
+    try {
+      var obj = JSON.parse(String(raw || ""))
+      face = String(obj && obj.face || "liquid")
+    } catch (e) {
+      face = "liquid"
+    }
+    if (face !== "liquid" && face !== "cpu" && face !== "cpu-gpu" && face !== "cpu-liquid" && face !== "omarchy" && face !== "omarchy-time")
+      face = "liquid"
+    lcdFace = face
+    if (face === "omarchy-time") lcdClockWait = msUntilNextMinute()
+  }
+
+  function themeLcd() {
+    if (stopping || !lcdBackground || lcdFace !== "omarchy" || !lcdThemeSync) return
+    if (connection !== "ready") return
+    themeLcdDelay.restart()
+  }
+
+  function previewLcd(deviceName, width, height, face, accent, done) {
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      if (done) done(res)
+    }
+    pending = next
+    if (!send({
+      op: "lcd-preview",
+      id: id,
+      deviceName: String(deviceName || ""),
+      width: Math.max(0, Math.round(Number(width) || 0)),
+      height: Math.max(0, Math.round(Number(height) || 0)),
+      face: String(face || "omarchy"),
+      accent: String(accent || "")
+    })) {
+      dropPending(id)
+      if (done) done({ ok: false, status: 0, error: "not connected" })
+    }
+  }
+
+  function pushLcdImage(deviceUid, channel, brightness, face, angle, accent, accent2, tempText, temp2, shape, width, height, deviceName, done) {
     if (!deviceUid || !channel) return
     var id = rpcId
     rpcId = rpcId + 1
@@ -930,7 +1237,8 @@ Item {
       temp2: String(temp2 || ""),
       shape: String(shape || "round") === "square" ? "square" : "round",
       width: Math.max(0, Math.round(Number(width) || 0)),
-      height: Math.max(0, Math.round(Number(height) || 0))
+      height: Math.max(0, Math.round(Number(height) || 0)),
+      deviceName: String(deviceName || "")
     })) {
       dropPending(id)
       if (done) done({ ok: false, status: 0, error: "not connected" })
@@ -965,7 +1273,6 @@ Item {
     }
     if (msg.event === "up") {
       if (connection !== "unauthorized" && connection !== "need-token") {
-        connection = "ready"
         // The daemon can appear after this process started. Status events
         // alone do not load devices, modes, or profiles.
         refresh()
@@ -976,13 +1283,17 @@ Item {
       if (msg.error === "need-token" || msg.status === 401 || msg.status === 403) fail(msg)
       else {
         connection = "down"
+        transportError = true
+        lcdKeepBusy = false
+        calibrationAwait = false
+        calibrationMiss = 0
         lastError = msg.error || "coolercontrold is not running"
       }
       return
     }
     if (msg.event === "status") {
       statusDevices = (msg.body && msg.body.devices) || statusDevices
-      if (connection !== "need-token" && connection !== "unauthorized") connection = "ready"
+      noteReady()
       rebuild()
       return
     }
@@ -1012,10 +1323,128 @@ Item {
     onExited: function() {
       if (root.stopping) return
       root.connection = "down"
+      root.lcdKeepBusy = false
       restart.interval = root.restartDelayMs
       root.restartDelayMs = Math.min(30000, root.restartDelayMs * 2)
       restart.start()
     }
+  }
+
+  Process {
+    id: pkgProbe
+    command: ["pacman", "-Q", "coolercontrold"]
+    stdout: SplitParser {
+      onRead: function(line) { root.pkgCode = 0 }
+    }
+    onExited: function(code) {
+      root.pkgCode = code
+      root.finishProbe()
+    }
+  }
+
+  Process {
+    id: unitProbe
+    command: ["systemctl", "show", "coolercontrold", "-p", "LoadState", "-p", "ActiveState", "--no-pager"]
+    stdout: SplitParser {
+      onRead: function(line) { root.unitBuf = root.unitBuf ? (root.unitBuf + "\n" + line) : String(line) }
+    }
+    onExited: function() { root.finishProbe() }
+  }
+
+  // Install asks once, the same way Start with the PC asks before enable.
+  // pkexec is what shows the password dialog from the panel. omarchy pkg add
+  // installs the daemon package and does not install the desktop package.
+  Process {
+    id: daemonInstall
+    command: ["pkexec", "/usr/share/omarchy/bin/omarchy", "pkg", "add", "coolercontrold"]
+    stderr: SplitParser {
+      onRead: function(line) { root.daemonNote = String(line || "") }
+    }
+    onExited: function(code) {
+      root.finishDaemonAction(code, "Omaflow could not install coolercontrold. In a terminal: omarchy pkg add coolercontrold")
+    }
+  }
+
+  // Start does not enable the unit. Start with the PC stays off until that
+  // switch is used. Same password dialog as the enable switch.
+  Process {
+    id: daemonStart
+    command: ["pkexec", "systemctl", "start", "coolercontrold"]
+    stderr: SplitParser {
+      onRead: function(line) { root.daemonNote = String(line || "") }
+    }
+    onExited: function(code) {
+      root.finishDaemonAction(code, "Omaflow could not start the daemon. In a terminal: sudo systemctl start coolercontrold")
+    }
+  }
+
+  Timer {
+    interval: 3000
+    repeat: true
+    triggeredOnStart: true
+    running: !root.stopping && root.connection !== "ready"
+    onTriggered: root.probeDaemon()
+  }
+
+  FileView {
+    id: lcdViewFile
+    path: Quickshell.env("HOME") + "/.config/omaflow/lcd-view.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.readLcdFace(text())
+    onFileChanged: reload()
+  }
+
+  FileView {
+    id: themeColorsFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.themeLcd()
+  }
+
+  FileView {
+    id: themeNameFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme.name"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.themeLcd()
+  }
+
+  Timer {
+    id: themeLcdDelay
+    interval: 400
+    repeat: false
+    onTriggered: root.keepLcd()
+  }
+
+  Timer {
+    id: lcdKeep
+    interval: root.lcdFace === "omarchy-time" ? root.lcdClockWait : Math.max(2000, root.lcdSeconds * 1000)
+    repeat: true
+    running: !root.stopping && root.lcdBackground && root.connection === "ready" && root.lcdChannels.length > 0 && !(root.lcdFace === "omarchy" && root.lcdThemeSync)
+    onTriggered: {
+      root.keepLcd()
+      if (root.lcdFace === "omarchy-time") root.lcdClockWait = root.msUntilNextMinute()
+    }
+    onRunningChanged: {
+      if (running && root.lcdFace === "omarchy-time") root.lcdClockWait = root.msUntilNextMinute()
+    }
+  }
+
+  Timer {
+    id: lcdKick
+    interval: 400
+    repeat: false
+    onTriggered: root.keepLcd()
+  }
+
+  Timer {
+    id: calibTimer
+    interval: 1000
+    repeat: true
+    running: !root.stopping && root.connection === "ready" && root.calibrationBusy
+    onTriggered: root.loadCalibrationBatch()
   }
 
   Timer {

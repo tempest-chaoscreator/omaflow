@@ -18,6 +18,8 @@ Panel {
     ? bar.shell.serviceFor(root.moduleName) : null
   readonly property string connection: service ? String(service.connection || "down") : "down"
   readonly property bool ready: connection === "ready"
+  readonly property string daemonGate: service ? String(service.daemonGate || "unknown") : "unknown"
+  readonly property bool showPair: daemonGate === "up" && (connection === "need-token" || connection === "unauthorized")
   readonly property var temps: service && service.temps ? service.temps : ({})
   readonly property var modes: service && service.modes ? service.modes : []
   readonly property string activeModeUid: service ? String(service.activeModeUid || "") : ""
@@ -27,6 +29,7 @@ Panel {
   readonly property color accent: Color.accent
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property real hottest: temps && isFinite(Number(temps.hottest)) ? Number(temps.hottest) : NaN
+  readonly property string openPath: Qt.resolvedUrl("scripts/open_app.sh").toString().replace(/^file:\/\//, "")
 
   property string tab: "telemetry"
   property string modeUid: ""
@@ -37,9 +40,18 @@ Panel {
     return null
   }
   readonly property bool modeApplied: mode && mode.uid === activeModeUid
+  readonly property bool calibrationBusy: !!(service && service.calibrationBusy)
   readonly property int modeH: Style.space(28)
   readonly property var navItems: {
-    var out = [
+    var out = []
+    if (!ready) {
+      if (showPair) out.push({ kind: "pair", x: 0, y: 0 })
+      else if (daemonGate === "install") out.push({ kind: "install", x: 0, y: 0 })
+      else if (daemonGate === "start") out.push({ kind: "start", x: 0, y: 0 })
+      out.push({ kind: "open", x: 0, y: out.length })
+      return out
+    }
+    out = [
       { kind: "tab", id: "telemetry", x: 0, y: 0 },
       { kind: "tab", id: "mode", x: 1, y: 0 }
     ]
@@ -53,12 +65,12 @@ Panel {
     return isFinite(Number(value)) ? Math.round(Number(value)) + "°" : "—"
   }
 
+  // Own process. Summoning the panel loads it inside the bar, which
+  // rescales the shell and closes the window on `omarchy restart shell`.
+  // Close the chip first so the app takes the keyboard as soon as it focuses.
   function openStandalone() {
-    var shell = root.bar && root.bar.shell
-    if (shell && typeof shell.summon === "function") {
-      shell.summon(root.moduleName, "")
-      return
-    }
+    root.close()
+    if (launchWindow.running) return
     launchWindow.running = true
   }
 
@@ -82,6 +94,8 @@ Panel {
     if (item.kind === "tab") tab = item.id
     else if (item.kind === "mode") modeUid = item.uid
     else if (item.kind === "apply") applySelected()
+    else if (item.kind === "install" && service) service.installDaemon()
+    else if (item.kind === "start" && service) service.startDaemon()
     else if (item.kind === "open") openStandalone()
   }
 
@@ -128,7 +142,7 @@ Panel {
 
   Process {
     id: launchWindow
-    command: ["gtk-launch", "omaflow-standalone"]
+    command: ["bash", root.openPath]
   }
 
   IpcHandler {
@@ -241,19 +255,28 @@ Panel {
           Text {
             width: parent.width
             wrapMode: Text.WordWrap
-            visible: !root.ready
+            visible: root.showPair
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.space(12)
-            text: root.connection === "need-token" || root.connection === "unauthorized"
-              ? "Enter the CoolerControl password once. Omaflow uses 127.0.0.1:11987 and does not ask for an address. The token is saved and the password is not."
-              : (root.service && root.service.lastError ? root.service.lastError : "coolercontrold is not running.")
+            text: "Enter the CoolerControl password once. Omaflow uses 127.0.0.1:11987 and does not ask for an address. The token is saved and the password is not."
+          }
+
+          DaemonPrompt {
+            width: parent.width
+            visible: !root.ready && !root.showPair
+            service: root.service
+            aimedInstall: root.aim("install", "")
+            aimedStart: root.aim("start", "")
+            fg: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
           }
 
           Row {
             width: parent.width
             spacing: Style.space(8)
-            visible: root.connection === "need-token" || root.connection === "unauthorized"
+            visible: root.showPair
             Rectangle {
               width: parent.width - pairButton.width - parent.spacing
               height: Style.space(32)
@@ -360,6 +383,7 @@ Panel {
               visible: root.mode !== null
               width: root.modeH
               height: root.modeH
+              opacity: root.calibrationBusy ? 0.45 : 1
               iconText: root.modeApplied ? "\uf058" : "\uf05d"
               iconSize: Style.space(14)
               bordered: true
@@ -371,9 +395,11 @@ Panel {
               fontFamily: root.fontFamily
               horizontalPadding: 0
               verticalPadding: 0
-              tooltipText: root.modeApplied
-                ? (root.mode.name + " is running")
-                : ("Run " + (root.mode ? root.mode.name : ""))
+              tooltipText: root.calibrationBusy
+                ? "A fan is being calibrated. Apply waits until that sweep finishes."
+                : (root.modeApplied
+                  ? (root.mode.name + " is running")
+                  : ("Run " + (root.mode ? root.mode.name : "")))
               onClicked: root.applySelected()
             }
 
@@ -486,7 +512,7 @@ Panel {
             border.color: root.aim("open", "") ? root.accent : root.line
             Text {
               anchors.centerIn: parent
-              text: "OMAFLOW"
+              text: root.ready ? "OMAFLOW" : "Open Omaflow"
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.space(13)

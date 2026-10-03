@@ -2,10 +2,8 @@
 # Open Omaflow as its own window. The bar chip is a separate plugin.
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-import_dir="$root/app/qml"
-mkdir -p "$import_dir/qs"
-ln -sfn /usr/share/omarchy/shell/Commons "$import_dir/qs/Commons"
-ln -sfn /usr/share/omarchy/shell/Ui "$import_dir/qs/Ui"
-export QML_IMPORT_PATH="$import_dir${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+# shellcheck disable=SC1091
+source "$root/scripts/qml_imports.sh"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+export QML_IMPORT_PATH="$(qml_import_path)${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
 exec quickshell -n -p "$root/OmaflowApp.qml"
