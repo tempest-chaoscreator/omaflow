@@ -456,6 +456,7 @@ def _lcd_seconds(value: object) -> int:
 def read_ui() -> dict:
     default = {
         "dynamicScale": False,
+        "pinGroups": False,
         "textFollow": True,
         "textSize": 12,
         "showBar": True,
@@ -478,6 +479,7 @@ def read_ui() -> dict:
         size = 12
     return {
         "dynamicScale": raw.get("dynamicScale") is True,
+        "pinGroups": raw.get("pinGroups") is True,
         "textFollow": raw.get("textFollow") is not False,
         "textSize": size,
         # Absent means on. Only an explicit false keeps the chip off.
@@ -493,6 +495,8 @@ def write_ui(data: dict) -> None:
     if isinstance(data, dict):
         if "dynamicScale" in data:
             clean["dynamicScale"] = data.get("dynamicScale") is True
+        if "pinGroups" in data:
+            clean["pinGroups"] = data.get("pinGroups") is True
         if "textFollow" in data:
             clean["textFollow"] = data.get("textFollow") is not False
         if "textSize" in data:
@@ -1716,6 +1720,332 @@ def lcd_face_check() -> None:
     print("lcd faces ok")
 
 
+_NVIDIA_SMI = "/usr/bin/nvidia-smi"
+_GPU_LOCK = threading.Lock()
+_GPU = {"ok": True, "rows": [], "util": 0.0, "fail": 0, "empty": 0, "running": False}
+_CPU_PREV: tuple | None = None
+_PMON_ROW = re.compile(
+    r"^\s*\d+\s+(\d+)\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.*\S)\s*$"
+)
+
+
+def _user_comm(pid: int) -> str | None:
+    """Command name for a userspace process. Kernel threads have an empty cmdline."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    if not raw.strip(b"\x00"):
+        return None
+    try:
+        name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return name or None
+
+
+def _stat_ticks(pid: int) -> int | None:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    end = text.rfind(")")
+    if end < 0:
+        return None
+    fields = text[end + 2 :].split()
+    if len(fields) < 13:
+        return None
+    try:
+        return int(fields[11]) + int(fields[12])
+    except ValueError:
+        return None
+
+
+def _cpu_times() -> tuple[int, int] | None:
+    """Aggregate cpu ticks and idle ticks (idle + iowait) from /proc/stat."""
+    try:
+        first = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]
+    except OSError:
+        return None
+    parts = first.split()
+    if not parts or parts[0] != "cpu":
+        return None
+    nums: list[int] = []
+    for part in parts[1:]:
+        try:
+            nums.append(int(part))
+        except ValueError:
+            return None
+    if len(nums) < 5:
+        return None
+    return sum(nums), nums[3] + nums[4]
+
+
+def _share_percent(delta_ticks: int, total_delta: int) -> float:
+    """This process's share of the whole CPU, 0 to 100, not one core."""
+    if delta_ticks <= 0 or total_delta <= 0:
+        return 0.0
+    return delta_ticks / total_delta * 100.0
+
+
+def _cpu_sample() -> tuple[list[dict], float]:
+    """Rows grouped by command, plus total CPU load from 0 to 100.
+
+    percent stays the per-core sample the LED scale already uses.
+    share is the label: that same time as a percent of every core.
+    Idle commands stay in the list so a quiet sample still fills the table.
+    """
+    global _CPU_PREV
+    times = _cpu_times()
+    total = times[0] if times else None
+    idle = times[1] if times else None
+    now = time.monotonic()
+    procs: dict[int, tuple[str, int]] = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        names = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        comm = _user_comm(pid)
+        if not comm or comm == "nvidia-smi":
+            continue
+        ticks = _stat_ticks(pid)
+        if ticks is None:
+            continue
+        procs[pid] = (comm, ticks)
+    prev = _CPU_PREV
+    _CPU_PREV = (now, total, idle, procs)
+    if prev is None or total is None or idle is None or prev[1] is None or prev[2] is None:
+        return [], 0.0
+    dt = now - prev[0]
+    if dt <= 0.2:
+        return [], 0.0
+    try:
+        hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+    except (OSError, ValueError, KeyError):
+        hz = 100
+    if hz <= 0:
+        hz = 100
+    total_delta = total - int(prev[1])
+    idle_delta = idle - int(prev[2])
+    busy = 0.0
+    if total_delta > 0:
+        busy = (1.0 - (idle_delta / total_delta)) * 100.0
+        if busy < 0:
+            busy = 0.0
+        if busy > 100:
+            busy = 100.0
+    grouped: dict[str, list] = {}
+    old_procs = prev[3]
+    for pid, (comm, ticks) in procs.items():
+        old = old_procs.get(pid)
+        delta = ticks - old[1] if old else 0
+        if delta < 0:
+            delta = 0
+        meter = (delta / hz) / dt * 100.0
+        share = _share_percent(delta, total_delta)
+        bucket = grouped.setdefault(comm, [0.0, 0.0, 0])
+        bucket[0] += meter
+        bucket[1] += share
+        bucket[2] += 1
+    rows = [
+        {
+            "name": name,
+            "percent": round(meter, 1),
+            "share": round(share, 1),
+            "count": count,
+        }
+        for name, (meter, share, count) in grouped.items()
+    ]
+    rows.sort(key=lambda row: (-row["percent"], row["name"]))
+    active = [row for row in rows if row["percent"] > 0]
+    # A quiet sample still fills the table. Extra idle commands stay out of name sort.
+    if len(active) < 8:
+        idle = [row for row in rows if row["percent"] <= 0]
+        active.extend(idle[: 8 - len(active)])
+    return active[:80], round(busy, 1)
+
+
+def _pmon_percent(token: str) -> float:
+    if token in ("", "-"):
+        return 0.0
+    try:
+        return float(token)
+    except ValueError:
+        return 0.0
+
+
+def _gpu_label(pid: int, command: str) -> str:
+    try:
+        name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        name = ""
+    if name:
+        return name
+    token = command.split()[0] if command else ""
+    return Path(token).name or "process"
+
+
+def _parse_pmon(text: str) -> list[dict]:
+    """Max sm across repeated lines of one pid, then sum pids that share a command."""
+    best: dict[int, float] = {}
+    labels: dict[int, str] = {}
+    for line in text.splitlines():
+        match = _PMON_ROW.match(line)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        percent = _pmon_percent(match.group(2))
+        labels[pid] = _gpu_label(pid, match.group(3).strip())
+        if percent > best.get(pid, 0.0):
+            best[pid] = percent
+    grouped: dict[str, list] = {}
+    for pid, label in labels.items():
+        percent = best.get(pid, 0.0)
+        bucket = grouped.setdefault(label, [0.0, 0])
+        bucket[0] += percent
+        bucket[1] += 1
+    rows = [
+        {
+            "name": name,
+            "percent": round(val, 1),
+            "share": 0.0,
+            "count": count,
+        }
+        for name, (val, count) in grouped.items()
+    ]
+    rows.sort(key=lambda row: (-row["percent"], row["name"]))
+    return rows[:80]
+
+
+def _apply_gpu_share(rows: list[dict], util: float | None) -> None:
+    """The label is this command's part of the GPU's total load, 0 to 100.
+
+    percent stays the SM sample the LED scale uses. The shares of one sample
+    add up to utilization.gpu, the same 0–100 reading as the total bar.
+    """
+    total = 0.0
+    for row in rows:
+        total += float(row.get("percent") or 0.0)
+    cap = None if util is None else max(0.0, min(100.0, float(util)))
+    for row in rows:
+        sample = float(row.get("percent") or 0.0)
+        if cap is None:
+            share = sample
+        elif total <= 0 or sample <= 0 or cap <= 0:
+            share = 0.0
+        else:
+            share = sample / total * cap
+        if share < 0:
+            share = 0.0
+        if share > 100:
+            share = 100.0
+        row["share"] = round(share, 1)
+
+
+def _gpu_util() -> float | None:
+    try:
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        out = subprocess.run(
+            [_NVIDIA_SMI, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    line = out.stdout.strip().splitlines()
+    if not line:
+        return None
+    try:
+        value = float(line[0].strip().split()[0])
+    except ValueError:
+        return None
+    if value < 0:
+        return 0.0
+    if value > 100:
+        return 100.0
+    return value
+
+
+def _gpu_sample() -> None:
+    ok = False
+    rows: list[dict] = []
+    util = _gpu_util()
+    try:
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        # One pmon frame is often all dashes. Three frames a second apart
+        # catch a real sm reading without blocking the client thread.
+        out = subprocess.run(
+            [_NVIDIA_SMI, "pmon", "-c", "3", "-d", "1", "-s", "u"],
+            capture_output=True,
+            text=True,
+            timeout=3.6,
+            check=False,
+            env=env,
+        )
+        if out.returncode == 0:
+            rows = _parse_pmon(out.stdout)
+            _apply_gpu_share(rows, util)
+            ok = True
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    with _GPU_LOCK:
+        _GPU["running"] = False
+        if util is not None:
+            _GPU["util"] = util
+        if ok and rows:
+            _GPU["rows"] = rows
+            _GPU["ok"] = True
+            _GPU["fail"] = 0
+            _GPU["empty"] = 0
+        elif ok:
+            _GPU["ok"] = True
+            _GPU["fail"] = 0
+            _GPU["empty"] = int(_GPU["empty"]) + 1
+            if _GPU["empty"] >= 2:
+                _GPU["rows"] = []
+        else:
+            _GPU["fail"] = int(_GPU["fail"]) + 1
+            if _GPU["fail"] >= 2:
+                _GPU["ok"] = False
+                _GPU["rows"] = []
+
+
+def _kick_gpu() -> None:
+    with _GPU_LOCK:
+        if _GPU["running"]:
+            return
+        _GPU["running"] = True
+    threading.Thread(target=_gpu_sample, name="omaflow-gpu", daemon=True).start()
+
+
+def processes_snapshot() -> dict:
+    """CPU from /proc and GPU from nvidia-smi. Neither reads hwmon or changes poll_rate."""
+    try:
+        cpu, cpu_total = _cpu_sample()
+    except Exception:
+        cpu, cpu_total = [], 0.0
+    _kick_gpu()
+    with _GPU_LOCK:
+        return {
+            "cpu": cpu,
+            "cpuTotal": cpu_total,
+            "gpu": list(_GPU["rows"]),
+            "gpuTotal": float(_GPU.get("util") or 0.0),
+            "gpuOk": bool(_GPU["ok"]),
+        }
+
+
 def main() -> None:
     _own(LCD_VIEW_PATH)
     if not read_token():
@@ -1764,6 +2094,14 @@ def main() -> None:
             body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
             write_hidden(body)
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": None})
+            continue
+        if op == "processes":
+            try:
+                body = processes_snapshot()
+            except Exception:
+                emit({"id": msg.get("id"), "ok": False, "status": 0, "error": "processes failed", "body": None})
+                continue
+            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": body})
             continue
         if op == "ui-get":
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_ui()})

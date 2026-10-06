@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import "RepoPath.js" as Repo
 
 // About this window: version and the keys that move through it.
 Column {
@@ -11,7 +12,7 @@ Column {
   property color fg: Color.foreground
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
-  property string version: "0.2.0"
+  property string version: "0.3.0"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)
@@ -61,7 +62,7 @@ Column {
   }
 
   FileView {
-    path: root.filePath(Qt.resolvedUrl("manifest.json"))
+    path: Repo.rootFile("manifest.json")
     watchChanges: false
     printErrors: false
     onLoaded: root.readManifest(text())

@@ -1,8 +1,11 @@
 import QtQuick
+import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "Nav.js" as Nav
+import "ThemePalette.js" as ThemePalette
 
 // Modes page. One curve for the selected fan. Edits stay on that fan's
 // profile when another fan is selected. Apply writes them and runs the mode.
@@ -32,6 +35,7 @@ Column {
   property var curveHistory: ({})
   property string renamingId: ""
   property string renameText: ""
+  property var palette: []
 
   width: parent ? parent.width : 0
   spacing: Style.space(10)
@@ -337,6 +341,13 @@ Column {
     if (!count) return Style.space(72)
     var gaps = Style.space(6) * Math.max(0, count - 1)
     return Math.max(Style.space(64), Math.floor((width - applyWidth - gaps) / count))
+  }
+
+  function groupSwatch(card) {
+    var key = (card && card.kind === "shared" ? "g:" : "d:") + (card ? card.uid : "")
+    var channels = service && service.channels ? service.channels : []
+    var saved = service && service.groups ? service.groups : []
+    return ThemePalette.swatch(palette, ThemePalette.keysOf(channels, saved), key)
   }
 
   function rowByKey(key) {
@@ -961,6 +972,7 @@ Column {
   Component.onCompleted: {
     ensureMode()
     stableBoard = boardGroups
+    if (!palette.length) palette = ThemePalette.ramp("", accent, Color.urgent)
   }
   onRowsChanged: {
     if (rowByKey(memberKey)) return
@@ -1225,6 +1237,14 @@ Column {
       border.color: holdsSelection ? root.accent : root.line
       clip: true
 
+      Rectangle {
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: Style.space(3)
+        color: root.groupSwatch(card.modelData)
+      }
+
       Column {
         id: cardCol
         anchors.left: parent.left
@@ -1245,7 +1265,7 @@ Column {
             radius: 0
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            color: card.modelData.kind === "shared" ? root.accent : Cc.groupColor("", card.modelData.name, card.index)
+            color: root.groupSwatch(card.modelData)
           }
 
           Item {
@@ -1754,5 +1774,13 @@ Column {
         }
       }
     }
+  }
+
+  FileView {
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Color.urgent)
+    onFileChanged: reload()
   }
 }

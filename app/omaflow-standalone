@@ -6,4 +6,70 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source "$root/scripts/qml_imports.sh"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 export QML_IMPORT_PATH="$(qml_import_path)${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
-exec quickshell -n -p "$root/OmaflowApp.qml"
+
+# Focus the live window. A process with no window makes `quickshell -n` exit
+# and leaves nothing to focus, which is what Escape used to do.
+action=$(python3 - << 'PY'
+import json, os, signal, subprocess, time
+
+def cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return handle.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+def is_app(cmd):
+    return (
+        "quickshell" in cmd
+        and "OmaflowApp.qml" in cmd
+        and "/usr/share/omarchy/shell" not in cmd
+    )
+
+pids = []
+for name in os.listdir("/proc"):
+    if name.isdigit() and is_app(cmdline(int(name))):
+        pids.append(int(name))
+
+try:
+    clients = json.loads(subprocess.check_output(["hyprctl", "clients", "-j"], text=True))
+except Exception:
+    clients = []
+
+for client in clients:
+    pid = client.get("pid")
+    if not pid or not is_app(cmdline(int(pid))):
+        continue
+    addr = str(client.get("address") or "")
+    if not addr:
+        continue
+    result = subprocess.run(
+        ["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{addr}" }})'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode == 0:
+        print("focused")
+        raise SystemExit
+
+for pid in pids:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+deadline = time.time() + 2
+while time.time() < deadline and any(os.path.exists(f"/proc/{pid}") for pid in pids):
+    time.sleep(0.05)
+for pid in pids:
+    if os.path.exists(f"/proc/{pid}"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+print("clear")
+PY
+)
+if [[ "$action" == "focused" ]]; then
+  exit 0
+fi
+exec quickshell -n -p "$root/qml/OmaflowApp.qml"

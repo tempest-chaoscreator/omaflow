@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "Nav.js" as Nav
+import "RepoPath.js" as Repo
 
 // Daemon options, curve response, and alerts. The window does not change them on its own.
 Column {
@@ -45,7 +46,7 @@ Column {
     { key: "compress", label: "Compress API responses" },
     { key: "sensors_conf_enabled", label: "Use sensors.conf labels" }
   ]
-  property string barScript: Qt.resolvedUrl("scripts/bar_plugin.py").toString().replace(/^file:\/\//, "")
+  property string barScript: Repo.rootFile("scripts/bar_plugin.py")
   property bool barOn: true
   property bool barLive: false
   property bool barStatusKnown: false
@@ -73,6 +74,7 @@ Column {
     place({ kind: "lcd", index: 0 })
     if (!service || service.lcdBackground !== false) place({ kind: "lcdSpeed", index: 0 })
     place({ kind: "fill", index: 0 })
+    place({ kind: "pinGroups", index: 0 })
     place({ kind: "textFollow", index: 0 })
     place({ kind: "textSize", index: 0 })
     place({ kind: "export", index: 0 })
@@ -354,6 +356,10 @@ Column {
     }
     if (item.kind === "fill") {
       if (service) service.setUi({ dynamicScale: !(service.dynamicScale === true) })
+      return
+    }
+    if (item.kind === "pinGroups") {
+      if (service) service.setUi({ pinGroups: !(service.pinGroups === true) })
       return
     }
     if (item.kind === "textFollow") {
@@ -642,6 +648,33 @@ Column {
     width: parent.width
     wrapMode: Text.WordWrap
     text: "The chart and the mode curve use the spare height. Speedometers and their titles grow a little. The rail, the LCD, and the text size stay as they are."
+    color: root.muted
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  Row {
+    spacing: Style.space(10)
+    SquareSwitch {
+      anchors.verticalCenter: parent.verticalCenter
+      on: root.service && root.service.pinGroups === true
+      foreground: root.fg
+      accent: root.aimed("pinGroups", 0) ? root.accent : root.fg
+      onClicked: if (root.service) root.service.setUi({ pinGroups: !(root.service.pinGroups === true) })
+    }
+    Text {
+      anchors.verticalCenter: parent.verticalCenter
+      text: "Pin groups on Devices"
+      color: root.aimed("pinGroups", 0) ? root.accent : root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+    }
+  }
+
+  Text {
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: "Custom groups stay below the hidden devices until this is on."
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

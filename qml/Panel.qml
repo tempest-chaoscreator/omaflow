@@ -3,6 +3,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "CcMap.js" as Cc
+import "RepoPath.js" as Repo
 import "Model.js" as Model
 import "Nav.js" as Nav
 
@@ -29,7 +30,7 @@ Panel {
   readonly property color accent: Color.accent
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property real hottest: temps && isFinite(Number(temps.hottest)) ? Number(temps.hottest) : NaN
-  readonly property string openPath: Qt.resolvedUrl("scripts/open_app.sh").toString().replace(/^file:\/\//, "")
+  readonly property string openPath: Repo.rootFile("scripts/open_app.sh")
 
   property string tab: "telemetry"
   property string modeUid: ""
@@ -489,6 +490,8 @@ Panel {
             accent: root.accent
             fontFamily: root.fontFamily
             chartHeight: Style.space(140)
+            processLimit: 2
+            meterSquares: 8
           }
 
           PluginCurves {

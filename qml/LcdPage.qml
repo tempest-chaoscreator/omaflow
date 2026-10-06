@@ -38,6 +38,7 @@ Column {
   spacing: Style.space(12)
 
   readonly property var screen: service && service.lcdChannels && service.lcdChannels.length ? service.lcdChannels[0] : null
+  readonly property bool hasScreen: screen !== null
   // lcdChannels is a new array on every poll. Follow the channel, not that array.
   readonly property string screenKey: screen ? (String(screen.deviceUid || "") + "/" + String(screen.name || "")) : ""
   readonly property var temps: service && service.temps ? service.temps : ({})
@@ -364,6 +365,7 @@ Column {
   }
 
   function activateNav() {
+    if (!hasScreen) return
     var item = navAt()
     if (!item) return
     if (item.id === "face") {
@@ -471,6 +473,8 @@ Column {
     id: faceRow
     width: parent.width
     height: Math.max(faceFlow.implicitHeight, zeroBtn.height)
+    opacity: root.hasScreen ? 1 : 0.38
+    enabled: root.hasScreen
 
     Flow {
       id: faceFlow
@@ -570,7 +574,28 @@ Column {
       return fit
     }
 
+    Rectangle {
+      visible: !root.hasScreen
+      anchors.centerIn: parent
+      width: lcdNote.implicitWidth + Style.space(28)
+      height: lcdNote.implicitHeight + Style.space(16)
+      radius: 0
+      color: "transparent"
+      border.width: 1
+      border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.45)
+
+      Text {
+        id: lcdNote
+        anchors.centerIn: parent
+        text: "No supported AIO LCD detected"
+        color: root.fg
+        font.family: root.fontFamily
+        font.pixelSize: Style.space(13)
+      }
+    }
+
     Row {
+      visible: root.hasScreen
       anchors.centerIn: parent
       spacing: Style.space(18)
 
@@ -807,6 +832,8 @@ Column {
     id: sliderRow
     width: parent.width
     spacing: Style.space(18)
+    opacity: root.hasScreen ? 1 : 0.38
+    enabled: root.hasScreen
 
     Row {
       id: brightSide
@@ -973,6 +1000,8 @@ Column {
     id: actionRow
     width: parent.width
     height: Math.max(syncCluster.implicitHeight, deviceCaption.implicitHeight)
+    opacity: root.hasScreen ? 1 : 0.38
+    enabled: root.hasScreen
 
     Row {
       id: syncCluster
@@ -1055,15 +1084,6 @@ Column {
         font.pixelSize: Style.font.caption
       }
     }
-  }
-
-  Text {
-    width: parent.width
-    visible: root.screen === null
-    text: "No pump display reported by the daemon."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
   Text {

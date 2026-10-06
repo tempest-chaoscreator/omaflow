@@ -70,9 +70,10 @@ Item {
   }
 
   function close() {
-    closingFromHost = true
+    // Do not set closingFromHost. A hidden standalone process stays in
+    // the background, and quickshell -n then refuses the launcher and the
+    // chip. Dropping the surface quits this process.
     window.visible = false
-    closingFromHost = false
   }
 
   function dismiss() {
@@ -461,12 +462,34 @@ Item {
             anchors.margins: Style.space(16)
             spacing: Style.space(12)
 
-            Text {
-              text: root.pageTitle
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(20)
-              font.bold: true
+            Item {
+              width: parent.width
+              height: Math.max(pageTitleText.implicitHeight, calibrateAll.height)
+
+              Text {
+                id: pageTitleText
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.pageTitle
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(20)
+                font.bold: true
+              }
+
+              CalGlyph {
+                id: calibrateAll
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.page === "devices"
+                  && devicesPage.jobsFor(devicesPage.everyActive()).length > 0
+                selected: devicesPage.aimed("all", "")
+                label: "Calibrate All"
+                fg: root.fg
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onClicked: devicesPage.calibrateRows(devicesPage.everyActive())
+              }
             }
 
             DaemonPrompt {

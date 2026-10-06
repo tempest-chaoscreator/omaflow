@@ -51,7 +51,9 @@ print("running" if running else "absent")
 PY
 )
 
-if [[ "$status" == "focused" || "$status" == "running" ]]; then
+# "running" has no window. Fall through so the launcher can replace it.
+# Treating that as success is why the chip did nothing after Escape.
+if [[ "$status" == "focused" ]]; then
   exit 0
 fi
 
@@ -70,5 +72,5 @@ launcher="$root/app/omaflow-standalone"
 if [[ -x "$launcher" ]]; then
   setsid -f "$launcher" </dev/null >/dev/null 2>&1
 else
-  setsid -f quickshell -n -p "$root/OmaflowApp.qml" </dev/null >/dev/null 2>&1
+  setsid -f quickshell -n -p "$root/qml/OmaflowApp.qml" </dev/null >/dev/null 2>&1
 fi

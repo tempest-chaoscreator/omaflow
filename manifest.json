@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tempest-chaoscreator.omaflow",
   "name": "Omaflow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Tempest",
   "license": "MIT",
   "homepage": "https://github.com/tempest-chaoscreator/omaflow",
@@ -12,8 +12,8 @@
     "bar-widget"
   ],
   "entryPoints": {
-    "service": "Service.qml",
-    "barWidget": "Panel.qml"
+    "service": "qml/Service.qml",
+    "barWidget": "qml/Panel.qml"
   },
   "barWidget": {
     "displayName": "Omaflow",

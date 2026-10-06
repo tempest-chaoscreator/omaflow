@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import "CcMap.js" as Cc
 import "Calib.js" as Calib
+import "RepoPath.js" as Repo
 
 // Headless CoolerControl client. One per shell. Omaflow Plugin and
 // Omaflow both read this object. Fan writes and sensor polls
@@ -15,7 +16,7 @@ Item {
   property var manifest: null
   property var settings: ({})
 
-  readonly property string clientPath: Qt.resolvedUrl("scripts/cc_client.py").toString().replace(/^file:\/\//, "")
+  readonly property string clientPath: Repo.rootFile("scripts/cc_client.py")
   readonly property int pumpMin: 50
 
   property string connection: "down"
@@ -62,11 +63,19 @@ Item {
   property int calibrationMiss: 0
   readonly property bool calibrationBusy: !!(calibrationBatch && calibrationBatch.active === true)
   property bool dynamicScale: false
+  property bool pinGroups: false
   property bool textFollow: true
   property int textSize: 12
   property bool showBar: true
+  property bool watchProcesses: false
+  property var processCpu: []
+  property var processGpu: []
+  property real processCpuTotal: 0
+  property real processGpuTotal: 0
+  property bool processGpuOk: true
   property bool uiReady: false
   property bool showBarHeld: false
+  property bool pinGroupsHeld: false
   property var curvePack: ({})
   property bool modesKnown: false
   property bool defaultsPlanted: false
@@ -723,6 +732,8 @@ Item {
     next[id] = function(res) {
       var body = res && res.body ? res.body : ({})
       dynamicScale = body.dynamicScale === true
+      // A toggle that landed before this read must not be put back.
+      if (!pinGroupsHeld) pinGroups = body.pinGroups === true
       textFollow = body.textFollow !== false
       var size = Number(body.textSize)
       if (isFinite(size) && size > 0) textSize = size
@@ -741,6 +752,7 @@ Item {
   function setUi(patch) {
     var body = {
       dynamicScale: dynamicScale,
+      pinGroups: pinGroups,
       textFollow: textFollow,
       textSize: textSize,
       lcdBackground: lcdBackground,
@@ -751,6 +763,10 @@ Item {
     if (uiReady) body.showBar = showBar
     var src = patch || ({})
     if (src.dynamicScale !== undefined) body.dynamicScale = src.dynamicScale === true
+    if (src.pinGroups !== undefined) {
+      body.pinGroups = src.pinGroups === true
+      pinGroupsHeld = true
+    }
     if (src.textFollow !== undefined) body.textFollow = src.textFollow !== false
     if (src.textSize !== undefined) body.textSize = Number(src.textSize)
     if (src.showBar !== undefined) {
@@ -764,6 +780,7 @@ Item {
     }
     if (src.lcdThemeSync !== undefined) body.lcdThemeSync = src.lcdThemeSync === true
     dynamicScale = body.dynamicScale
+    pinGroups = body.pinGroups === true
     textFollow = body.textFollow
     textSize = body.textSize
     lcdBackground = body.lcdBackground !== false
@@ -1069,6 +1086,16 @@ Item {
       } else if (was) {
         calibrationStatus = ({})
         loadCalibrations()
+        var failed = ""
+        var doneEntries = next.entries || []
+        for (i = 0; i < doneEntries.length; i++) {
+          var line = Calib.failureLine(doneEntries[i])
+          if (line) {
+            failed = line
+            break
+          }
+        }
+        notice = failed || "Calibration finished"
       }
     })
   }
@@ -1254,6 +1281,26 @@ Item {
     })
   }
 
+  function loadProcesses() {
+    var id = rpcId
+    rpcId = rpcId + 1
+    var next = ({})
+    for (var k in pending) next[k] = pending[k]
+    next[id] = function(res) {
+      if (!res || !res.ok) return
+      var body = res.body || ({})
+      var cpuTotal = Number(body.cpuTotal)
+      var gpuTotal = Number(body.gpuTotal)
+      processCpuTotal = isFinite(cpuTotal) ? cpuTotal : 0
+      processGpuTotal = isFinite(gpuTotal) ? gpuTotal : 0
+      processCpu = body.cpu || []
+      processGpuOk = body.gpuOk !== false
+      processGpu = body.gpu || []
+    }
+    pending = next
+    if (!send({ op: "processes", id: id })) dropPending(id)
+  }
+
   function handleLine(line) {
     var trimmed = String(line || "").replace(/^\s+|\s+$/g, "")
     if (!trimmed) return
@@ -1308,6 +1355,14 @@ Item {
     var done = pending[msg.id]
     dropPending(msg.id)
     if (done) done(msg)
+  }
+
+  Timer {
+    interval: 2000
+    repeat: true
+    triggeredOnStart: true
+    running: root.watchProcesses && !root.stopping
+    onTriggered: root.loadProcesses()
   }
 
   Process {
