@@ -275,7 +275,9 @@ Item {
     })
     call("GET", "/modes-active", null, function(res) {
       if (!res.ok) return fail(res)
-      activeModeUid = res.body && res.body.current_mode_uid ? String(res.body.current_mode_uid) : ""
+      var uid = res.body && res.body.current_mode_uid ? String(res.body.current_mode_uid) : ""
+      // An empty read follows the pump-image upload. It is not "no mode".
+      if (uid) activeModeUid = uid
       rebuild()
     })
     call("GET", "/settings", null, function(res) {
@@ -1013,6 +1015,7 @@ Item {
       call("POST", "/modes-active/" + encodeURIComponent(uid), {}, function(res) {
         if (!res.ok) return fail(res)
         activeModeUid = String(uid)
+        rebuild()
         notice = ""
         if (!split.shared.length) {
           refresh()

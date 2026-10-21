@@ -1580,7 +1580,83 @@ def restore_saved_lcd() -> None:
         sys.stderr.flush()
 
 
-def call(method: str, path: str, body) -> dict:
+def _speed_signature(setting: dict) -> tuple[str, str, str] | None:
+    """Fan or pump assignment. LCD and lighting uploads are not a mode."""
+    if not isinstance(setting, dict):
+        return None
+    if setting.get("lcd") or setting.get("lighting"):
+        return None
+    channel = str(setting.get("channel_name") or "")
+    if not channel:
+        return None
+    profile = setting.get("profile_uid")
+    fixed = setting.get("speed_fixed")
+    if not profile and fixed is None:
+        return None
+    return (channel, str(profile or ""), "" if fixed is None else str(fixed))
+
+
+def _infer_active_mode() -> str:
+    """Mode whose fan and pump assignments match the live device settings.
+
+    coolercontrold 5.1 clears current_mode_uid when the pump image is
+    uploaded. The curves stay. Match those, ignoring LCD rows.
+    """
+    modes_res = _request("GET", "/modes", None)
+    devices_res = _request("GET", "/devices", None)
+    if not modes_res.get("ok") or not devices_res.get("ok"):
+        return ""
+    modes_body = modes_res.get("body") if isinstance(modes_res.get("body"), dict) else {}
+    devices_body = devices_res.get("body") if isinstance(devices_res.get("body"), dict) else {}
+    modes = modes_body.get("modes") if isinstance(modes_body.get("modes"), list) else []
+    devices = devices_body.get("devices") if isinstance(devices_body.get("devices"), list) else []
+    live: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        uid = str(dev.get("uid") or "")
+        if not uid:
+            continue
+        settings_res = _request("GET", "/devices/" + urllib.parse.quote(uid, safe="") + "/settings", None)
+        settings_body = settings_res.get("body") if settings_res.get("ok") and isinstance(settings_res.get("body"), dict) else {}
+        for setting in settings_body.get("settings") or []:
+            sig = _speed_signature(setting if isinstance(setting, dict) else {})
+            if sig:
+                live[(uid, sig[0])] = sig
+    if not live:
+        return ""
+    winners: list[tuple[int, str]] = []
+    for mode in modes:
+        if not isinstance(mode, dict):
+            continue
+        compared = 0
+        mismatch = False
+        for pair in mode.get("device_settings") or []:
+            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                continue
+            dev = str(pair[0] or "")
+            rows = pair[1] if isinstance(pair[1], list) else []
+            for setting in rows:
+                sig = _speed_signature(setting if isinstance(setting, dict) else {})
+                if not sig:
+                    continue
+                current = live.get((dev, sig[0]))
+                if current is None:
+                    continue
+                compared += 1
+                if current != sig:
+                    mismatch = True
+        if compared and not mismatch:
+            winners.append((compared, str(mode.get("uid") or "")))
+    if not winners:
+        return ""
+    winners.sort(key=lambda item: item[0], reverse=True)
+    if len(winners) > 1 and winners[0][0] == winners[1][0]:
+        return ""
+    return winners[0][1]
+
+
+def _request(method: str, path: str, body) -> dict:
     token = read_token()
     if not token:
         return {"ok": False, "status": 0, "error": "need-token", "body": None}
@@ -1612,6 +1688,22 @@ def call(method: str, path: str, body) -> dict:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
     except Exception as err:  # noqa: BLE001 — one bad call must not kill the client
         return {"ok": False, "status": 0, "error": str(err), "body": None}
+
+
+def call(method: str, path: str, body) -> dict:
+    result = _request(method, path, body)
+    if not result.get("ok") or method != "GET" or path.rstrip("/") != "/modes-active":
+        return result
+    payload = result.get("body")
+    if not isinstance(payload, dict) or payload.get("current_mode_uid"):
+        return result
+    inferred = _infer_active_mode()
+    if not inferred:
+        return result
+    filled = dict(payload)
+    filled["current_mode_uid"] = inferred
+    result["body"] = filled
+    return result
 
 
 def _parse_sse(block: str) -> None:

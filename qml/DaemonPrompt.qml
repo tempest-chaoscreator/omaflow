@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Nav.js" as Nav
 
@@ -14,8 +15,8 @@ Column {
   property bool aimedInstall: false
   property bool aimedStart: false
   property int navIndex: 0
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
 

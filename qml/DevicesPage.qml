@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "Nav.js" as Nav
@@ -17,8 +18,8 @@ Column {
   property var service: null
   property bool keyed: false
   property int navIndex: 0
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
@@ -358,14 +359,14 @@ Column {
   }
   Component.onCompleted: {
     applyStable()
-    if (!palette.length) palette = ThemePalette.ramp("", accent, Color.urgent)
+    if (!palette.length) palette = ThemePalette.ramp("", accent, Commons.Color.urgent)
   }
 
   FileView {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: true
     printErrors: false
-    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Color.urgent)
+    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Commons.Color.urgent)
     onFileChanged: reload()
   }
 
@@ -374,7 +375,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError !== ""
     text: root.service ? root.service.lastError : ""
-    color: Color.urgent
+    color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
   }
@@ -735,9 +736,9 @@ Column {
                     ? "Hidden. Monitoring and the bar skip this device."
                     : "Hide this device from Monitoring and the bar."
                   fontFamily: root.fontFamily
-                  panelBackground: Color.background
-                  panelForeground: Color.foreground
-                  panelBorder: Color.accent
+                  panelBackground: Commons.Color.background
+                  panelForeground: Commons.Color.foreground
+                  panelBorder: Commons.Color.accent
                 }
               }
 

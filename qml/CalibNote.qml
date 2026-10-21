@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "Calib.js" as Calib
 
 // One channel's calibration. Progress comes from the daemon batch.
@@ -9,8 +10,8 @@ Item {
 
   property var channel: null
   property var service: null
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
 
@@ -55,7 +56,7 @@ Item {
       visible: root.failText !== ""
       text: root.failText
       wrapMode: Text.WordWrap
-      color: Color.urgent
+      color: Commons.Color.urgent
       font.family: root.fontFamily
       font.pixelSize: Style.space(12)
     }

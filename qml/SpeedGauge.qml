@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Square speedometer. The arc and the center read duty percent.
 // The caller draws the RPM under this item.
@@ -8,8 +9,8 @@ Item {
 
   property real percent: -1
   property real textScale: 1
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   readonly property bool known: isFinite(percent) && percent >= 0

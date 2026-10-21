@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "Nav.js" as Nav
@@ -18,8 +19,8 @@ Column {
   property var service: null
   property bool fill: false
   property int viewHeight: 0
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
@@ -972,7 +973,7 @@ Column {
   Component.onCompleted: {
     ensureMode()
     stableBoard = boardGroups
-    if (!palette.length) palette = ThemePalette.ramp("", accent, Color.urgent)
+    if (!palette.length) palette = ThemePalette.ramp("", accent, Commons.Color.urgent)
   }
   onRowsChanged: {
     if (rowByKey(memberKey)) return
@@ -1006,7 +1007,7 @@ Column {
           hasCursor: root.aimMode(modelData.uid)
           bordered: true
           foreground: root.fg
-          accent: /hell/i.test(modelData.name) ? Color.urgent : root.accent
+          accent: /hell/i.test(modelData.name) ? Commons.Color.urgent : root.accent
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           horizontalPadding: Style.space(4)
@@ -1194,9 +1195,9 @@ Column {
               visible: toolMouse.containsMouse
               text: root.curveToolTip(tool.kind)
               fontFamily: root.fontFamily
-              panelBackground: Color.background
-              panelForeground: Color.foreground
-              panelBorder: Color.accent
+              panelBackground: Commons.Color.background
+              panelForeground: Commons.Color.foreground
+              panelBorder: Commons.Color.accent
             }
           }
         }
@@ -1305,9 +1306,9 @@ Column {
               visible: hideMouse.containsMouse
               text: "Hidden. Click to show it on Monitoring again."
               fontFamily: root.fontFamily
-              panelBackground: Color.background
-              panelForeground: Color.foreground
-              panelBorder: Color.accent
+              panelBackground: Commons.Color.background
+              panelForeground: Commons.Color.foreground
+              panelBorder: Commons.Color.accent
             }
           }
 
@@ -1350,9 +1351,9 @@ Column {
                 ? "Linked curve. Click to edit each fan on its own. The pump keeps its own curve."
                 : "Separate curves. Click to use one curve for these fans. The pump keeps its own curve."
               fontFamily: root.fontFamily
-              panelBackground: Color.background
-              panelForeground: Color.foreground
-              panelBorder: Color.accent
+              panelBackground: Commons.Color.background
+              panelForeground: Commons.Color.foreground
+              panelBorder: Commons.Color.accent
             }
           }
 
@@ -1499,9 +1500,9 @@ Column {
                     + (root.rpmText(fanCell.modelData) ? "  ·  " + root.rpmText(fanCell.modelData) : "")
                     + (fanCell.modelData.inMode ? "" : "  ·  not in this mode"))
                 fontFamily: root.fontFamily
-                panelBackground: Color.background
-                panelForeground: Color.foreground
-                panelBorder: Color.accent
+                panelBackground: Commons.Color.background
+                panelForeground: Commons.Color.foreground
+                panelBorder: Commons.Color.accent
               }
             }
           }
@@ -1665,7 +1666,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError !== ""
     text: root.service ? root.service.lastError : ""
-    color: Color.urgent
+    color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
   }
@@ -1780,7 +1781,7 @@ Column {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: true
     printErrors: false
-    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Color.urgent)
+    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Commons.Color.urgent)
     onFileChanged: reload()
   }
 }

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // NZXT CAM-style fan curve: ~15 fixed temperature columns, each a handle
@@ -14,8 +15,8 @@ Item {
   property real currentTemp: -1
   property bool interactive: true
   property int minDuty: 0
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   signal pointChanged(int index, real value)

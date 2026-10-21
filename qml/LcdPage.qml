@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Nav.js" as Nav
 
@@ -28,9 +29,9 @@ Column {
   property bool viewReady: false
   property string pushed: ""
   property int previewGen: 0
-  property color fg: Color.foreground
-  property color accent: Color.accent
-  property color accent2: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
+  property color accent2: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
 
@@ -554,9 +555,9 @@ Column {
         visible: zeroMouse.containsMouse
         text: "Zero the preview and save that orientation"
         fontFamily: root.fontFamily
-        panelBackground: Color.background
-        panelForeground: Color.foreground
-        panelBorder: Color.accent
+        panelBackground: Commons.Color.background
+        panelForeground: Commons.Color.foreground
+        panelBorder: Commons.Color.accent
       }
     }
   }
@@ -1091,7 +1092,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError !== ""
     text: root.service ? root.service.lastError : ""
-    color: Color.urgent
+    color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
   }

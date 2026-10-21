@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "RepoPath.js" as Repo
 
 // About this window: version and the keys that move through it.
@@ -9,10 +10,10 @@ Column {
   id: root
 
   property bool keyed: false
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
-  property string version: "0.3.0"
+  property string version: "0.3.1"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // One monitoring title. The shell glyph only shifts horizontal ink, and a
@@ -10,7 +11,7 @@ Item {
 
   property string mark: ""
   property string label: ""
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
   property string fontFamily: Style.font.family
   property real fontSize: Style.font.caption
   property int wrapLines: 1

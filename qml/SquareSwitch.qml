@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Square on/off track used by the channel cards and the theme-sync row.
 // On is the accent fill. Off is an empty grey track. The caller owns `on`.
@@ -9,8 +10,8 @@ Item {
   property bool on: false
   property bool switchEnabled: true
   property bool interactive: true
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
 
   signal clicked()
 
@@ -41,7 +42,7 @@ Item {
         ? track.width - width - Math.round((track.height - height) / 2)
         : Math.round((track.height - height) / 2)
       color: root.on && root.switchEnabled
-        ? Color.background
+        ? Commons.Color.background
         : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
       Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
     }

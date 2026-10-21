@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Draggable plot of coolercontrold graph points: [temp, duty].
 // Duty grid, floor band, fill, and round handles.
@@ -10,8 +11,8 @@ Item {
   property bool interactive: false
   property int minDuty: 0
   property real currentTemp: -1
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   signal pointsEdited(var points)

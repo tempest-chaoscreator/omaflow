@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Square action button. Radius stays 0 so it matches the task-manager controls.
 Item {
@@ -20,12 +21,12 @@ Item {
     anchors.fill: parent
     radius: 0
     color: root.selected
-      ? Color.accent
-      : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.06)
+      ? Commons.Color.accent
+      : Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.06)
     border.width: 1
     border.color: root.selected
-      ? Color.accent
-      : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.28)
+      ? Commons.Color.accent
+      : Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.28)
 
     Text {
       id: label
@@ -33,7 +34,7 @@ Item {
       anchors.leftMargin: Style.space(8)
       anchors.rightMargin: Style.space(8)
       text: root.text
-      color: root.selected ? Color.background : Color.foreground
+      color: root.selected ? Commons.Color.background : Commons.Color.foreground
       font.family: Style.font.family
       font.pixelSize: Style.space(12)
       font.bold: root.selected

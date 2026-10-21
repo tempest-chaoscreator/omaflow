@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "ProcessScale.js" as Scale
@@ -14,8 +15,8 @@ Column {
   property var service: null
   property bool keyed: false
   property int navIndex: 0
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property string fontFamily: Style.font.family
@@ -434,7 +435,7 @@ Column {
   Component.onCompleted: {
     stableGauges = gaugeBoard
     pushWatch()
-    if (!palette.length) palette = ThemePalette.ramp("", accent, Color.urgent)
+    if (!palette.length) palette = ThemePalette.ramp("", accent, Commons.Color.urgent)
     if (service) {
       noteRows("cpu", service.processCpu)
       noteRows("gpu", service.processGpu)
@@ -797,9 +798,9 @@ Column {
             visible: cpuNameMouse.containsMouse
             text: root.sortTip("cpu", "name")
             fontFamily: root.fontFamily
-            panelBackground: Color.background
-            panelForeground: Color.foreground
-            panelBorder: Color.accent
+            panelBackground: Commons.Color.background
+            panelForeground: Commons.Color.foreground
+            panelBorder: Commons.Color.accent
           }
         }
 
@@ -857,9 +858,9 @@ Column {
             visible: cpuLoadMouse.containsMouse
             text: root.sortTip("cpu", "load")
             fontFamily: root.fontFamily
-            panelBackground: Color.background
-            panelForeground: Color.foreground
-            panelBorder: Color.accent
+            panelBackground: Commons.Color.background
+            panelForeground: Commons.Color.foreground
+            panelBorder: Commons.Color.accent
           }
         }
       }
@@ -978,9 +979,9 @@ Column {
             visible: gpuNameMouse.containsMouse
             text: root.sortTip("gpu", "name")
             fontFamily: root.fontFamily
-            panelBackground: Color.background
-            panelForeground: Color.foreground
-            panelBorder: Color.accent
+            panelBackground: Commons.Color.background
+            panelForeground: Commons.Color.foreground
+            panelBorder: Commons.Color.accent
           }
         }
 
@@ -1038,9 +1039,9 @@ Column {
             visible: gpuLoadMouse.containsMouse
             text: root.sortTip("gpu", "load")
             fontFamily: root.fontFamily
-            panelBackground: Color.background
-            panelForeground: Color.foreground
-            panelBorder: Color.accent
+            panelBackground: Commons.Color.background
+            panelForeground: Commons.Color.foreground
+            panelBorder: Commons.Color.accent
           }
         }
       }
@@ -1152,7 +1153,7 @@ Column {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: true
     printErrors: false
-    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Color.urgent)
+    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Commons.Color.urgent)
     onFileChanged: reload()
   }
 

@@ -1,12 +1,13 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Several series on one time axis. Missing samples break the line.
 Item {
   id: root
 
   property var series: []
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
 
   onSeriesChanged: canvas.requestPaint()

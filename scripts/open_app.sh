@@ -57,9 +57,15 @@ if [[ "$status" == "focused" ]]; then
   exit 0
 fi
 
+# gtk-launch waits on StartupNotify, and StartupWMClass=org.quickshell is
+# the bar. From the chip that focuses the shell and never starts Omaflow.
 desk="${XDG_DATA_HOME:-$HOME/.local/share}/applications/omaflow-standalone.desktop"
-if [[ -f "$desk" ]] && gtk-launch omaflow-standalone; then
-  exit 0
+if [[ -f "$desk" ]]; then
+  exec_line=$(sed -n 's/^Exec=//p' "$desk" | head -n 1)
+  if [[ -n "$exec_line" && -x "$exec_line" ]]; then
+    setsid -f "$exec_line" </dev/null >/dev/null 2>&1
+    exit 0
+  fi
 fi
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

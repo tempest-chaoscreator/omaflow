@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "RepoPath.js" as Repo
@@ -25,15 +26,17 @@ Panel {
   readonly property var modes: service && service.modes ? service.modes : []
   readonly property string activeModeUid: service ? String(service.activeModeUid || "") : ""
   readonly property string activeModeName: service ? String(service.activeModeName || "") : ""
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property color accent: Color.accent
+  readonly property color accent: Commons.Color.accent
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property real hottest: temps && isFinite(Number(temps.hottest)) ? Number(temps.hottest) : NaN
   readonly property string openPath: Repo.rootFile("scripts/open_app.sh")
 
   property string tab: "telemetry"
   property string modeUid: ""
+  // A click previews a mode. Until that happens, the row follows the running one.
+  property bool modePicked: false
   property int navIndex: 0
 
   readonly property var mode: {
@@ -76,9 +79,14 @@ Panel {
   }
 
   function ensureMode() {
-    if (modeUid && mode) return
+    if (modePicked && modeUid && mode) return
     if (activeModeUid) modeUid = activeModeUid
-    else if (modes.length) modeUid = modes[0].uid
+    else if (!modeUid && modes.length) modeUid = modes[0].uid
+  }
+
+  function pickMode(uid) {
+    modePicked = true
+    modeUid = uid
   }
 
   function navAt() {
@@ -93,7 +101,7 @@ Panel {
     var item = navAt()
     if (!item) return
     if (item.kind === "tab") tab = item.id
-    else if (item.kind === "mode") modeUid = item.uid
+    else if (item.kind === "mode") pickMode(item.uid)
     else if (item.kind === "apply") applySelected()
     else if (item.kind === "install" && service) service.installDaemon()
     else if (item.kind === "start" && service) service.startDaemon()
@@ -130,12 +138,14 @@ Panel {
 
   function selectAt(index) {
     if (index < 0 || index >= modes.length) return
-    modeUid = modes[index].uid
+    pickMode(modes[index].uid)
   }
 
   onModesChanged: ensureMode()
+  onActiveModeUidChanged: ensureMode()
   onOpenedChanged: {
     if (!opened) return
+    modePicked = false
     tab = "telemetry"
     ensureMode()
     navIndex = 0
@@ -303,7 +313,7 @@ Panel {
               Text {
                 anchors.centerIn: parent
                 text: "Pair"
-                color: Color.background
+                color: Commons.Color.background
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(12)
               }
@@ -431,6 +441,7 @@ Panel {
                   required property var modelData
                   required property int index
                   readonly property bool chosen: modelData.uid === root.modeUid
+                  readonly property bool running: modelData.uid === root.activeModeUid
                   readonly property int slot: {
                     var count = root.modes.length
                     if (count < 1) return 0
@@ -445,13 +456,15 @@ Panel {
                   selected: chosen
                   hasCursor: root.aim("mode", modelData.uid)
                   bordered: true
-                  foreground: root.fg
-                  accent: /hell/i.test(modelData.name) ? Color.urgent : root.accent
+                  foreground: running
+                    ? (/hell/i.test(modelData.name) ? Commons.Color.urgent : root.accent)
+                    : root.fg
+                  accent: /hell/i.test(modelData.name) ? Commons.Color.urgent : root.accent
                   fontFamily: root.fontFamily
                   fontSize: Style.font.caption
                   horizontalPadding: Style.space(2)
-                  tooltipText: modelData.uid === root.activeModeUid ? "Running" : "Select this mode"
-                  onClicked: root.modeUid = modelData.uid
+                  tooltipText: running ? "Running" : "Select this mode"
+                  onClicked: root.pickMode(modelData.uid)
 
                   Text {
                     anchors.left: parent.left
@@ -477,7 +490,7 @@ Panel {
             visible: root.ready && root.service && root.service.lastError !== ""
             wrapMode: Text.WordWrap
             text: root.service ? root.service.lastError : ""
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }

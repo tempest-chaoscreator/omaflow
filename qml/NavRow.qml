@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // One row in the standalone rail.
@@ -10,8 +11,8 @@ Rectangle {
   property string mark: ""
   property bool on: false
   property bool armed: false
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   signal picked()

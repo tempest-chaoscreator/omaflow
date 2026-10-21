@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "CcMap.js" as Cc
 
 // Read-only curves for the mode selected in the bar plugin.
@@ -8,8 +9,8 @@ Column {
 
   property var service: null
   property string modeUid: ""
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
 

@@ -2,6 +2,8 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+// QtQuick 6.12 exports its own Color singleton. The theme palette is Commons.Color.
+import qs.Commons as Commons
 import qs.Ui
 import "Nav.js" as Nav
 
@@ -22,14 +24,14 @@ Item {
   property int railIndex: 0
 
   readonly property bool opened: window.visible
-  readonly property color fg: Color.foreground
-  readonly property color accent: Color.accent
-  property color accent2: Color.accent
+  readonly property color fg: Commons.Color.foreground
+  readonly property color accent: Commons.Color.accent
+  property color accent2: Commons.Color.accent
   property string shellRaw: ""
   property bool uiCaptured: false
   property real shellSpacing: 1
   property int shellText: 12
-  readonly property color bg: Color.background
+  readonly property color bg: Commons.Color.background
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property color muted: Qt.rgba(fg.r, fg.g, fg.b, 0.55)
   readonly property string fontFamily: Style.font.family
@@ -165,11 +167,11 @@ Item {
     if (!loadedForeground && color7) fg = color7
     if (!foundAccent && color4) accent = color4
     if (!foundMuted) muted = color8 || fg
-    if (fg) Color.foreground = paintColor(Color.foreground, fg)
-    if (bg) Color.background = paintColor(Color.background, bg)
-    if (accent) Color.accent = paintColor(Color.accent, accent)
-    if (urgent) Color.urgent = paintColor(Color.urgent, urgent)
-    if (muted) Color.muted = paintColor(Color.muted, muted)
+    if (fg) Commons.Color.foreground = paintColor(Commons.Color.foreground, fg)
+    if (bg) Commons.Color.background = paintColor(Commons.Color.background, bg)
+    if (accent) Commons.Color.accent = paintColor(Commons.Color.accent, accent)
+    if (urgent) Commons.Color.urgent = paintColor(Commons.Color.urgent, urgent)
+    if (muted) Commons.Color.muted = paintColor(Commons.Color.muted, muted)
     var second = palette.green || palette.cyan || palette.magenta || ""
     if (second) accent2 = paintColor(accent2, second)
   }
@@ -179,7 +181,7 @@ Item {
     var next = String(raw || "")
     if (next !== shellRaw) {
       shellRaw = next
-      Color.loadShell(next)
+      Commons.Color.loadShell(next)
       shellSpacing = Style.spacingScale
       shellText = Style.font.baseSize
       uiCaptured = true
@@ -256,7 +258,7 @@ Item {
 
   FileView {
     id: colorsFile
-    path: Color.currentThemePath + "/colors.toml"
+    path: Commons.Color.currentThemePath + "/colors.toml"
     watchChanges: true
     printErrors: false
     onLoaded: root.applyThemeColors(text())
@@ -273,7 +275,7 @@ Item {
 
   FileView {
     id: shellFile
-    path: Color.currentThemePath + "/shell.toml"
+    path: Commons.Color.currentThemePath + "/shell.toml"
     watchChanges: true
     printErrors: false
     onLoaded: root.applyShell(text())

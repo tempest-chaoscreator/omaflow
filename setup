@@ -10,6 +10,8 @@ fi
 desk_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$desk_dir"
 desk="$desk_dir/omaflow-standalone.desktop"
+# org.quickshell is the bar. A desktop file with that class makes gtk-launch
+# focus the shell instead of starting this window. The chip runs Exec itself.
 cat > "$desk" << EOF
 [Desktop Entry]
 Type=Application
@@ -21,8 +23,8 @@ Icon=utilities-system-monitor
 Terminal=false
 Categories=System;Settings;
 Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
-StartupNotify=true
-StartupWMClass=org.quickshell
+StartupNotify=false
+StartupWMClass=omaflow
 EOF
 chmod 644 "$desk"
 if command -v update-desktop-database >/dev/null 2>&1; then

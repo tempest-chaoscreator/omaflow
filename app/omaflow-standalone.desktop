@@ -8,5 +8,5 @@ Icon=utilities-system-monitor
 Terminal=false
 Categories=System;Settings;
 Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
-StartupNotify=true
-StartupWMClass=org.quickshell
+StartupNotify=false
+StartupWMClass=omaflow

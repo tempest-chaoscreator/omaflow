@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // nf-md-fan U+F0210. A boxed button anchored on the right, so a reveal grows left.
@@ -10,8 +11,8 @@ Item {
   property bool selected: false
   property string label: ""
   property bool reveal: false
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   readonly property string fanGlyph: "\uDB80\uDE10"
   readonly property bool words: label !== "" && (!reveal || hit.containsMouse || selected)

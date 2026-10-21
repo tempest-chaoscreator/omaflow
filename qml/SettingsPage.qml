@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "Nav.js" as Nav
@@ -14,8 +15,8 @@ Column {
   property var service: null
   property bool keyed: false
   property int navIndex: 0
-  property color fg: Color.foreground
-  property color accent: Color.accent
+  property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.35)
   property string fontFamily: Style.font.family

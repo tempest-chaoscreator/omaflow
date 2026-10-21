@@ -1,11 +1,12 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
   id: root
   property var values: []
-  property color stroke: Color.accent
-  property color foreground: Color.foreground
+  property color stroke: Commons.Color.accent
+  property color foreground: Commons.Color.foreground
   property real minY: 20
   property real maxY: 100
 

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Duty on x, RPM on y. Samples keep the daemon spacing: dense near
 // kick-in, wider steps after that. This is not a temperature curve.
@@ -7,8 +8,8 @@ Item {
   id: root
 
   property var samples: []
-  property color stroke: Color.accent
-  property color foreground: Color.foreground
+  property color stroke: Commons.Color.accent
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
 
   implicitHeight: Style.space(80)
