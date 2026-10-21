@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tempest-chaoscreator.omaflow",
   "name": "Omaflow",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": "Tempest",
   "license": "MIT",
   "homepage": "https://github.com/tempest-chaoscreator/omaflow",

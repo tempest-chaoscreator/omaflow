@@ -580,6 +580,15 @@ function boundedArray(value, cap) {
   return value
 }
 
+// Qt Text defaults to AutoText. A group name that starts with an HTML tag
+// is fetched as an image inside the shared shell, past the 1 MB pack cap.
+function plainLabel(value, fallback) {
+  var text = String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, "")
+  text = text.replace(/^\s+|\s+$/g, "")
+  if (!text || text.length > 120 || /[<>]/.test(text)) return fallback
+  return text
+}
+
 function packPoints(pack, modeName, deviceName, channelName) {
   if (!pack || pack.kind !== "omaflow-curves") return null
   var want = String(modeName || "").toLowerCase()
@@ -767,7 +776,7 @@ function remapGroups(pack, channels, newId) {
     if (members.length < 2) continue
     out.push({
       id: newId ? newId() : ("group-" + i),
-      name: group.name || "Group",
+      name: plainLabel(group.name, "Group"),
       profileUid: "",
       members: members
     })

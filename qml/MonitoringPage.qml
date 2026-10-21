@@ -666,6 +666,7 @@ Column {
             text: gaugeCard.modelData.kind === "shared"
               ? gaugeCard.modelData.name
               : String(gaugeCard.modelData.name || "Device").toUpperCase()
+            textFormat: Text.PlainText
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Math.round(Style.font.caption * root.chipScale)

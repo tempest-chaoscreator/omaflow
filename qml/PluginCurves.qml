@@ -139,6 +139,7 @@ Column {
         width: parent.width
         visible: (modelData.groups || []).length > 0
         text: (modelData.groups || []).join("  ·  ")
+        textFormat: Text.PlainText
         color: root.accent
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

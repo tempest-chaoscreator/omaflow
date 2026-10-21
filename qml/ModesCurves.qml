@@ -1365,6 +1365,7 @@ Column {
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             text: card.modelData.kind === "shared" ? card.modelData.name : String(card.modelData.name || "Device").toUpperCase()
+            textFormat: Text.PlainText
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1627,6 +1628,7 @@ Column {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             text: modelData.name || "Group"
+            textFormat: Text.PlainText
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.body

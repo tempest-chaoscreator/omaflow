@@ -465,6 +465,7 @@ Column {
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 text: sharedBlock.modelData.name
+                textFormat: Text.PlainText
                 color: root.fg
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
