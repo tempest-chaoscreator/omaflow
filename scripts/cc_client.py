@@ -517,18 +517,71 @@ def write_ui(data: dict) -> None:
     _write_private(UI_PATH, json.dumps(clean, indent=2).encode("utf-8"))
 
 
+# Same caps as qml/CcMap.js. A JSON object with a huge length is not a list.
+# The 1 MB file cap does not stop that object from freezing the shell.
+_PACK_MODE_CAP = 64
+_PACK_CHANNEL_CAP = 128
+_PACK_POINT_CAP = 64
+_PACK_GROUP_CAP = 64
+_PACK_MEMBER_CAP = 128
+
+
+def _bounded_list(value: object, cap: int) -> list | None:
+    if not isinstance(value, list) or len(value) > cap:
+        return None
+    return value
+
+
+def valid_curve_pack(data: object) -> bool:
+    if not isinstance(data, dict) or data.get("kind") != "omaflow-curves" or data.get("version") != 1:
+        return False
+    if isinstance(data.get("version"), bool):
+        return False
+    modes = _bounded_list(data.get("modes"), _PACK_MODE_CAP)
+    if modes is None:
+        return False
+    for mode in modes:
+        if not isinstance(mode, dict):
+            return False
+        if "channels" not in mode or mode.get("channels") is None:
+            continue
+        channels = _bounded_list(mode.get("channels"), _PACK_CHANNEL_CAP)
+        if channels is None:
+            return False
+        for row in channels:
+            if not isinstance(row, dict):
+                return False
+            if "points" not in row or row.get("points") is None:
+                continue
+            if _bounded_list(row.get("points"), _PACK_POINT_CAP) is None:
+                return False
+    if "groups" not in data or data.get("groups") is None:
+        return True
+    groups = _bounded_list(data.get("groups"), _PACK_GROUP_CAP)
+    if groups is None:
+        return False
+    for group in groups:
+        if not isinstance(group, dict):
+            return False
+        if "members" not in group or group.get("members") is None:
+            continue
+        if _bounded_list(group.get("members"), _PACK_MEMBER_CAP) is None:
+            return False
+    return True
+
+
 def read_pack() -> dict:
     try:
         raw = json.loads(PACK_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    if not isinstance(raw, dict) or raw.get("kind") != "omaflow-curves":
+    if not valid_curve_pack(raw):
         return {}
     return raw
 
 
 def write_pack(data: dict) -> None:
-    if not isinstance(data, dict) or data.get("kind") != "omaflow-curves":
+    if not valid_curve_pack(data):
         raise ValueError("not an omaflow curve pack")
     payload = json.dumps(data, indent=2).encode("utf-8")
     if len(payload) > _FILE_LIMIT:

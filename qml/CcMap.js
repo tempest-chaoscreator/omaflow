@@ -565,23 +565,41 @@ function matchChannel(channels, deviceName, channelName) {
   return null
 }
 
+// A curve pack is a file the user picks. A JSON object can carry a huge
+// length without being an array, and a for-loop over that length freezes
+// the shell. The 1 MB file cap does not stop that. Only real arrays under
+// these caps are walked.
+var PACK_MODE_CAP = 64
+var PACK_CHANNEL_CAP = 128
+var PACK_POINT_CAP = 64
+var PACK_GROUP_CAP = 64
+var PACK_MEMBER_CAP = 128
+
+function boundedArray(value, cap) {
+  if (!Array.isArray(value) || value.length > cap) return null
+  return value
+}
+
 function packPoints(pack, modeName, deviceName, channelName) {
   if (!pack || pack.kind !== "omaflow-curves") return null
   var want = String(modeName || "").toLowerCase()
-  var modes = pack.modes || []
+  var modes = boundedArray(pack.modes, PACK_MODE_CAP)
+  if (!modes) return null
   var i
   var c
   for (i = 0; i < modes.length; i++) {
     var mode = modes[i]
     if (!mode || String(mode.name || "").toLowerCase() !== want) continue
-    var rows = mode.channels || []
+    var rows = boundedArray(mode.channels, PACK_CHANNEL_CAP)
+    if (!rows) continue
     for (c = 0; c < rows.length; c++) {
       var row = rows[c]
       if (!row) continue
       if (String(row.deviceName || "").toLowerCase() !== String(deviceName || "").toLowerCase()) continue
       var channel = String(channelName || "").toLowerCase()
       if (String(row.channel || "").toLowerCase() !== channel && String(row.label || "").toLowerCase() !== channel) continue
-      return row.points && row.points.length > 1 ? row.points : null
+      var points = boundedArray(row.points, PACK_POINT_CAP)
+      return points && points.length > 1 ? points : null
     }
   }
   return null
@@ -697,20 +715,49 @@ function buildCurvePack(modes, channels, profiles, groups) {
 }
 
 function validCurvePack(pack) {
-  return !!(pack && pack.kind === "omaflow-curves" && Number(pack.version) === 1 && pack.modes && pack.modes.length >= 0)
+  if (!pack || pack.kind !== "omaflow-curves" || pack.version !== 1) return false
+  var modes = boundedArray(pack.modes, PACK_MODE_CAP)
+  if (!modes) return false
+  var i
+  var c
+  for (i = 0; i < modes.length; i++) {
+    var mode = modes[i]
+    if (!mode || typeof mode !== "object" || Array.isArray(mode)) return false
+    if (mode.channels === undefined || mode.channels === null) continue
+    var channels = boundedArray(mode.channels, PACK_CHANNEL_CAP)
+    if (!channels) return false
+    for (c = 0; c < channels.length; c++) {
+      var row = channels[c]
+      if (!row || typeof row !== "object" || Array.isArray(row)) return false
+      if (row.points === undefined || row.points === null) continue
+      if (!boundedArray(row.points, PACK_POINT_CAP)) return false
+    }
+  }
+  if (pack.groups === undefined || pack.groups === null) return true
+  var groups = boundedArray(pack.groups, PACK_GROUP_CAP)
+  if (!groups) return false
+  for (i = 0; i < groups.length; i++) {
+    var group = groups[i]
+    if (!group || typeof group !== "object" || Array.isArray(group)) return false
+    if (group.members === undefined || group.members === null) continue
+    if (!boundedArray(group.members, PACK_MEMBER_CAP)) return false
+  }
+  return true
 }
 
 function remapGroups(pack, channels, newId) {
   var out = []
   if (!pack) return out
-  var saved = pack.groups || []
+  var saved = boundedArray(pack.groups, PACK_GROUP_CAP)
+  if (!saved) return out
   var i
   var k
   for (i = 0; i < saved.length; i++) {
     var group = saved[i]
-    if (!group) continue
+    if (!group || typeof group !== "object" || Array.isArray(group)) continue
     var members = []
-    var rows = group.members || []
+    var rows = boundedArray(group.members, PACK_MEMBER_CAP)
+    if (!rows) continue
     for (k = 0; k < rows.length; k++) {
       var row = rows[k]
       var channel = matchChannel(channels, row && row.deviceName, row && (row.channel || row.label))

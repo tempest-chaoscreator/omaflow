@@ -801,13 +801,14 @@ Item {
     for (var k in pending) next[k] = pending[k]
     next[id] = function(res) {
       var body = res && res.body ? res.body : ({})
-      curvePack = body && body.kind === "omaflow-curves" ? body : ({})
+      curvePack = Cc.validCurvePack(body) ? body : ({})
     }
     pending = next
     send({ op: "pack-get", id: id })
   }
 
   function setCurvePack(pack) {
+    if (!Cc.validCurvePack(pack)) return
     curvePack = pack || ({})
     var id = rpcId
     rpcId = rpcId + 1
@@ -828,10 +829,10 @@ Item {
 
   function consumePackMode(name) {
     var pack = curvePack
-    if (!pack || pack.kind !== "omaflow-curves") return
+    if (!Cc.validCurvePack(pack)) return
     var want = String(name || "").toLowerCase()
     var kept = []
-    var modesIn = pack.modes || []
+    var modesIn = pack.modes
     var i
     for (i = 0; i < modesIn.length; i++) {
       var mode = modesIn[i]
