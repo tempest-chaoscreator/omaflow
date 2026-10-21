@@ -367,6 +367,30 @@ def pair(password: str) -> dict:
     return {"ok": True, "status": 200, "error": "", "body": None}
 
 
+def _plain_label(value: object, fallback: str) -> str:
+    """Same rule as qml/CcMap.js plainLabel. A tag anywhere in the line is rich text."""
+    text = "".join(
+        ch for ch in str("" if value is None else value)
+        if ch >= " " and ch != "\x7f"
+    ).strip()
+    if not text or len(text) > 120 or "<" in text or ">" in text:
+        return fallback
+    return text
+
+
+def _clean_groups(groups: object) -> list:
+    if not isinstance(groups, list):
+        return []
+    clean = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        nxt = dict(group)
+        nxt["name"] = _plain_label(group.get("name"), "Group")
+        clean.append(nxt)
+    return clean
+
+
 def read_groups() -> dict:
     try:
         data = json.loads(GROUPS_PATH.read_text(encoding="utf-8"))
@@ -374,12 +398,12 @@ def read_groups() -> dict:
         return {"groups": []}
     if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
         return {"groups": []}
-    return data
+    return {"groups": _clean_groups(data.get("groups"))}
 
 
 def write_groups(data: dict) -> None:
     GROUPS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"groups": data.get("groups") or []}, indent=2).encode("utf-8")
+    payload = json.dumps({"groups": _clean_groups(data.get("groups") if isinstance(data, dict) else None)}, indent=2).encode("utf-8")
     fd = os.open(GROUPS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, payload)

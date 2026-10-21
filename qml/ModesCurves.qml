@@ -1116,6 +1116,7 @@ Column {
           : (root.graphSubject && root.graphSubject.inMode
             ? "This channel has no curve in " + root.mode.name + " yet."
             : "Switch this fan on to keep a curve for it in " + (root.mode ? root.mode.name : "this mode") + ".")
+        textFormat: Text.PlainText
         color: root.muted
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

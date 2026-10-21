@@ -580,13 +580,29 @@ function boundedArray(value, cap) {
   return value
 }
 
-// Qt Text defaults to AutoText. A group name that starts with an HTML tag
-// is fetched as an image inside the shared shell, past the 1 MB pack cap.
+// Qt Text defaults to AutoText and treats a tag anywhere before the first
+// newline as rich text. That fetch is not limited by the 1 MB pack cap.
 function plainLabel(value, fallback) {
   var text = String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, "")
   text = text.replace(/^\s+|\s+$/g, "")
   if (!text || text.length > 120 || /[<>]/.test(text)) return fallback
   return text
+}
+
+function cleanGroupList(groups) {
+  var list = Array.isArray(groups) ? groups : []
+  var out = []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var group = list[i]
+    if (!group || typeof group !== "object" || Array.isArray(group)) continue
+    var copy = ({})
+    var k
+    for (k in group) copy[k] = group[k]
+    copy.name = plainLabel(group.name, "Group")
+    out.push(copy)
+  }
+  return out
 }
 
 function packPoints(pack, modeName, deviceName, channelName) {

@@ -395,14 +395,14 @@ Item {
     var next = ({})
     for (var k in pending) next[k] = pending[k]
     next[id] = function(res) {
-      groups = (res.body && res.body.groups) || []
+      groups = Cc.cleanGroupList(res.body && res.body.groups)
     }
     pending = next
     send({ op: "groups-get", id: id })
   }
 
   function saveGroups(nextGroups) {
-    groups = nextGroups || []
+    groups = Cc.cleanGroupList(nextGroups)
     var id = rpcId
     rpcId = rpcId + 1
     pending = pending
