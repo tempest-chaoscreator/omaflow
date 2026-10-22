@@ -1411,16 +1411,21 @@ Item {
   }
 
   // Install asks once, the same way Start with the PC asks before enable.
-  // pkexec is what shows the password dialog from the panel. omarchy pkg add
-  // installs the daemon package and does not install the desktop package.
+  // pkexec is what shows the password dialog from the panel. The package is
+  // AUR-only, so the command is `omarchy pkg aur add coolercontrold`.
+  // pkexec is root, and yay will not build as root, so the shell puts the
+  // approving account in SUDO_USER and HOME before that command runs.
   Process {
     id: daemonInstall
-    command: ["pkexec", "/usr/share/omarchy/bin/omarchy", "pkg", "add", "coolercontrold"]
+    command: [
+      "pkexec", "/usr/bin/bash", "-c",
+      "uid=${PKEXEC_UID:-}; user=$(id -nu \"$uid\"); home=$(getent passwd \"$user\" | cut -d: -f6); [[ -n $user && -d $home ]] || { echo 'Could not identify the account that approved the prompt.' >&2; exit 1; }; export SUDO_USER=$user HOME=$home USER=$user LOGNAME=$user; cd \"$home\" && exec /usr/share/omarchy/bin/omarchy pkg aur add coolercontrold"
+    ]
     stderr: SplitParser {
       onRead: function(line) { root.daemonNote = String(line || "") }
     }
     onExited: function(code) {
-      root.finishDaemonAction(code, "Omaflow could not install coolercontrold. In a terminal: omarchy pkg add coolercontrold")
+      root.finishDaemonAction(code, "Omaflow could not install coolercontrold. In a terminal: omarchy pkg aur add coolercontrold")
     }
   }
 

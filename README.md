@@ -16,12 +16,12 @@ The bar chip and the window are this repository. `omarchy plugin add` clones it 
 omarchy plugin add https://github.com/tempest-chaoscreator/omaflow.git --enable
 ```
 
-Open the chip. If `coolercontrold` is missing, choose **Install coolercontrold**. That asks for your password and runs `omarchy pkg add coolercontrold`. It does not install the CoolerControl desktop package. If the package is already installed and the service is stopped, choose **Start coolercontrold**. That asks for your password and runs `systemctl start`. It does not enable the service at boot, and Omaflow does not run as root.
+Open the chip. If `coolercontrold` is missing, choose **Install coolercontrold**. That asks for your password and runs `omarchy pkg aur add coolercontrold`. It does not install the CoolerControl desktop package. If the package is already installed and the service is stopped, choose **Start coolercontrold**. That asks for your password and runs `systemctl start`. It does not enable the service at boot, and Omaflow does not run as root.
 
 To start the daemon with the PC, open Omaflow and turn on **Start with the PC** in Settings. That stays off until you turn it on. The same two steps from a terminal:
 
 ```bash
-omarchy pkg add coolercontrold
+omarchy pkg aur add coolercontrold
 sudo systemctl enable --now coolercontrold
 ```
 
@@ -46,10 +46,10 @@ cd omaflow
 ./app/omaflow-standalone
 ```
 
-Install and start the daemon from those buttons, or from a terminal. Install runs `omarchy pkg add coolercontrold` and does not install the CoolerControl desktop package. Start runs `systemctl start` and does not enable the service at boot. **Start with the PC** in Settings stays off until you turn it on.
+Install and start the daemon from those buttons, or from a terminal. Install runs `omarchy pkg aur add coolercontrold` and does not install the CoolerControl desktop package. Start runs `systemctl start` and does not enable the service at boot. **Start with the PC** in Settings stays off until you turn it on.
 
 ```bash
-omarchy pkg add coolercontrold
+omarchy pkg aur add coolercontrold
 sudo systemctl enable --now coolercontrold
 ```
 
