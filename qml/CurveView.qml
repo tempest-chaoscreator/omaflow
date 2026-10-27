@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Commons as Commons
+import "CcMap.js" as Cc
 
 // Draggable plot of coolercontrold graph points: [temp, duty].
 // Duty grid, floor band, fill, and round handles.
@@ -25,6 +26,9 @@ Item {
   readonly property real plotH: Math.max(1, height - padT - padB)
   property int dragIndex: -1
   property var draft: []
+  // Points at the moment the handle was pressed. Each move starts here,
+  // so dragging back down restores neighbors this gesture had lifted.
+  property var dragBase: []
 
   function shown() {
     return (dragIndex >= 0 && draft && draft.length) ? draft : (points || [])
@@ -78,23 +82,11 @@ Item {
     return Math.max(minDuty, Math.min(100, duty))
   }
 
-  function monotonic(src, index, duty) {
-    var next = []
-    for (var i = 0; i < src.length; i++) next.push([Number(src[i][0]), Number(src[i][1])])
-    if (index < 0 || index >= next.length) return next
-    next[index] = [next[index][0], duty]
-    var j
-    for (j = index + 1; j < next.length; j++) {
-      if (next[j][1] < duty) next[j] = [next[j][0], duty]
-    }
-    for (j = index - 1; j >= 0; j--) {
-      if (next[j][1] > duty) next[j] = [next[j][0], duty]
-    }
-    return next
-  }
-
   onPointsChanged: {
-    if (dragIndex < 0) draft = []
+    if (dragIndex < 0) {
+      draft = []
+      dragBase = []
+    }
     canvas.requestPaint()
   }
   onDraftChanged: canvas.requestPaint()
@@ -194,19 +186,28 @@ Item {
         cursorShape: root.interactive ? Qt.SizeVerCursor : Qt.ArrowCursor
         onPressed: function() {
           root.dragIndex = index
-          root.draft = JSON.parse(JSON.stringify(root.points || []))
+          root.dragBase = JSON.parse(JSON.stringify(root.points || []))
+          root.draft = JSON.parse(JSON.stringify(root.dragBase))
         }
         onPositionChanged: function(mouse) {
           if (!pressed || root.dragIndex !== index) return
           var gy = mapToItem(root, mouse.x, mouse.y).y
-          var src = root.draft && root.draft.length ? root.draft : root.points
-          root.draft = root.monotonic(src, index, root.dutyFromY(gy))
+          var src = root.dragBase && root.dragBase.length ? root.dragBase : (root.points || [])
+          root.draft = Cc.monotonicPoints(src, index, root.dutyFromY(gy))
         }
         onReleased: {
           if (root.dragIndex !== index) return
-          var next = root.draft
+          var next = root.draft && root.draft.length ? root.draft : root.dragBase
           root.dragIndex = -1
+          root.dragBase = []
+          root.draft = []
           root.pointsEdited(next)
+        }
+        onCanceled: {
+          if (root.dragIndex !== index) return
+          root.dragIndex = -1
+          root.dragBase = []
+          root.draft = []
         }
       }
     }

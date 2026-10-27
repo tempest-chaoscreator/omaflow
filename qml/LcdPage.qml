@@ -27,7 +27,6 @@ Column {
   property bool touched: false
   property bool pushing: false
   property bool viewReady: false
-  property string pushed: ""
   property int previewGen: 0
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
@@ -51,16 +50,29 @@ Column {
   readonly property string shownShape: detectedShape
   readonly property real frameAspect: screen ? frameRatio() : 1
   readonly property bool logoFace: face === "omarchy" || face === "omarchy-time"
+  readonly property bool plateFace: logoFace || face === "picture"
+  readonly property bool pictureOk: !!(screen && screen.hasImage)
   readonly property bool keepOn: !service || service.lcdBackground !== false
   property string previewSource: ""
   property string clockShown: ""
+  property string picturePath: ""
+  property int pictureScale: 100
+  readonly property int pictureScaleMin: 50
+  readonly property int pictureScaleMax: 300
+  property string pictureNote: ""
+  property bool picturePicking: false
+  property bool pictureAwait: false
+  property string pictureReply: ""
+  // nf-md-folder-open U+F0770
+  readonly property string folderGlyph: "\uDB81\uDF70"
   readonly property var faces: [
     { id: "liquid", label: "Liquid" },
     { id: "cpu", label: "CPU" },
     { id: "cpu-gpu", label: "CPU | GPU" },
     { id: "cpu-liquid", label: "CPU | Liquid" },
     { id: "omarchy", label: "Omarchy" },
-    { id: "omarchy-time", label: "Omarchy | Time" }
+    { id: "omarchy-time", label: "Omarchy | Time" },
+    { id: "picture", label: "Picture" }
   ]
   // Face cells keep their column when Keep updating is off so the dimmed
   // buttons stay in place while the keyboard skips them.
@@ -69,10 +81,11 @@ Column {
     var out = []
     var i
     for (i = 0; i < faces.length; i++) {
+      if (faces[i].id === "picture" && !pictureOk) continue
       if (!allowAll && faces[i].id !== "omarchy") continue
       out.push({ id: "face", face: i, x: i, y: 0 })
     }
-    out.push({ id: "zero", x: 6, y: 0 })
+    out.push({ id: "zero", x: faces.length, y: 0 })
     out.push({ id: "ccw", x: 0, y: 1 })
     out.push({ id: "cw", x: 2, y: 1 })
     out.push({ id: "sync", x: 0, y: 2 })
@@ -159,6 +172,7 @@ Column {
   }
 
   function faceEnabled(id) {
+    if (id === "picture" && !pictureOk) return false
     if (keepOn) return true
     return id === "omarchy"
   }
@@ -168,17 +182,6 @@ Column {
       if (navItems[i].id === "face" && navItems[i].face === faceIndex) return i
     }
     return navIndex
-  }
-
-  // Logo plates ignore temperatures. The field is the Liquid black, and the clock uses the accent.
-  function mark() {
-    var px = pixelSize()
-    var head = shownShape + "|" + px.w + "x" + px.h + "|" + face + "|"
-    if (face === "omarchy" || face === "omarchy-time") {
-      var minute = face === "omarchy-time" ? clockNow() : ""
-      return head + minute + "|#0a0c0b|" + hexOf(ink) + "||" + brightness + "|" + angle
-    }
-    return head + primaryText() + "|" + secondaryText() + "|" + hexOf(ink) + "|" + hexOf(ink2) + "|" + brightness + "|" + angle
   }
 
   function indexOf(id) {
@@ -194,6 +197,9 @@ Column {
       if (isFinite(Number(obj.brightness))) brightness = Math.max(0, Math.min(100, Math.round(Number(obj.brightness))))
       if (isFinite(Number(obj.saturation))) saturation = Math.max(0, Math.min(100, Math.round(Number(obj.saturation))))
       if (obj.zeroOrientation !== undefined) zeroOrientation = !!obj.zeroOrientation
+      if (obj.picture !== undefined) picturePath = String(obj.picture || "")
+      if (isFinite(Number(obj.pictureScale)))
+        pictureScale = Math.max(pictureScaleMin, Math.min(pictureScaleMax, Math.round(Number(obj.pictureScale))))
       if (obj.live !== undefined) {
         syncOn = obj.live === true
         liveKnown = true
@@ -210,6 +216,7 @@ Column {
     viewReady = true
     if (snap) saveView()
     if (screen && !lcdReady) pull()
+    if (plateFace) schedulePreview()
   }
 
   function enforceKeepFace() {
@@ -224,7 +231,9 @@ Column {
       saturation: saturation,
       angle: angle,
       face: face,
-      zeroOrientation: zeroOrientation
+      zeroOrientation: zeroOrientation,
+      picture: picturePath,
+      pictureScale: pictureScale
     }
     if (liveKnown) obj.live = syncOn
     lcdFile.setText(JSON.stringify(obj))
@@ -260,41 +269,187 @@ Column {
   function push() {
     if (!viewReady || !service || !screen || pushing) return
     pushing = true
-    var token = mark()
     var px = pixelSize()
     service.pushLcdImage(
       screen.deviceUid, screen.name, brightness, face, angle,
       hexOf(ink), hexOf(ink2), primaryText(), secondaryText(),
       shownShape, px.w, px.h, screen.deviceName || "",
-      function(res) {
-        root.pushing = false
-        if (res && res.ok) root.pushed = token
-      }
+      function() { root.pushing = false },
+      picturePath,
+      pictureScale
     )
   }
 
   function schedulePreview() {
-    if (!logoFace || !service) return
+    if (!plateFace || !service) return
+    if (face === "picture" && !picturePath) return
     previewDelay.restart()
   }
 
   function requestPreview() {
-    if (!logoFace || !service || !service.previewLcd) return
+    if (!plateFace || !service || !service.previewLcd) return
+    if (face === "picture" && !picturePath) return
     previewGen = previewGen + 1
     var gen = previewGen
     var px = pixelSize()
     var name = screen ? String(screen.deviceName || "") : ""
     service.previewLcd(name, px.w, px.h, face, hexOf(ink), function(res) {
-      if (gen !== root.previewGen || !root.logoFace) return
-      if (!res || !res.ok) return
+      if (gen !== root.previewGen || !root.plateFace) return
+      if (!res || !res.ok) {
+        if (root.face === "picture") {
+          root.previewSource = ""
+          root.pictureNote = "That picture could not be opened."
+        }
+        return
+      }
+      if (root.face === "picture") root.pictureNote = ""
       root.previewSource = "file://" + Quickshell.env("HOME") + "/.cache/omaflow/lcd-preview.png?v=" + gen
-    })
+    }, face === "picture" ? picturePath : "", face === "picture" ? pictureScale : 100)
+  }
+
+  function homeDir() {
+    return String(Quickshell.env("HOME") || "")
+  }
+
+  function pathFromFileUri(uri) {
+    var text = String(uri || "")
+    if (text.indexOf("file://") !== 0) return ""
+    if (text.indexOf("?") >= 0 || text.indexOf("#") >= 0) return ""
+    var rest = text.substring(7)
+    if (!rest || rest.charAt(0) !== "/") return ""
+    var decoded
+    try { decoded = decodeURIComponent(rest) } catch (e) { return "" }
+    if (!decoded || decoded.charAt(0) !== "/" || decoded.indexOf("\0") >= 0) return ""
+    if (decoded.length > 4096) return ""
+    return decoded
+  }
+
+  function underHome(path) {
+    var home = homeDir()
+    var text = String(path || "")
+    if (!home || home.charAt(0) !== "/" || text.indexOf(home + "/") !== 0) return false
+    var parts = text.substring(home.length + 1).split("/")
+    if (!parts.length) return false
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] === "" || parts[i] === "." || parts[i] === "..") return false
+    }
+    return true
+  }
+
+  function pictureFolder() {
+    var home = homeDir()
+    var path = String(picturePath || "")
+    if (underHome(path)) return path.substring(0, path.lastIndexOf("/"))
+    return home ? home + "/Pictures" : ""
+  }
+
+  function pictureRequest() {
+    return {
+      mode: "open",
+      title: "Open picture",
+      app: "",
+      accept: "Open",
+      multiple: false,
+      directory: false,
+      folder: pictureFolder(),
+      file: "",
+      name: "",
+      files: [],
+      filters: [
+        {
+          label: "Pictures",
+          globs: ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.gif"],
+          mimes: ["image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"]
+        },
+        { label: "All files", globs: ["*"], mimes: [] }
+      ],
+      current: "Pictures",
+      currentIndex: 0
+    }
+  }
+
+  function openPicture() {
+    if (picturePicking || picturePicker.running) return
+    if (face !== "picture" || !pictureOk) return
+    var dir = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    if (!dir || dir.charAt(0) !== "/") dir = homeDir() + "/.cache/omaflow"
+    var reply = dir + "/omaflow-picture-" + Date.now() + ".json"
+    pictureNote = ""
+    pictureReply = reply
+    pictureAwait = false
+    picturePicker.environment = {
+      "FLEA_PICKER": JSON.stringify(pictureRequest()),
+      "FLEA_PICKER_REPLY": reply
+    }
+    picturePicker.command = ["flea", "--pick", reply]
+    picturePicking = true
+    picturePicker.running = true
+  }
+
+  function beginPictureReply() {
+    if (!picturePicking || pictureAwait) return
+    pictureAwait = true
+    if (pictureReplyFile.path === pictureReply) pictureReplyFile.reload()
+    else pictureReplyFile.path = pictureReply
+  }
+
+  function finishPicturePick() {
+    pictureAwait = false
+    picturePicking = false
+  }
+
+  function takePictureReply(raw) {
+    if (!pictureAwait || picturePicker.running) return
+    finishPicturePick()
+    var text = String(raw || "")
+    if (text.length > 65536) {
+      pictureNote = "The file manager did not open."
+      return
+    }
+    var obj = null
+    try { obj = JSON.parse(text) } catch (e) { obj = null }
+    if (!obj) {
+      pictureNote = "The file manager did not open."
+      return
+    }
+    if (obj.response === 1) return
+    var uri = obj.response === 0 && obj.uris && obj.uris.length ? obj.uris[0] : ""
+    var path = pathFromFileUri(uri)
+    if (!path || !underHome(path)) {
+      pictureNote = path ? "That picture has to be a file in your home directory." : "The file manager did not open."
+      return
+    }
+    pictureNote = ""
+    setPicturePath(path)
+  }
+
+  function setPictureScale(next) {
+    var value = Math.max(pictureScaleMin, Math.min(pictureScaleMax, Math.round(Number(next) || pictureScaleMin)))
+    if (value === pictureScale) return
+    pictureScale = value
+    saveView()
+    if (face !== "picture") return
+    schedulePreview()
+    if (syncOn) pushDelay.restart()
+  }
+
+  function dropPictureReply() {
+    if (!pictureAwait || picturePicker.running) return
+    finishPicturePick()
+    pictureNote = "The file manager did not open."
+  }
+
+  function setPicturePath(text) {
+    picturePath = String(text || "")
+    saveView()
+    if (face !== "picture") return
+    schedulePreview()
+    if (syncOn) pushDelay.restart()
   }
 
   function turnOff() {
     syncOn = false
     liveKnown = true
-    pushed = ""
     saveView()
     if (!service || !screen) return
     service.setLcd(screen.deviceUid, screen.name, {
@@ -372,7 +527,8 @@ Column {
     if (item.id === "face") {
       var picked = faces[item.face] ? faces[item.face].id : ""
       if (!faceEnabled(picked)) return
-      setFace(picked)
+      if (picked === "picture" && face === "picture") openPicture()
+      else setFace(picked)
     }
     else if (item.id === "zero") zeroPreview()
     else if (item.id === "ccw") stepAngle(-30)
@@ -388,23 +544,25 @@ Column {
 
   onVisibleChanged: {
     if (visible && viewReady && screen && !lcdReady) pull()
-    if (visible && logoFace) schedulePreview()
+    if (visible && plateFace) schedulePreview()
   }
   onScreenKeyChanged: {
     if (!screenKey) return
     lcdReady = false
-    pushed = ""
     if (viewReady && screen) pull()
-    if (logoFace) schedulePreview()
+    if (plateFace) schedulePreview()
   }
   onKeepOnChanged: enforceKeepFace()
   onFaceChanged: {
     saveView()
+    if (face !== "picture") pictureNote = ""
     if (ring) ring.requestPaint()
-    if (logoFace) {
-      clockShown = clockNow()
-      schedulePreview()
-    }
+    if (logoFace) clockShown = clockNow()
+    if (plateFace) schedulePreview()
+  }
+  onPicturePathChanged: {
+    if (!viewReady || face !== "picture") return
+    schedulePreview()
   }
   onAccent2Changed: if (syncOn && keepOn && viewReady && visible) pushDelay.restart()
   onAngleChanged: saveView()
@@ -413,7 +571,7 @@ Column {
   onZeroOrientationChanged: saveView()
   onShownShapeChanged: {
     if (ring) ring.requestPaint()
-    if (logoFace) schedulePreview()
+    if (plateFace) schedulePreview()
   }
   onInkChanged: {
     if (ring) ring.requestPaint()
@@ -470,6 +628,75 @@ Column {
     onLoadFailed: root.finishView()
   }
 
+  Process {
+    id: picturePicker
+    // Keep the pipes open. Quickshell closes a channel that has no parser,
+    // and a closed stdout or stderr can stop the file manager on the first log line.
+    stdout: SplitParser { onRead: function(line) {} }
+    stderr: SplitParser { onRead: function(line) {} }
+    onExited: root.beginPictureReply()
+    onRunningChanged: if (!running) root.beginPictureReply()
+  }
+
+  FileView {
+    id: pictureReplyFile
+    watchChanges: false
+    printErrors: false
+    onLoaded: root.takePictureReply(text())
+    onLoadFailed: root.dropPictureReply()
+  }
+
+  component SizeGlyph: Item {
+    property string glyph: ""
+    property int delta: 0
+    property string tip: ""
+    readonly property bool blocked: delta < 0
+      ? root.pictureScale <= root.pictureScaleMin
+      : root.pictureScale >= root.pictureScaleMax
+    width: Style.space(22)
+    height: Style.space(22)
+    opacity: blocked ? 0.38 : 1
+
+    Rectangle {
+      anchors.fill: parent
+      radius: 0
+      color: sizeMouse.containsMouse
+        ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+        : "transparent"
+      border.width: 1
+      border.color: sizeMouse.containsMouse
+        ? root.accent
+        : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
+    }
+
+    Text {
+      anchors.centerIn: parent
+      text: glyph
+      color: sizeMouse.containsMouse ? root.accent : root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(16)
+      font.bold: true
+    }
+
+    MouseArea {
+      id: sizeMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: !blocked
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.setPictureScale(root.pictureScale + delta)
+    }
+
+    PanelToolTip {
+      visible: sizeMouse.containsMouse
+      text: tip
+      fontFamily: root.fontFamily
+      panelBackground: Commons.Color.background
+      panelForeground: Commons.Color.foreground
+      panelBorder: Commons.Color.accent
+    }
+  }
+
   Item {
     id: faceRow
     width: parent.width
@@ -485,25 +712,123 @@ Column {
       Repeater {
         id: faceRepeat
         model: root.faces
-        delegate: Button {
+        delegate: Item {
+          id: faceCell
           required property var modelData
           required property int index
-          text: modelData.label
-          bordered: true
-          selected: root.face === modelData.id
-          opacity: {
-            var on = root.keepOn
-            return root.faceEnabled(modelData.id) ? 1 : 0.38
+          readonly property bool picture: modelData.id === "picture"
+          visible: !picture || root.pictureOk
+          implicitWidth: picture ? pictureHost.implicitWidth : modeBtn.implicitWidth
+          implicitHeight: picture ? pictureHost.implicitHeight : modeBtn.implicitHeight
+          width: implicitWidth
+          height: implicitHeight
+          opacity: root.faceEnabled(modelData.id) ? 1 : 0.38
+
+          Button {
+            id: modeBtn
+            visible: !faceCell.picture
+            text: modelData.label
+            bordered: true
+            selected: root.face === modelData.id
+            hasCursor: root.aimed("face", index)
+            foreground: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: {
+              if (!root.faceEnabled(modelData.id)) return
+              root.navIndex = root.faceNavIndex(index)
+              root.setFace(modelData.id)
+            }
           }
-          hasCursor: root.aimed("face", index)
-          foreground: root.fg
-          accent: root.accent
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          onClicked: {
-            if (!root.faceEnabled(modelData.id)) return
-            root.navIndex = root.faceNavIndex(index)
-            root.setFace(modelData.id)
+
+          // The label stays put. The clip grows right, the same 120ms ease as a fan glyph.
+          Item {
+            id: pictureHost
+            visible: faceCell.picture
+            readonly property bool open: root.face === "picture"
+            property bool slide: false
+            implicitHeight: pictureBtn.implicitHeight
+            height: implicitHeight
+            implicitWidth: open
+              ? pictureBtn.implicitWidth + Style.space(8) + height
+              : pictureBtn.implicitWidth
+            width: implicitWidth
+            clip: true
+
+            Behavior on implicitWidth {
+              enabled: slide
+              NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+            }
+            Component.onCompleted: slide = true
+
+            Button {
+              id: pictureBtn
+              text: "Picture"
+              bordered: true
+              selected: root.face === "picture"
+              hasCursor: root.aimed("face", index)
+              foreground: root.fg
+              accent: root.accent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: {
+                if (!root.faceEnabled("picture")) return
+                root.navIndex = root.faceNavIndex(index)
+                root.setFace("picture")
+              }
+            }
+
+            Item {
+              anchors.left: pictureBtn.right
+              anchors.leftMargin: Style.space(8)
+              anchors.top: parent.top
+              width: pictureHost.height
+              height: pictureHost.height
+
+              Rectangle {
+                anchors.fill: parent
+                radius: 0
+                color: importMouse.containsMouse
+                  ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                  : "transparent"
+                border.width: 1
+                border.color: importMouse.containsMouse || root.picturePicking
+                  ? root.accent
+                  : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
+              }
+
+              OpticalGlyph {
+                anchors.centerIn: parent
+                width: Style.space(16)
+                height: Style.space(16)
+                text: root.folderGlyph
+                fontFamily: root.fontFamily
+                fontSize: Style.space(16)
+                color: importMouse.containsMouse || root.picturePicking ? root.accent : root.fg
+              }
+
+              MouseArea {
+                id: importMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                enabled: pictureHost.open
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.navIndex = root.faceNavIndex(index)
+                  root.openPicture()
+                }
+              }
+
+              PanelToolTip {
+                visible: importMouse.containsMouse && pictureHost.open
+                text: "Open a picture"
+                fontFamily: root.fontFamily
+                panelBackground: Commons.Color.background
+                panelForeground: Commons.Color.foreground
+                panelBorder: Commons.Color.accent
+              }
+            }
           }
         }
       }
@@ -565,7 +890,10 @@ Column {
   Item {
     id: stage
     width: parent.width
-    height: Math.max(Style.space(180), root.height - faceRow.height - sliderRow.height - actionRow.height - root.spacing * 3)
+    height: {
+      var extra = pictureNoteText.visible ? (pictureNoteText.height + root.spacing) : 0
+      return Math.max(Style.space(180), root.height - faceRow.height - sliderRow.height - actionRow.height - extra - root.spacing * 3)
+    }
     readonly property int dialSize: {
       var chrome = Style.space(36) * 2 + Style.space(18) * 2
       var byW = Math.floor(width - chrome)
@@ -646,7 +974,7 @@ Column {
 
           Image {
             anchors.fill: parent
-            visible: root.logoFace && root.previewSource !== ""
+            visible: root.plateFace && root.previewSource !== ""
             source: root.previewSource
             fillMode: Image.PreserveAspectFit
             smooth: true
@@ -657,7 +985,7 @@ Column {
 
           Canvas {
             id: ring
-            visible: !root.logoFace
+            visible: !root.plateFace
             anchors.fill: parent
             onWidthChanged: requestPaint()
             onHeightChanged: requestPaint()
@@ -707,7 +1035,7 @@ Column {
 
           Column {
             anchors.centerIn: parent
-            visible: !root.logoFace && !root.combo
+            visible: !root.plateFace && !root.combo
             spacing: Style.space(2)
             Text {
               anchors.horizontalCenter: parent.horizontalCenter
@@ -730,7 +1058,7 @@ Column {
 
           Row {
             anchors.centerIn: parent
-            visible: !root.logoFace && root.combo
+            visible: !root.plateFace && root.combo
             spacing: Style.space(16)
 
             Column {
@@ -806,6 +1134,18 @@ Column {
             }
           }
         }
+
+        Row {
+          anchors.right: artwork.right
+          anchors.bottom: artwork.bottom
+          anchors.margins: Style.space(8)
+          spacing: Style.space(4)
+          visible: root.face === "picture" && root.pictureOk
+          z: 3
+
+          SizeGlyph { glyph: "\u2212"; delta: -10; tip: "Smaller" }
+          SizeGlyph { glyph: "+"; delta: 10; tip: "Larger" }
+        }
       }
 
       Item {
@@ -827,6 +1167,17 @@ Column {
         }
       }
     }
+  }
+
+  Text {
+    id: pictureNoteText
+    width: parent.width
+    wrapMode: Text.WordWrap
+    visible: root.face === "picture" && root.pictureOk && root.pictureNote !== ""
+    text: root.pictureNote
+    color: root.fg
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
   }
 
   Row {

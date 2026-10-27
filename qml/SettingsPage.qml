@@ -8,13 +8,21 @@ import "CcMap.js" as Cc
 import "Nav.js" as Nav
 import "RepoPath.js" as Repo
 
-// Daemon options, curve response, and alerts. The window does not change them on its own.
+// Daemon, AIO LCD, window, curves, and alerts. One subtab is on screen at a time.
 Column {
   id: root
 
   property var service: null
   property bool keyed: false
   property int navIndex: 0
+  property string section: "daemon"
+  readonly property var sections: [
+    { id: "daemon", label: "Daemon" },
+    { id: "lcd", label: "AIO LCD" },
+    { id: "window", label: "Window" },
+    { id: "curves", label: "Curves" },
+    { id: "alerts", label: "Alerts" }
+  ]
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
@@ -62,40 +70,123 @@ Column {
     return "\uDB80\uDE10 " + temp
   }
 
-  readonly property var navItems: {
+  readonly property var hopFunctions: {
+    var list = service && service.functions ? service.functions : []
     var out = []
     var i
-    function place(item) {
-      item.x = 0
-      item.y = out.length
-      out.push(item)
-    }
-    if (bootState !== "enabled" && service && service.daemonGate !== "install" && service.daemonGate !== "unknown")
-      place({ kind: "boot", index: 0 })
-    place({ kind: "lcd", index: 0 })
-    if (!service || service.lcdBackground !== false) place({ kind: "lcdSpeed", index: 0 })
-    place({ kind: "fill", index: 0 })
-    place({ kind: "pinGroups", index: 0 })
-    place({ kind: "textFollow", index: 0 })
-    place({ kind: "textSize", index: 0 })
-    place({ kind: "export", index: 0 })
-    place({ kind: "import", index: 0 })
-    place({ kind: "bar", index: 0 })
-    if (service && service.connection === "ready") {
-      for (i = 0; i < switches.length; i++) place({ kind: "daemon", index: i })
-      var fns = service.functions ? service.functions : []
-      for (i = 0; i < fns.length; i++) place({ kind: "function", index: i })
-      var alerts = service.alerts ? service.alerts : []
-      for (i = 0; i < alerts.length; i++) place({ kind: "alert", index: i })
+    for (i = 0; i < list.length; i++) {
+      var fn = list[i]
+      if (!fn || String(fn.name || "") === "Omaflow silent ramp") continue
+      out.push(fn)
     }
     return out
   }
 
+  readonly property var alertRows: {
+    if (!service || service.connection !== "ready") return []
+    var sensors = Cc.alertSensors(service.devices)
+    var presets = [
+      { name: "CPU 90°C", max: 90, source: sensors.cpu },
+      { name: "GPU 88°C", max: 88, source: sensors.gpu },
+      { name: "Coolant 50°C", max: 50, source: sensors.coolant }
+    ]
+    var out = []
+    var i
+    for (i = 0; i < presets.length; i++) {
+      if (!presets[i].source) continue
+      var existing = Cc.alertNamed(service.alerts, presets[i].name)
+      out.push({
+        kind: "preset",
+        name: presets[i].name,
+        max: presets[i].max,
+        source: presets[i].source,
+        alert: existing,
+        on: !!(existing && existing.enabled !== false)
+      })
+    }
+    var alerts = service.alerts || []
+    for (i = 0; i < alerts.length; i++) {
+      var alert = alerts[i]
+      if (!alert) continue
+      var name = String(alert.name || "")
+      if (name === "CPU 90°C" || name === "GPU 88°C" || name === "Coolant 50°C") continue
+      out.push({
+        kind: "custom",
+        name: name,
+        max: Number(alert.max),
+        source: null,
+        alert: alert,
+        on: alert.enabled !== false
+      })
+    }
+    return out
+  }
+
+  readonly property var navItems: {
+    var out = []
+    var i
+    var col = 0
+    for (i = 0; i < sections.length; i++) {
+      if (sections[i].id === section) col = i
+      out.push({ kind: "section", index: i, x: i, y: 0 })
+    }
+    var row = 1
+    function place(item) {
+      item.x = col
+      item.y = row
+      row = row + 1
+      out.push(item)
+    }
+    if (section === "daemon") {
+      if (bootState !== "enabled" && service && service.daemonGate !== "install" && service.daemonGate !== "unknown")
+        place({ kind: "boot", index: 0 })
+      if (service && service.connection === "ready") {
+        for (i = 0; i < switches.length; i++) place({ kind: "daemon", index: i })
+      }
+    } else if (section === "lcd") {
+      place({ kind: "lcd", index: 0 })
+      if (!service || service.lcdBackground !== false) place({ kind: "lcdSpeed", index: 0 })
+    } else if (section === "window") {
+      place({ kind: "fill", index: 0 })
+      place({ kind: "pinGroups", index: 0 })
+      place({ kind: "textFollow", index: 0 })
+      place({ kind: "textSize", index: 0 })
+      place({ kind: "bar", index: 0 })
+    } else if (section === "curves") {
+      place({ kind: "export", index: 0 })
+      place({ kind: "import", index: 0 })
+      place({ kind: "pumpFloor", index: 0 })
+      place({ kind: "silentRamp", index: 0 })
+      if (service && service.connection === "ready") {
+        var fns = hopFunctions
+        for (i = 0; i < fns.length; i++) place({ kind: "function", index: i })
+      }
+    } else if (section === "alerts") {
+      if (service && service.connection === "ready") {
+        var alerts = alertRows
+        for (i = 0; i < alerts.length; i++) place({ kind: "alert", index: i })
+      }
+    }
+    return out
+  }
+
+  function alertCaption(row) {
+    if (!row) return ""
+    var state = row.alert ? Cc.alertStateLabel(row.alert) : "Off"
+    if (row.kind === "custom" && row.alert)
+      return row.name + "  " + row.alert.min + "–" + row.alert.max + "  " + state
+    return row.name + "  " + state
+  }
+
+  function toggleAlertRow(row) {
+    if (!service || !row) return
+    if (row.alert) service.setAlertEnabled(row.alert, !(row.alert.enabled !== false))
+    else if (row.source) service.createAlert(row.name, row.max, row.source)
+  }
+
   function patch(key, value) {
     if (!service || !service.daemonSettings) return
-    var next = ({})
-    var current = service.daemonSettings
-    for (var k in current) next[k] = current[k]
+    var next = Cc.copyMap(service.daemonSettings)
     next[key] = value
     service.saveDaemon(next)
   }
@@ -148,12 +239,14 @@ Column {
 
   function secondsLookSelected(seconds) {
     if (!service) return seconds === 5
+    if (lcdFace() === "picture") return seconds === 0
     if (lcdFace() === "omarchy-time") return seconds === 60
     if (lcdFace() === "omarchy" && service.lcdThemeSync === true) return false
     return service.lcdSeconds === seconds
   }
 
   function secondsDimmed(seconds) {
+    if (lcdFace() === "picture") return seconds !== 0
     return lcdFace() === "omarchy-time" && seconds !== 60
   }
 
@@ -163,7 +256,7 @@ Column {
   }
 
   function pickLcdSeconds(seconds) {
-    if (!service || lcdFace() === "omarchy-time") return
+    if (!service || lcdFace() === "omarchy-time" || lcdFace() === "picture") return
     if (lcdFace() === "omarchy") service.setUi({ lcdSeconds: seconds, lcdThemeSync: false })
     else service.setUi({ lcdSeconds: seconds })
   }
@@ -174,9 +267,9 @@ Column {
   }
 
   function stepLcd(dx) {
-    if (!service || lcdFace() === "omarchy-time") return
+    if (!service || lcdFace() === "omarchy-time" || lcdFace() === "picture") return
     var theme = lcdFace() === "omarchy"
-    var stops = theme ? [2, 5, 10, 30, 60, "theme"] : [2, 5, 10, 30, 60]
+    var stops = theme ? [0, 2, 5, 10, 30, 60, "theme"] : [0, 2, 5, 10, 30, 60]
     var index = 1
     var i
     if (theme && service.lcdThemeSync === true) index = stops.length - 1
@@ -266,7 +359,8 @@ Column {
   }
 
   function moveNav(dx, dy) {
-    var item = navItems.length ? navItems[Math.max(0, Math.min(navItems.length - 1, navIndex))] : null
+    var items = navItems
+    var item = items.length ? items[Math.max(0, Math.min(items.length - 1, navIndex))] : null
     if (item && item.kind === "textSize" && dx && !dy) {
       stepText(dx)
       return
@@ -275,7 +369,15 @@ Column {
       stepLcd(dx)
       return
     }
-    navIndex = Nav.step(navItems, navIndex, dx, dy)
+    // Left and right change subtabs only from the tab row. A control stays put.
+    if (dx && !dy && (!item || item.kind !== "section")) return
+    var next = Nav.step(items, navIndex, dx, dy)
+    var landed = items[next]
+    if (landed && landed.kind === "section" && sections[landed.index]) {
+      var id = sections[landed.index].id
+      if (id !== section) section = id
+    }
+    navIndex = next
   }
 
   function aimed(kind, index) {
@@ -342,7 +444,7 @@ Column {
 
   function activateNav() {
     var item = navItems[navIndex]
-    if (!item) return
+    if (!item || item.kind === "section") return
     if (item.kind === "boot") {
       enableBoot()
       return
@@ -382,22 +484,27 @@ Column {
       return
     }
     if (!service) return
+    if (item.kind === "pumpFloor") {
+      if (service.pumpFloor) service.requestPumpFloorOff()
+      else service.enablePumpFloor()
+      return
+    }
+    if (item.kind === "silentRamp") {
+      service.setSilentRamp(!(service.silentRamp === true))
+      return
+    }
     if (item.kind === "daemon") {
       var row = switches[item.index]
       var current = service.daemonSettings ? service.daemonSettings[row.key] === true : false
       patch(row.key, !current)
     } else if (item.kind === "function") {
-      var fn = service.functions[item.index]
+      var fn = hopFunctions[item.index]
       if (!fn) return
       var next = copy(fn)
       next.threshold_hopping = !fn.threshold_hopping
       service.saveFunction(next)
     } else if (item.kind === "alert") {
-      var alert = service.alerts[item.index]
-      if (!alert) return
-      var copyAlert = copy(alert)
-      copyAlert.enabled = alert.enabled === false
-      service.saveAlert(copyAlert)
+      toggleAlertRow(alertRows[item.index])
     }
   }
 
@@ -464,30 +571,152 @@ Column {
     }
   }
 
-  Text {
-    text: "coolercontrold"
+  component SectionHead: Text {
+    property string page: ""
+    property bool pad: true
+    property bool extra: true
+    visible: root.section === page && extra
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.space(14)
     font.bold: true
+    topPadding: pad ? Style.space(8) : 0
+  }
+
+  component MutedNote: Text {
+    property string page: ""
+    property bool shown: true
+    property color ink: root.muted
+    property int px: Style.font.caption
+    width: parent.width
+    wrapMode: Text.WordWrap
+    visible: root.section === page && shown
+    color: ink
+    font.family: root.fontFamily
+    font.pixelSize: px
+  }
+
+  component ToggleRow: Row {
+    id: toggleRow
+    property string page: ""
+    property string aimKind: ""
+    property int aimIndex: 0
+    property string label: ""
+    property bool checked: false
+    signal toggled()
+    spacing: Style.space(10)
+    visible: root.section === page
+    SquareSwitch {
+      anchors.verticalCenter: parent.verticalCenter
+      on: toggleRow.checked
+      foreground: root.fg
+      accent: root.aimed(toggleRow.aimKind, toggleRow.aimIndex) ? root.accent : root.fg
+      onClicked: toggleRow.toggled()
+    }
+    Text {
+      anchors.verticalCenter: parent.verticalCenter
+      text: toggleRow.label
+      color: root.aimed(toggleRow.aimKind, toggleRow.aimIndex) ? root.accent : root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+    }
+  }
+
+  Row {
+    id: sectionRow
+    width: parent.width
+    spacing: Style.space(6)
+
+    Repeater {
+      model: root.sections
+      delegate: Rectangle {
+        required property var modelData
+        required property int index
+        width: Math.max(0, (sectionRow.width - sectionRow.spacing * (root.sections.length - 1)) / root.sections.length)
+        height: Style.space(32)
+        radius: 0
+        color: root.section === modelData.id
+          ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+          : "transparent"
+        border.width: 1
+        border.color: root.aimed("section", index) || root.section === modelData.id ? root.accent : root.line
+        Text {
+          anchors.centerIn: parent
+          width: parent.width - Style.space(8)
+          horizontalAlignment: Text.AlignHCenter
+          elide: Text.ElideRight
+          text: modelData.label
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(12)
+          font.bold: root.section === modelData.id
+        }
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: {
+            root.section = modelData.id
+            root.navIndex = index
+          }
+        }
+      }
+    }
   }
 
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
+    visible: root.service && (root.service.connection === "need-token" || root.service.connection === "unauthorized")
+    text: "Enter the CoolerControl password once. Omaflow uses 127.0.0.1:11987 and does not ask for an address. The token is saved and the password is not."
+    color: root.fg
+    font.family: root.fontFamily
+    font.pixelSize: Style.space(13)
+  }
+
+  Row {
+    spacing: Style.space(8)
+    visible: root.service && (root.service.connection === "need-token" || root.service.connection === "unauthorized")
+    TextField {
+      id: pairField
+      width: Style.space(240)
+      password: true
+      placeholderText: "Password"
+      foreground: root.fg
+      accent: root.accent
+    }
+    Button {
+      text: "Pair"
+      bordered: true
+      selected: true
+      foreground: root.fg
+      accent: root.accent
+      fontFamily: root.fontFamily
+      onClicked: {
+        var password = pairField.text
+        pairField.text = ""
+        if (root.service) root.service.pair(password)
+      }
+    }
+  }
+
+  SectionHead {
+    text: "coolercontrold"
+    page: "daemon"
+    pad: false
+  }
+
+  MutedNote {
+    page: "daemon"
     text: root.service && root.service.daemonGate === "install"
       ? "Install coolercontrold from the button above. Start with the PC stays off until you turn it on."
       : root.bootState === "enabled"
         ? "The daemon starts with the PC. Omaflow connects when it is up, including a window or bar chip that opened first."
         : "The daemon is not enabled at boot. One approval turns it on now and at the next start. If the prompt does not appear, run: sudo systemctl enable --now coolercontrold"
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
   Row {
     spacing: Style.space(10)
-    visible: root.bootState !== "enabled" && root.service && root.service.daemonGate !== "install" && root.service.daemonGate !== "unknown"
+    visible: root.section === "daemon" && root.bootState !== "enabled" && root.service && root.service.daemonGate !== "install" && root.service.daemonGate !== "unknown"
     Button {
       text: root.bootBusy ? "Waiting" : "Start with the PC"
       bordered: true
@@ -500,110 +729,49 @@ Column {
     }
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    visible: root.bootNote !== ""
+  MutedNote {
+    page: "daemon"
+    shown: root.bootNote !== ""
+    ink: root.fg
     text: root.bootNote
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
-  Text {
+  SectionHead {
     text: "AIO LCD"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
-    topPadding: Style.space(8)
+    page: "lcd"
   }
 
-  Row {
-    spacing: Style.space(10)
-    SquareSwitch {
-      anchors.verticalCenter: parent.verticalCenter
-      on: !root.service || root.service.lcdBackground !== false
-      foreground: root.fg
-      accent: root.aimed("lcd", 0) ? root.accent : root.fg
-      onClicked: if (root.service) root.service.setUi({ lcdBackground: !(root.service.lcdBackground !== false) })
-    }
-    Text {
-      anchors.verticalCenter: parent.verticalCenter
-      text: "Keep updating"
-      color: root.aimed("lcd", 0) ? root.accent : root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(13)
-    }
+  ToggleRow {
+    page: "lcd"
+    aimKind: "lcd"
+    label: "Keep updating"
+    checked: !root.service || root.service.lcdBackground !== false
+    onToggled: if (root.service) root.service.setUi({ lcdBackground: !(root.service.lcdBackground !== false) })
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    text: "The cooler keeps the last picture it was sent. With this on, a new picture goes out on the interval below, including while this window is closed. Omarchy waits for a theme change. Omarchy | Time updates once a minute. Only theme sync sends that logo when the theme changes and ignores the interval."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
+  MutedNote {
+    page: "lcd"
+    text: "The cooler keeps the last picture it was sent. With this on, a new picture goes out on the interval below, including while this window is closed. Never leaves that picture in place. Picture mode always uses Never, and sends again only when its image changes. Omarchy waits for a theme change. Omarchy | Time updates once a minute. Only theme sync sends that logo when the theme changes and ignores the interval."
   }
 
   Flow {
     width: parent.width
     spacing: Style.space(8)
-    visible: !root.service || root.service.lcdBackground !== false
-    Button {
-      text: "2s"
-      bordered: true
-      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(2)
-      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(2) ? 0.38 : 1
-      foreground: root.fg
-      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.pickLcdSeconds(2)
-    }
-    Button {
-      text: "5s"
-      bordered: true
-      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(5)
-      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(5) ? 0.38 : 1
-      foreground: root.fg
-      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.pickLcdSeconds(5)
-    }
-    Button {
-      text: "10s"
-      bordered: true
-      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(10)
-      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(10) ? 0.38 : 1
-      foreground: root.fg
-      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.pickLcdSeconds(10)
-    }
-    Button {
-      text: "30s"
-      bordered: true
-      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(30)
-      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(30) ? 0.38 : 1
-      foreground: root.fg
-      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.pickLcdSeconds(30)
-    }
-    Button {
-      text: "60s"
-      bordered: true
-      selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(60)
-      opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(60) ? 0.38 : 1
-      foreground: root.fg
-      accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.pickLcdSeconds(60)
+    visible: root.section === "lcd" && (!root.service || root.service.lcdBackground !== false)
+    Repeater {
+      model: [0, 2, 5, 10, 30, 60]
+      delegate: Button {
+        required property var modelData
+        text: modelData === 0 ? "Never" : modelData + "s"
+        bordered: true
+        selected: root.lcdSpeedKey.length > 0 && root.secondsLookSelected(modelData)
+        opacity: root.lcdSpeedKey.length > 0 && root.secondsDimmed(modelData) ? 0.38 : 1
+        foreground: root.fg
+        accent: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+        fontFamily: root.fontFamily
+        fontSize: Style.font.caption
+        onClicked: root.pickLcdSeconds(modelData)
+      }
     }
     Button {
       text: "Only theme sync"
@@ -618,71 +786,40 @@ Column {
     }
   }
 
-  Text {
+  SectionHead {
     text: "Window"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
-    topPadding: Style.space(8)
+    page: "window"
   }
 
-  Row {
-    spacing: Style.space(10)
-    SquareSwitch {
-      anchors.verticalCenter: parent.verticalCenter
-      on: root.service && root.service.dynamicScale === true
-      foreground: root.fg
-      accent: root.aimed("fill", 0) ? root.accent : root.fg
-      onClicked: if (root.service) root.service.setUi({ dynamicScale: !(root.service.dynamicScale === true) })
-    }
-    Text {
-      anchors.verticalCenter: parent.verticalCenter
-      text: "Fill this window"
-      color: root.aimed("fill", 0) ? root.accent : root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(13)
-    }
+  ToggleRow {
+    page: "window"
+    aimKind: "fill"
+    label: "Fill this window"
+    checked: root.service && root.service.dynamicScale === true
+    onToggled: if (root.service) root.service.setUi({ dynamicScale: !(root.service.dynamicScale === true) })
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
+  MutedNote {
+    page: "window"
     text: "The chart and the mode curve use the spare height. Speedometers and their titles grow a little. The rail, the LCD, and the text size stay as they are."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
-  Row {
-    spacing: Style.space(10)
-    SquareSwitch {
-      anchors.verticalCenter: parent.verticalCenter
-      on: root.service && root.service.pinGroups === true
-      foreground: root.fg
-      accent: root.aimed("pinGroups", 0) ? root.accent : root.fg
-      onClicked: if (root.service) root.service.setUi({ pinGroups: !(root.service.pinGroups === true) })
-    }
-    Text {
-      anchors.verticalCenter: parent.verticalCenter
-      text: "Pin groups on Devices"
-      color: root.aimed("pinGroups", 0) ? root.accent : root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(13)
-    }
+  ToggleRow {
+    page: "window"
+    aimKind: "pinGroups"
+    label: "Pin groups on Devices"
+    checked: root.service && root.service.pinGroups === true
+    onToggled: if (root.service) root.service.setUi({ pinGroups: !(root.service.pinGroups === true) })
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
+  MutedNote {
+    page: "window"
     text: "Custom groups stay below the hidden devices until this is on."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
   Row {
     spacing: Style.space(8)
+    visible: root.section === "window"
     Button {
       text: "Follow Omarchy"
       bordered: true
@@ -718,6 +855,7 @@ Column {
 
   Item {
     id: textTrack
+    visible: root.section === "window"
     width: Math.min(parent.width, Style.space(420))
     height: Style.space(52)
     readonly property real inset: Style.space(14)
@@ -769,25 +907,18 @@ Column {
     }
   }
 
-  Text {
+  SectionHead {
     text: "Curves"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
-    topPadding: Style.space(8)
+    page: "curves"
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
+  MutedNote {
+    page: "curves"
     text: "Export writes every mode's curves and the shared groups. Import keeps them until you Apply a mode, so the other modes stay put. Groups that match this PC are saved immediately."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
   TextField {
+    visible: root.section === "curves"
     width: Math.min(parent.width, Style.space(520))
     text: root.curvePath
     placeholderText: "Path to a .json file"
@@ -799,6 +930,7 @@ Column {
 
   Row {
     spacing: Style.space(8)
+    visible: root.section === "curves"
     Button {
       text: "Export"
       bordered: true
@@ -831,27 +963,21 @@ Column {
     }
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    visible: root.curveNote !== ""
+  MutedNote {
+    page: "curves"
+    shown: root.curveNote !== ""
+    ink: root.fg
     text: root.curveNote
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
-  Text {
+  SectionHead {
     text: "Bar"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
-    topPadding: Style.space(8)
+    page: "window"
   }
 
   Row {
     spacing: Style.space(10)
+    visible: root.section === "window"
     SquareSwitch {
       anchors.verticalCenter: parent.verticalCenter
       on: root.barOn
@@ -878,31 +1004,27 @@ Column {
     }
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    visible: root.barNote !== ""
+  MutedNote {
+    page: "window"
+    shown: root.barNote !== ""
     text: root.barNote
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    visible: root.service && root.service.connection === "ready"
+  MutedNote {
+    page: "daemon"
+    shown: root.service && root.service.connection === "ready"
+    ink: root.fg
+    px: Style.space(13)
     text: "Fan writes and sensor polls stay on coolercontrold. These are the daemon's own options."
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(13)
   }
 
   Repeater {
+    visible: root.section === "daemon"
     model: root.service && root.service.connection === "ready" ? root.switches : []
     delegate: Row {
       required property var modelData
       required property int index
+      visible: root.section === "daemon"
       spacing: Style.space(10)
       SquareSwitch {
         anchors.verticalCenter: parent.verticalCenter
@@ -922,6 +1044,7 @@ Column {
   }
 
   Text {
+    visible: root.section === "daemon"
     text: "Poll interval"
     color: root.muted
     font.family: root.fontFamily
@@ -931,6 +1054,7 @@ Column {
   Flow {
     width: parent.width
     spacing: Style.space(6)
+    visible: root.section === "daemon"
     Repeater {
       model: [0.5, 1, 2, 5]
       delegate: Button {
@@ -947,29 +1071,67 @@ Column {
     }
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    text: "Pump curves stay at or above 50%."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(13)
+  ToggleRow {
+    page: "curves"
+    aimKind: "pumpFloor"
+    label: "Keep pumps at or above 50%"
+    checked: !root.service || root.service.pumpFloor !== false
+    onToggled: {
+      if (!root.service || root.service.pumpFloorBusy) return
+      if (root.service.pumpFloor) root.service.requestPumpFloorOff()
+      else root.service.enablePumpFloor()
+    }
   }
 
-  Text {
+  MutedNote {
+    page: "curves"
+    text: "Turning this off lets a pump stop, and a stopped pump can overheat the cooler. Turning it off asks for your password. Curves you already saved stay as they are until you edit them. Turning it back on raises any pump point below 50%."
+  }
+
+  MutedNote {
+    page: "curves"
+    shown: root.service && (root.service.pumpFloorBusy || root.service.pumpFloorNote !== "")
+    ink: root.fg
+    text: root.service && root.service.pumpFloorBusy ? "Waiting for the password." : (root.service ? root.service.pumpFloorNote : "")
+  }
+
+  ToggleRow {
+    page: "curves"
+    aimKind: "silentRamp"
+    label: "Ease Silent fans"
+    checked: root.service && root.service.silentRamp === true
+    onToggled: {
+      if (!root.service || root.service.silentRampBusy) return
+      root.service.setSilentRamp(!(root.service.silentRamp === true))
+    }
+  }
+
+  MutedNote {
+    page: "curves"
+    text: "A short CPU spike waits about 8 seconds before Silent fans rise. They also wait about 8 seconds before they fall. Pumps are left alone. Silent, Fixed, Performance, Hell, and any custom mode each keep their own fan and group curves, even when the speeds match. Easing Silent does not slow the other modes."
+  }
+
+  MutedNote {
+    page: "curves"
+    shown: root.service && (root.service.silentRampBusy || root.service.silentRampNote !== "")
+    ink: root.fg
+    text: root.service && root.service.silentRampBusy
+      ? (root.service.silentRampNote !== "" ? root.service.silentRampNote : "Applying the Silent pace.")
+      : (root.service ? root.service.silentRampNote : "")
+  }
+
+  SectionHead {
     text: "Curve response"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
-    topPadding: Style.space(8)
+    page: "curves"
   }
 
   Repeater {
-    model: root.service ? root.service.functions : []
+    visible: root.section === "curves"
+    model: root.hopFunctions
     delegate: Row {
       required property var modelData
       required property int index
+      visible: root.section === "curves"
       spacing: Style.space(10)
       SquareSwitch {
         anchors.verticalCenter: parent.verticalCenter
@@ -992,43 +1154,44 @@ Column {
     }
   }
 
-  Text {
-    visible: root.service && root.service.connection === "ready"
-    text: "Alerts"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
+  MutedNote {
+    page: "alerts"
+    shown: !(root.service && root.service.connection === "ready")
+    text: "Alerts show up after Omaflow is connected to coolercontrold."
   }
 
-  Text {
-    visible: root.service && root.service.connection === "ready" && (!root.service.alerts || root.service.alerts.length === 0)
-    text: "No alerts yet."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(12)
+  SectionHead {
+    text: "Alerts"
+    page: "alerts"
+    pad: false
+    extra: root.service && root.service.connection === "ready"
+  }
+
+  MutedNote {
+    page: "alerts"
+    shown: root.service && root.service.connection === "ready" && root.alertRows.length === 0
+    px: Style.space(12)
+    text: "No temperature sensor for an alert."
   }
 
   Repeater {
-    model: root.service ? root.service.alerts : []
+    visible: root.section === "alerts"
+    model: root.alertRows
     delegate: Row {
       required property var modelData
       required property int index
+      visible: root.section === "alerts"
       spacing: Style.space(10)
       SquareSwitch {
         anchors.verticalCenter: parent.verticalCenter
-        on: modelData.enabled !== false
+        on: modelData.on === true
         foreground: root.fg
         accent: root.aimed("alert", index) ? root.accent : root.fg
-        onClicked: {
-          var next = root.copy(modelData)
-          next.enabled = modelData.enabled === false
-          root.service.saveAlert(next)
-        }
+        onClicked: root.toggleAlertRow(modelData)
       }
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        text: modelData.name + "  " + modelData.min + "–" + modelData.max
+        text: root.alertCaption(modelData)
         color: root.aimed("alert", index) ? root.accent : root.fg
         font.family: root.fontFamily
         font.pixelSize: Style.space(13)
@@ -1036,39 +1199,9 @@ Column {
     }
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    visible: root.service && (root.service.connection === "need-token" || root.service.connection === "unauthorized")
-    text: "Enter the CoolerControl password once. Omaflow uses 127.0.0.1:11987 and does not ask for an address. The token is saved and the password is not."
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(13)
-  }
-
-  Row {
-    spacing: Style.space(8)
-    visible: root.service && (root.service.connection === "need-token" || root.service.connection === "unauthorized")
-    TextField {
-      id: pairField
-      width: Style.space(240)
-      password: true
-      placeholderText: "Password"
-      foreground: root.fg
-      accent: root.accent
-    }
-    Button {
-      text: "Pair"
-      bordered: true
-      selected: true
-      foreground: root.fg
-      accent: root.accent
-      fontFamily: root.fontFamily
-      onClicked: {
-        var password = pairField.text
-        pairField.text = ""
-        if (root.service) root.service.pair(password)
-      }
-    }
+  MutedNote {
+    page: "alerts"
+    shown: root.service && root.service.connection === "ready"
+    text: "A desktop notification is sent when the temperature stays outside the range. Nothing shuts the PC down."
   }
 }

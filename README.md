@@ -1,6 +1,6 @@
 # Omaflow
 
-Omaflow 0.3 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
+Omaflow 0.5 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
 
 ![Omaflow](screenshots/banner-app.jpg)
 
@@ -55,7 +55,7 @@ sudo systemctl enable --now coolercontrold
 
 A saved token at `~/.config/omaflow/coolercontrol.token` (mode `0600`) connects with no prompt. The password is asked once, used to create the token, and dropped. A changed CoolerControl password is left alone. The password and the token are sent only after the listener on `127.0.0.1:11987` is identified as the `coolercontrold` service. If that check fails, nothing is sent. Authenticated requests are not followed across redirects.
 
-When the daemon has no modes, Omaflow creates Silent, Performance, Fixed, and Hell. Each mode gets its own fan curve and its own pump curve. Pump duty stays at or above 50%. Silent is left running. A daemon that already has modes is not rewritten.
+When the daemon has no modes, Omaflow creates Silent, Performance, Fixed, and Hell. Each mode gets its own fan curve and its own pump curve. Pump duty stays at or above 50% until that floor is turned off in Settings. Silent is left running. A daemon that already has modes is not rewritten.
 
 ### Remove
 
@@ -81,7 +81,7 @@ That removes the chip and the window launcher. `coolercontrold` stays installed.
 
 ![Modes](screenshots/modes.jpg)
 
-**Modes.** Pick a mode, shape each fan's curve, and link channels. Silent, Performance, Fixed, Hell, or a mode you add. A link shares one curve across the fans on that card. The pump keeps its own. Drag a handle to edit. Undo, redo, and Reset sit under the graph. Apply is the check on the right. Choosing a mode does not run it. Apply waits while a fan is being calibrated.
+**Modes.** Pick a mode, shape each fan's curve, and link channels. Silent, Performance, Fixed, Hell, or a mode you add. Each mode keeps its own curves. A link shares one curve across the fans on that card. The pump keeps its own. Drag a handle to edit. Undo, redo, and Reset sit under the graph. Apply is the check on the right. Choosing a mode does not run it. Apply waits while a fan is being calibrated.
 
 ![Devices](screenshots/devices.jpg)
 
@@ -89,11 +89,11 @@ That removes the chip and the window launcher. `coolercontrold` stays installed.
 
 ![LCD](screenshots/lcd.jpg)
 
-**LCD.** Choose what the cooler's LCD shows, including the Omarchy logo. The faces are Liquid, CPU, CPU | GPU, CPU | Liquid, Omarchy, and Omarchy | Time. Round or square follows the cooler. Brightness and saturation sit on the page. Omarchy | Time draws the clock in the theme accent with a 1px black edge. The cooler keeps the last picture it was sent. Settings can keep that picture updating while the window is closed, as long as the bar plugin is enabled. With no supported AIO LCD, the page says so and the controls under it stay dimmed.
+**LCD.** Choose what the cooler's LCD shows, including the Omarchy logo and a picture from your home directory. The faces are Liquid, CPU, CPU | GPU, CPU | Liquid, Omarchy, Omarchy | Time, and Picture. Round or square follows the cooler. Brightness and saturation sit on the page. Omarchy | Time draws the clock in the theme accent with a 1px black edge. Picture stays centered, and it can be larger or smaller. The cooler keeps the last picture it was sent. Picture mode does not refresh on a timer. Settings can keep the other faces updating while the window is closed, as long as the bar plugin is enabled. Never leaves that picture in place. With no supported AIO LCD, the page says so and the controls under it stay dimmed.
 
 ![Settings](screenshots/settings.jpg)
 
-**Settings.** Set LCD updates, window fill, and export or import curves. **Pin groups** puts custom groups at the top of Devices. Fill gives spare height to the graphs. Text size can follow Omarchy or stay at a chosen size. Export and import write `~/Documents/omaflow-curves.json`. The bar switch installs this repository when the chip is missing.
+**Settings.** Set LCD updates, window fill, alerts, and export or import curves. **Pin groups** puts custom groups at the top of Devices. Fill gives spare height to the graphs. Text size can follow Omarchy or stay at a chosen size. Export and import write `~/Documents/omaflow-curves.json`. The pump floor and a slower Silent fan pace are switches here. CPU, GPU, and coolant alerts stay off until you turn one on. The bar switch installs this repository when the chip is missing.
 
 ![Info](screenshots/info.jpg)
 
@@ -107,7 +107,7 @@ Left click opens the chip. Telemetry shows CPU, GPU, liquid when the cooler repo
 
 ## Coolers
 
-Anything `coolercontrold` lists from liquidctl or hwmon. The pump floor is 50% in every mode.
+Anything `coolercontrold` lists from liquidctl or hwmon. The pump floor is 50% in every mode until it is turned off in Settings, which asks for your password and does not store it.
 
 - NZXT Kraken Z, X, and 2023/2024, including an AIO LCD when the device has one
 - NZXT Smart Device fan hubs

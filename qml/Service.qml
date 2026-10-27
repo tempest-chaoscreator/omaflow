@@ -5,10 +5,9 @@ import "CcMap.js" as Cc
 import "Calib.js" as Calib
 import "RepoPath.js" as Repo
 
-// Headless CoolerControl client. One per shell. Omaflow Plugin and
-// Omaflow both read this object. Fan writes and sensor polls
-// stay on coolercontrold's own poll_rate. This service never changes it
-// and never writes PWM itself.
+// Headless CoolerControl client. The window and the bar each load their
+// own copy. Fan writes and sensor polls stay on coolercontrold's own
+// poll_rate. This service never changes it and never writes PWM itself.
 Item {
   id: root
 
@@ -17,7 +16,26 @@ Item {
   property var settings: ({})
 
   readonly property string clientPath: Repo.rootFile("scripts/cc_client.py")
-  readonly property int pumpMin: 50
+  property bool pumpFloor: true
+  property bool pumpFloorHeld: false
+  property bool pumpFloorBusy: false
+  property bool pumpFloorLiftPending: false
+  property string pumpFloorNote: ""
+  property bool silentRamp: false
+  property bool silentRampHeld: false
+  property bool silentRampBusy: false
+  property string silentRampNote: ""
+  property string silentRampUid: ""
+  property var silentRampBinds: []
+  // 0 is a real floor. The property stays 50 until the user turns it off.
+  readonly property int pumpMin: pumpFloor ? 50 : 0
+
+  onPumpFloorChanged: if (!stopping) rebuild()
+  onCalibrationBusyChanged: {
+    if (stopping || calibrationBusy || !pumpFloorLiftPending) return
+    pumpFloorLiftPending = false
+    if (pumpFloor) liftPumpProfiles()
+  }
 
   property string connection: "down"
   property string notice: ""
@@ -46,10 +64,11 @@ Item {
   property string activeModeUid: ""
   property string activeModeName: ""
   property var channels: []
+  // Duty and RPM for those channels. The row objects stay put while only
+  // these numbers change.
+  property var channelLive: ({})
   property var lcdChannels: []
   property var temps: ({ cpu: null, gpu: null, coolant: null, hottest: null })
-  property string selectedKey: ""
-  property var curve: Cc.emptyCurve()
   property var daemonSettings: ({})
   property var functions: []
   property var alerts: []
@@ -78,6 +97,19 @@ Item {
   property bool pinGroupsHeld: false
   property var curvePack: ({})
   property bool modesKnown: false
+  property bool catalogBusy: false
+  property bool catalogAgain: false
+  property bool catalogIfStale: false
+  // The process start emits hello and then the stream's first up. One catalog
+  // covers both. A later up is a new stream and loads the catalog again.
+  property bool skipNextUp: false
+  // Status arrives about once a second. The channel list is replaced when
+  // membership or labels change. Duty and RPM land in channelLive, so a new
+  // sample does not rebuild the device rows.
+  property string channelsSig: ""
+  property string channelLiveSig: ""
+  property string lcdSig: ""
+  property string tempsSig: ""
   property bool defaultsPlanted: false
 
   property bool stopping: false
@@ -96,14 +128,43 @@ Item {
     return true
   }
 
-  function call(method, path, body, done) {
+  // QML replaces `pending`. Each call copies the map and stores one callback.
+  function track(done) {
     var id = rpcId
     rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
+    var next = Cc.copyMap(pending)
     if (done) next[id] = done
     pending = next
-    send({ op: "call", id: id, method: method, path: path, body: body === undefined ? null : body })
+    return id
+  }
+
+  // `report` is set only where a failed send already called the callback.
+  function dispatch(msg, done, report) {
+    var id = track(done)
+    msg.id = id
+    if (send(msg)) return
+    dropPending(id)
+    if (report && done) done({ ok: false, status: 0, error: "not connected" })
+  }
+
+  // Fire-and-forget. A failed send does not call back and does not change connection.
+  function post(msg) {
+    msg.id = rpcId
+    rpcId = rpcId + 1
+    send(msg)
+  }
+
+  function call(method, path, body, done) {
+    dispatch({
+      op: "call",
+      method: method,
+      path: path,
+      body: body === undefined ? null : body
+    }, done, true)
+  }
+
+  function deviceSettingPath(deviceUid, channel, tail) {
+    return "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/" + tail
   }
 
   function dropPending(id) {
@@ -210,18 +271,14 @@ Item {
 
   function keepLcd() {
     if (stopping || !lcdBackground || connection !== "ready" || lcdKeepBusy) return
+    if (lcdFace === "picture" || lcdSeconds === 0) return
     if (!lcdChannels || !lcdChannels.length) return
     var screen = lcdChannels[0]
     if (!screen || !screen.deviceUid || !screen.name) return
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    var id = track(function(res) {
       root.lcdKeepBusy = false
       if (res && res.ok === false) console.warn("omaflow lcd: " + (res.error || "image rejected"))
-    }
-    pending = next
+    })
     lcdKeepBusy = true
     var sample = temps || ({})
     if (!send({
@@ -243,95 +300,135 @@ Item {
   }
 
   function rebuild() {
-    var shaped = Cc.view(devices, statusDevices, modes, profiles, activeModeUid, selectedKey, pumpMin)
-    channels = shaped.channels
-    lcdChannels = shaped.lcdChannels
-    temps = shaped.temps
-    activeModeName = shaped.activeModeName
-    curve = shaped.curve
-    if (!selectedKey && shaped.channels.length) selectedKey = shaped.channels[0].key
+    var shaped = Cc.view(devices, statusDevices, modes, activeModeUid, pumpMin)
+    var nextShape = JSON.stringify(Cc.channelShape(shaped.channels))
+    if (nextShape !== channelsSig) {
+      channelsSig = nextShape
+      channels = shaped.channels
+    } else {
+      Cc.paintLive(channels, shaped.channels)
+    }
+    var live = Cc.channelLive(shaped.channels)
+    var nextLive = JSON.stringify(live)
+    if (nextLive !== channelLiveSig) {
+      channelLiveSig = nextLive
+      channelLive = live
+    }
+    var nextLcd = JSON.stringify(shaped.lcdChannels)
+    if (nextLcd !== lcdSig) {
+      lcdSig = nextLcd
+      lcdChannels = shaped.lcdChannels
+    }
+    var nextTemps = JSON.stringify(shaped.temps)
+    if (nextTemps !== tempsSig) {
+      tempsSig = nextTemps
+      temps = shaped.temps
+    }
+    if (shaped.activeModeName !== activeModeName) activeModeName = shaped.activeModeName
+  }
+
+  function partOk(part) {
+    return !!(part && part.ok)
+  }
+
+  function applyCatalog(body) {
+    var parts = body || ({})
+    var order = ["devices", "profiles", "modes", "modesActive", "settings", "functions", "alerts", "status"]
+    var i
+    for (i = 0; i < order.length; i++) {
+      var blocked = parts[order[i]]
+      if (!blocked) continue
+      if (blocked.error === "need-token" || blocked.status === 401 || blocked.status === 403) {
+        fail(blocked)
+        return
+      }
+    }
+    var devicesOk = partOk(parts.devices)
+    if (devicesOk) {
+      devices = (parts.devices.body && parts.devices.body.devices) || []
+      noteReady()
+    }
+    if (partOk(parts.profiles))
+      profiles = (parts.profiles.body && parts.profiles.body.profiles) || []
+    if (partOk(parts.modes)) {
+      modes = (parts.modes.body && parts.modes.body.modes) || []
+      modesKnown = true
+    }
+    if (partOk(parts.modesActive)) {
+      var uid = parts.modesActive.body && parts.modesActive.body.current_mode_uid
+        ? String(parts.modesActive.body.current_mode_uid) : ""
+      // An empty read follows the pump-image upload. It is not "no mode".
+      if (uid) activeModeUid = uid
+    }
+    if (partOk(parts.settings))
+      daemonSettings = parts.settings.body || ({})
+    if (partOk(parts.functions))
+      functions = (parts.functions.body && parts.functions.body.functions) || []
+    if (partOk(parts.alerts))
+      alerts = (parts.alerts.body && parts.alerts.body.alerts) || []
+    if (partOk(parts.status)) {
+      statusDevices = (parts.status.body && parts.status.body.devices) || []
+      noteReady()
+      notice = ""
+    }
+    rebuild()
+    if (devicesOk && modesKnown) ensureDefaultModes()
+    if (devicesOk) lcdKick.restart()
+    if (parts.calibrations) takeCalibrationList(parts.calibrations)
+    if (parts.calibrationBatch) takeCalibrationBatch(parts.calibrationBatch)
+    for (i = 0; i < order.length; i++) {
+      var missed = parts[order[i]]
+      if (missed && !missed.ok) {
+        fail(missed)
+        return
+      }
+    }
+  }
+
+  function finishCatalog() {
+    catalogBusy = false
+    if (catalogAgain) {
+      catalogAgain = false
+      catalogIfStale = false
+      beginCatalog()
+      return
+    }
+    if (catalogIfStale) {
+      catalogIfStale = false
+      if (!(connection === "ready" && modesKnown)) beginCatalog()
+    }
+  }
+
+  function beginCatalog() {
+    catalogBusy = true
+    var id = track(function(res) {
+      if (res && res.ok) applyCatalog(res.body || ({}))
+      else if (res) fail(res)
+      finishCatalog()
+    })
+    if (send({ op: "catalog", id: id })) return
+    dropPending(id)
+    catalogBusy = false
+    catalogAgain = false
+    catalogIfStale = false
+    fail({ ok: false, status: 0, error: "not connected" })
   }
 
   function refresh() {
-    call("GET", "/devices", null, function(res) {
-      if (!res.ok) return fail(res)
-      devices = (res.body && res.body.devices) || []
-      noteReady()
-      rebuild()
-      ensureDefaultModes()
-      lcdKick.restart()
-    })
-    call("GET", "/profiles", null, function(res) {
-      if (!res.ok) return fail(res)
-      profiles = (res.body && res.body.profiles) || []
-      rebuild()
-    })
-    call("GET", "/modes", null, function(res) {
-      if (!res.ok) return fail(res)
-      modes = (res.body && res.body.modes) || []
-      modesKnown = true
-      rebuild()
-      ensureDefaultModes()
-    })
-    call("GET", "/modes-active", null, function(res) {
-      if (!res.ok) return fail(res)
-      var uid = res.body && res.body.current_mode_uid ? String(res.body.current_mode_uid) : ""
-      // An empty read follows the pump-image upload. It is not "no mode".
-      if (uid) activeModeUid = uid
-      rebuild()
-    })
-    call("GET", "/settings", null, function(res) {
-      if (!res.ok) return fail(res)
-      daemonSettings = res.body || ({})
-    })
-    call("GET", "/functions", null, function(res) {
-      if (!res.ok) return fail(res)
-      functions = (res.body && res.body.functions) || []
-    })
-    call("GET", "/alerts", null, function(res) {
-      if (!res.ok) return fail(res)
-      alerts = (res.body && res.body.alerts) || []
-    })
     loadGroups()
     loadLinks()
     loadHidden()
-    loadCalibrations()
-    loadCalibrationBatch()
-    call("GET", "/status", null, function(res) {
-      if (!res.ok) return fail(res)
-      statusDevices = (res.body && res.body.devices) || []
-      noteReady()
-      notice = ""
-      rebuild()
-    })
+    if (catalogBusy) {
+      catalogAgain = true
+      return
+    }
+    beginCatalog()
   }
 
   function pair(password) {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "pair", password: String(password || "") }, function(res) {
       if (!res.ok) fail(res)
-    }
-    pending = next
-    send({ op: "pair", id: id, password: String(password || "") })
-  }
-
-  function selectChannel(key) {
-    selectedKey = String(key || "")
-    rebuild()
-  }
-
-  function activateMode(uid) {
-    if (!uid) return
-    call("POST", "/modes-active/" + encodeURIComponent(uid), {}, function(res) {
-      if (!res.ok) return fail(res)
-      activeModeUid = String(uid)
-      notice = ""
-      rebuild()
-      refresh()
-    })
+    }, true)
   }
 
   function createMode(name) {
@@ -357,32 +454,6 @@ Item {
     })
   }
 
-  function renameMode(uid, name) {
-    var trimmed = String(name || "").replace(/^\s+|\s+$/g, "")
-    if (!uid || !trimmed) return
-    call("PUT", "/modes", { uid: uid, name: trimmed }, function(res) {
-      if (!res.ok) return fail(res)
-      refresh()
-    })
-  }
-
-  function captureMode(uid) {
-    if (!uid) return
-    call("PUT", "/modes/" + encodeURIComponent(uid) + "/settings", {}, function(res) {
-      if (!res.ok) return fail(res)
-      refresh()
-    })
-  }
-
-  function assignProfile(deviceUid, channel, profileUid) {
-    if (!deviceUid || !channel || !profileUid) return
-    var path = "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/profile"
-    call("PUT", path, { profile_uid: profileUid }, function(res) {
-      if (!res.ok) return fail(res)
-      refresh()
-    })
-  }
-
   function newUid() {
     var hex = ""
     for (var i = 0; i < 32; i++) hex += Math.floor(Math.random() * 16).toString(16)
@@ -390,61 +461,36 @@ Item {
   }
 
   function loadGroups() {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "groups-get" }, function(res) {
       groups = Cc.cleanGroupList(res.body && res.body.groups)
-    }
-    pending = next
-    send({ op: "groups-get", id: id })
+    })
   }
 
   function saveGroups(nextGroups) {
     groups = Cc.cleanGroupList(nextGroups)
-    var id = rpcId
-    rpcId = rpcId + 1
-    pending = pending
-    send({ op: "groups-set", id: id, body: { groups: groups } })
+    post({ op: "groups-set", body: { groups: groups } })
   }
 
   function loadLinks() {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "links-get" }, function(res) {
       links = (res.body && res.body.links) || ({})
-    }
-    pending = next
-    send({ op: "links-get", id: id })
+    })
   }
 
   function saveLinks(nextLinks) {
     links = nextLinks || ({})
-    var id = rpcId
-    rpcId = rpcId + 1
-    send({ op: "links-set", id: id, body: { links: links } })
+    post({ op: "links-set", body: { links: links } })
   }
 
   function loadHidden() {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "hidden-get" }, function(res) {
       hiddenDevices = (res.body && res.body.devices) || ({})
-    }
-    pending = next
-    send({ op: "hidden-get", id: id })
+    })
   }
 
   function saveHidden(nextHidden) {
     hiddenDevices = nextHidden || ({})
-    var id = rpcId
-    rpcId = rpcId + 1
-    send({ op: "hidden-set", id: id, body: { devices: hiddenDevices } })
+    post({ op: "hidden-set", body: { devices: hiddenDevices } })
   }
 
   function setDeviceHidden(uid, hidden) {
@@ -490,7 +536,7 @@ Item {
       return
     }
     var name = order[index]
-    var channels = Cc.speedChannels(devices)
+    var channels = Cc.speedChannels(devices, pumpMin)
     var temp = Cc.defaultTempSource(devices) || Cc.tempSourceFor(devices, "GPU")
     function snapshot() {
       call("POST", "/modes", { name: name, uid: newUid() }, function(res) {
@@ -513,29 +559,13 @@ Item {
       if (channels[i].isPump) pumps.push(channels[i])
       else fans.push(channels[i])
     }
-    function bindAll(uid, rows, next) {
-      var at = 0
-      function step() {
-        if (at >= rows.length) {
-          next()
-          return
-        }
-        var channel = rows[at++]
-        var path = "/devices/" + encodeURIComponent(channel.deviceUid) + "/settings/" + encodeURIComponent(channel.name) + "/profile"
-        call("PUT", path, { profile_uid: uid }, function(res) {
-          if (!res.ok) return fail(res)
-          step()
-        })
-      }
-      step()
-    }
     function plantPumps() {
       if (!pumps.length) {
         if (done) done()
         return
       }
-      createGraph(modeName + " pump", Cc.modeDefaultPoints(modeName, true), temp, 50, function(uid) {
-        bindAll(uid, pumps, done)
+      createGraph(modeName + " pump", Cc.modeDefaultPoints(modeName, true), temp, pumpMin, function(uid) {
+        assignChannels(pumps, uid, done)
       })
     }
     if (!fans.length) {
@@ -543,7 +573,7 @@ Item {
       return
     }
     createGraph(modeName + " fans", Cc.modeDefaultPoints(modeName, false), temp, 0, function(uid) {
-      bindAll(uid, fans, plantPumps)
+      assignChannels(fans, uid, plantPumps)
     })
   }
 
@@ -604,8 +634,7 @@ Item {
         next.push(group)
         continue
       }
-      var copy = ({})
-      for (var k in group) copy[k] = group[k]
+      var copy = Cc.copyMap(group)
       copy.name = trimmed
       next.push(copy)
     }
@@ -620,8 +649,7 @@ Item {
       var list = group.members || []
       for (var m = 0; m < list.length; m++) if (list[m] !== key) members.push(list[m])
       if (members.length > 1) {
-        var copy = ({})
-        for (var k in group) copy[k] = group[k]
+        var copy = Cc.copyMap(group)
         copy.members = members
         next.push(copy)
       }
@@ -629,13 +657,14 @@ Item {
     saveGroups(next)
   }
 
-  function createGraph(name, points, tempSource, minDuty, done) {
+  function createGraph(name, points, tempSource, minDuty, done, functionUid) {
     if (!tempSource) {
       lastError = "No temperature source is available for a new curve"
       return
     }
     var uid = newUid()
-    var draft = { uid: uid, name: name, function_uid: "0", p_type: "Graph", speed_profile: points }
+    var pace = functionUid ? String(functionUid) : "0"
+    var draft = { uid: uid, name: name, function_uid: pace, p_type: "Graph", speed_profile: points }
     var shaped = Cc.withGraphPoints(draft, points, minDuty)
     shaped.temp_source = tempSource
     shaped.temp_min = 0
@@ -646,62 +675,43 @@ Item {
     })
   }
 
+  function snapshotMode(modeUid, done, clearNotice) {
+    call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
+      if (!saved.ok) return fail(saved)
+      if (clearNotice) notice = ""
+      refresh()
+      if (done) done()
+    })
+  }
+
   function bindChannel(modeUid, deviceUid, channel, profileUid, done) {
-    var path = "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/profile"
-    call("PUT", path, { profile_uid: profileUid }, function(res) {
+    call("PUT", deviceSettingPath(deviceUid, channel, "profile"), { profile_uid: profileUid }, function(res) {
       if (!res.ok) return fail(res)
-      call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
-        if (!saved.ok) return fail(saved)
-        notice = ""
-        refresh()
-        if (done) done()
-      })
+      snapshotMode(modeUid, done, true)
     })
   }
 
   function bindMany(modeUid, members, profileUid, done) {
-    var index = 0
-    function step() {
-      if (index >= members.length) {
-        call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
-          if (!saved.ok) return fail(saved)
-          refresh()
-          if (done) done()
-        })
-        return
-      }
-      var member = members[index++]
-      var path = "/devices/" + encodeURIComponent(member.deviceUid) + "/settings/" + encodeURIComponent(member.name) + "/profile"
-      call("PUT", path, { profile_uid: profileUid }, function(res) {
-        if (!res.ok) return fail(res)
-        step()
-      })
-    }
-    step()
+    assignChannels(members, profileUid, function() {
+      snapshotMode(modeUid, done)
+    })
+  }
+
+  function resetThen(modeUid, deviceUid, channel, after) {
+    call("PUT", deviceSettingPath(deviceUid, channel, "reset"), {}, function(res) {
+      if (!res.ok) return fail(res)
+      if (after) after()
+      snapshotMode(modeUid)
+    })
   }
 
   function resetChannel(modeUid, deviceUid, channel, memberKey) {
-    var path = "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/reset"
-    call("PUT", path, {}, function(res) {
-      if (!res.ok) return fail(res)
-      forgetMember(memberKey)
-      call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
-        if (!saved.ok) return fail(saved)
-        refresh()
-      })
-    })
+    resetThen(modeUid, deviceUid, channel, function() { forgetMember(memberKey) })
   }
 
   // Drop a mode assignment without removing the fan from a shared group.
   function releaseChannel(modeUid, deviceUid, channel) {
-    var path = "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/reset"
-    call("PUT", path, {}, function(res) {
-      if (!res.ok) return fail(res)
-      call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
-        if (!saved.ok) return fail(saved)
-        refresh()
-      })
-    })
+    resetThen(modeUid, deviceUid, channel)
   }
 
   function saveDaemon(next) {
@@ -719,19 +729,768 @@ Item {
     })
   }
 
-  function saveAlert(alert) {
-    call("PUT", "/alerts/" + encodeURIComponent(alert.uid), alert, function(res) {
+  function refreshAlerts() {
+    call("GET", "/alerts", null, function(res) {
       if (!res.ok) return fail(res)
+      alerts = (res.body && res.body.alerts) || []
+      notice = ""
+    })
+  }
+
+  // The daemon rejects PUT /alerts/{uid}. The collection accepts a clean body.
+  function saveAlert(alert) {
+    var enabled = !alert || alert.enabled !== false
+    call("PUT", "/alerts", Cc.alertWriteBody(alert, enabled), function(res) {
+      if (!res.ok) return fail(res)
+      refreshAlerts()
+    })
+  }
+
+  function setAlertEnabled(alert, enabled) {
+    if (!alert || !alert.uid) return
+    var next = Cc.copyMap(alert)
+    next.enabled = enabled === true
+    saveAlert(next)
+  }
+
+  function createAlert(name, max, source) {
+    if (!source || !source.device_uid || !source.channel_name) return
+    var existing = Cc.alertNamed(alerts, name)
+    if (existing) {
+      setAlertEnabled(existing, true)
+      return
+    }
+    var body = Cc.alertWriteBody({
+      uid: newUid(),
+      name: name,
+      channel_source: source,
+      min: 0,
+      max: max,
+      warmup_duration: 12,
+      desktop_notify: true,
+      desktop_notify_audio: false,
+      desktop_notify_recovery: true
+    }, true)
+    call("POST", "/alerts", body, function(res) {
+      if (!res.ok) return fail(res)
+      refreshAlerts()
+    })
+  }
+
+  // Turning the floor off does not rewrite curves. Turning it on raises
+  // pump points that sit below 50. A profile is one object, so that write
+  // changes every mode that still stores the same uid.
+  function requestPumpFloorOff() {
+    if (!pumpFloor || pumpFloorBusy || floorConfirm.running) return
+    pumpFloorNote = ""
+    pumpFloorBusy = true
+    floorConfirm.running = true
+  }
+
+  function finishPumpFloorOff(code) {
+    pumpFloorBusy = false
+    if (Number(code) === 0) {
+      pumpFloorHeld = true
+      setUi({ pumpFloor: false })
+      pumpFloorNote = ""
+      return
+    }
+    pumpFloorNote = "The pump floor stays on."
+  }
+
+  function enablePumpFloor() {
+    if (pumpFloorBusy) return
+    pumpFloorNote = ""
+    pumpFloorHeld = true
+    setUi({ pumpFloor: true })
+    if (calibrationBusy) {
+      pumpFloorLiftPending = true
+      pumpFloorNote = "Low pump points rise after the sweep."
+      return
+    }
+    liftPumpProfiles()
+  }
+
+  function liftPumpProfiles() {
+    var list = Cc.pumpProfilesToLift(modes, profiles, channels)
+    var index = 0
+    function step() {
+      if (index >= list.length) {
+        if (list.length) refresh()
+        return
+      }
+      var profile = list[index++]
+      var shaped = Cc.withGraphPoints(profile, profile.speed_profile || [], 50)
+      call("PUT", "/profiles", shaped, function(res) {
+        if (!res.ok) return fail(res)
+        step()
+      })
+    }
+    step()
+  }
+
+  function persistRamp(on, uid, binds) {
+    silentRampHeld = true
+    silentRamp = on === true
+    silentRampUid = String(uid || "")
+    var next = []
+    var list = binds || []
+    var i
+    for (i = 0; i < list.length; i++) if (list[i]) next.push(list[i])
+    silentRampBinds = next
+    setUi({
+      silentRamp: silentRamp,
+      silentRampUid: silentRampUid,
+      silentRampBinds: silentRampBinds
+    })
+  }
+
+  function rampBindKey(row) {
+    if (!row) return ""
+    if (row.cloneUid && row.deviceUid && row.channel)
+      return "c:" + row.cloneUid + ":" + row.deviceUid + ":" + row.channel
+    if (row.cloneUid) return "o:" + row.cloneUid
+    if (row.profileUid) return "p:" + row.profileUid
+    return ""
+  }
+
+  function unionRampBinds(primary, extra) {
+    var out = []
+    var seen = ({})
+    var lists = [primary || [], extra || []]
+    var n
+    var i
+    for (n = 0; n < lists.length; n++) {
+      var list = lists[n]
+      for (i = 0; i < list.length; i++) {
+        var row = list[i]
+        var key = rampBindKey(row)
+        if (!key || seen[key]) continue
+        seen[key] = true
+        out.push(row)
+      }
+    }
+    return out
+  }
+
+  function findStoredBind(stored, row) {
+    var list = stored || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var item = list[i]
+      if (!item) continue
+      if (row.cloneUid && item.cloneUid === row.cloneUid && item.deviceUid === row.deviceUid && item.channel === row.channel)
+        return item
+      if (row.cloneUid && item.cloneUid === row.cloneUid && !row.deviceUid) return item
+      if (row.profileUid && !row.cloneUid && !item.cloneUid && item.profileUid === row.profileUid) return item
+      if (row.deviceUid && row.channel && item.deviceUid === row.deviceUid && item.channel === row.channel) return item
+    }
+    return null
+  }
+
+  function mergeRampBinds(already, stored) {
+    var out = []
+    var list = already || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var row = list[i]
+      if (!row) continue
+      var prev = findStoredBind(stored, row)
+      var profileUid = String(row.profileUid || "")
+      var prevFunction = String(row.prevFunction || "0")
+      if (prev) {
+        if (!profileUid && prev.profileUid) profileUid = String(prev.profileUid)
+        if ((!prevFunction || prevFunction === "0") && prev.prevFunction && String(prev.prevFunction) !== "0")
+          prevFunction = String(prev.prevFunction)
+      }
+      out.push({
+        deviceUid: String(row.deviceUid || ""),
+        channel: String(row.channel || ""),
+        profileUid: profileUid,
+        cloneUid: String(row.cloneUid || ""),
+        prevFunction: prevFunction || "0"
+      })
+    }
+    return unionRampBinds(out, stored)
+  }
+
+  function dropProfiles(uids, done) {
+    var index = 0
+    var list = uids || []
+    var failed = ({})
+    function step() {
+      if (index >= list.length) {
+        if (done) done(failed)
+        return
+      }
+      var uid = list[index++]
+      if (!uid || uid === "0") {
+        step()
+        return
+      }
+      call("DELETE", "/profiles/" + encodeURIComponent(uid), null, function(res) {
+        if (!res || (!res.ok && Number(res.status) !== 404)) failed[uid] = true
+        step()
+      })
+    }
+    step()
+  }
+
+  function removeRampFunction(uid, done) {
+    if (!uid || uid === "0") {
+      if (done) done(true)
+      return
+    }
+    call("DELETE", "/functions/" + encodeURIComponent(uid), null, function(res) {
+      if (done) done(!!(res && (res.ok || Number(res.status) === 404)))
+    })
+  }
+
+  function rampStop(note, res, uid, binds, orphans) {
+    if (note) silentRampNote = note
+    if (res && !res.ok) fail(res)
+    var kept = []
+    var used = ({})
+    var i
+    for (i = 0; i < (binds || []).length; i++) {
+      if (!binds[i]) continue
+      kept.push(binds[i])
+      if (binds[i].cloneUid) used[binds[i].cloneUid] = true
+    }
+    var drop = []
+    for (i = 0; i < (orphans || []).length; i++) {
+      var id = orphans[i]
+      if (id && !used[id]) drop.push(id)
+    }
+    dropProfiles(drop, function(failed) {
+      for (i = 0; i < drop.length; i++) {
+        if (!failed[drop[i]]) continue
+        kept.push({
+          deviceUid: "",
+          channel: "",
+          profileUid: "",
+          cloneUid: drop[i],
+          prevFunction: "0"
+        })
+      }
+      if (kept.length) persistRamp(true, uid, kept)
+      else if (uid) removeRampFunction(uid, function() {})
+      silentRampBusy = false
       refresh()
     })
   }
 
+  function activateModeRaw(uid, done) {
+    if (!uid || String(activeModeUid) === String(uid)) {
+      if (done) done({ ok: true })
+      return
+    }
+    call("POST", "/modes-active/" + encodeURIComponent(uid), {}, function(res) {
+      if (res && res.ok) {
+        activeModeUid = String(uid)
+        rebuild()
+      }
+      if (done) done(res || { ok: false, status: 0, error: "not connected" })
+    })
+  }
+
+  function ensureRampFunction(done) {
+    var list = functions || []
+    var i
+    var found = ""
+    if (silentRampUid && silentRampUid !== "0") {
+      for (i = 0; i < list.length; i++) {
+        if (list[i] && String(list[i].uid || "") === silentRampUid) {
+          found = silentRampUid
+          break
+        }
+      }
+    }
+    if (!found) {
+      for (i = 0; i < list.length; i++) {
+        var fn = list[i]
+        if (!fn || String(fn.uid || "") === "0") continue
+        if (String(fn.name || "") === "Omaflow silent ramp") {
+          found = String(fn.uid || "")
+          break
+        }
+      }
+    }
+    if (found) {
+      if (done) done(found)
+      return
+    }
+    var uid = newUid()
+    call("POST", "/functions", Cc.silentRampFunction(uid), function(res) {
+      if (!res.ok) {
+        silentRampBusy = false
+        silentRampNote = "The Silent fan pace was not saved."
+        fail(res)
+        if (done) done("")
+        return
+      }
+      if (done) done(uid)
+    })
+  }
+
+  function setSilentRamp(on) {
+    if (silentRampBusy) return
+    if (connection !== "ready") {
+      silentRampNote = "CoolerControl is not connected."
+      return
+    }
+    if (calibrationBusy) {
+      silentRampNote = "A fan is being calibrated. The Silent pace waits until that sweep finishes."
+      return
+    }
+    silentRampNote = ""
+    silentRampBusy = true
+    if (on) applySilentRamp()
+    else clearSilentRamp()
+  }
+
+  function applySilentRamp() {
+    var mode = Cc.modeNamed(modes, "silent")
+    if (!mode || !mode.uid) {
+      silentRampBusy = false
+      silentRampNote = "Silent mode is not on this daemon."
+      return
+    }
+    ensureRampFunction(function(uid) {
+      if (!uid) return
+      var plan = Cc.planSilentRamp(mode, modes, profiles, channels, uid)
+      var binds = mergeRampBinds(plan.already, silentRampBinds)
+      var orphans = []
+      putRampInPlace(plan.inplace || [], uid, binds, function(ok, res) {
+        if (!ok) {
+          rampStop("The Silent fan pace was not saved.", res, uid, binds, orphans)
+          return
+        }
+        postRampClones(plan.clones || [], uid, mode, binds, orphans, function(ok2, res2, note) {
+          if (!ok2) {
+            rampStop(note || "The Silent fan pace was not saved.", res2, uid, binds, orphans)
+            return
+          }
+          var leaked = []
+          var used = ({})
+          var i
+          for (i = 0; i < binds.length; i++) if (binds[i] && binds[i].cloneUid) used[binds[i].cloneUid] = true
+          for (i = 0; i < orphans.length; i++) if (orphans[i] && !used[orphans[i]]) leaked.push(orphans[i])
+          dropProfiles(leaked, function(failed) {
+            for (i = 0; i < leaked.length; i++) {
+              if (!failed[leaked[i]]) continue
+              binds.push({
+                deviceUid: "",
+                channel: "",
+                profileUid: "",
+                cloneUid: leaked[i],
+                prevFunction: "0"
+              })
+            }
+            persistRamp(true, uid, binds)
+            silentRampBusy = false
+            if (!(plan.inplace || []).length && !(plan.clones || []).length && !(plan.already || []).length)
+              silentRampNote = "Silent has no fan curves to ease."
+            else silentRampNote = note || ""
+            refresh()
+          })
+        })
+      })
+    })
+  }
+
+  function putRampInPlace(jobs, uid, binds, done) {
+    var index = 0
+    function step() {
+      if (index >= jobs.length) {
+        if (done) done(true, null)
+        return
+      }
+      var job = jobs[index++]
+      var profile = Cc.profileByUid(profiles, job.profileUid)
+      if (!profile) {
+        if (done) done(false, { ok: false, status: 0, error: "That curve is not a saved profile" })
+        return
+      }
+      var draft = JSON.parse(JSON.stringify(profile))
+      draft.function_uid = uid
+      call("PUT", "/profiles", draft, function(res) {
+        if (!res.ok) {
+          if (done) done(false, res)
+          return
+        }
+        binds.push({
+          deviceUid: "",
+          channel: "",
+          profileUid: String(job.profileUid || ""),
+          cloneUid: "",
+          prevFunction: String(job.prevFunction || "0")
+        })
+        step()
+      })
+    }
+    step()
+  }
+
+  function restoreSharedFunction(job, done) {
+    if (!job || !job.restore) {
+      if (done) done(true, null)
+      return
+    }
+    var profile = Cc.profileByUid(profiles, job.profileUid)
+    if (!profile) {
+      if (done) done(false, { ok: false, status: 0, error: "That curve is not a saved profile" })
+      return
+    }
+    var draft = JSON.parse(JSON.stringify(profile))
+    draft.function_uid = "0"
+    call("PUT", "/profiles", draft, function(res) {
+      if (done) done(!!(res && res.ok), res)
+    })
+  }
+
+  function postRampClones(jobs, uid, mode, binds, orphans, done) {
+    var index = 0
+    var posted = []
+    function step() {
+      if (index >= jobs.length) {
+        if (!posted.length) {
+          if (done) done(true, null, "")
+          return
+        }
+        attachRampClones(mode, posted, binds, orphans, done)
+        return
+      }
+      var job = jobs[index++]
+      restoreSharedFunction(job, function(ok, res) {
+        if (!ok) {
+          if (done) done(false, res, "The Silent fan pace was not saved.")
+          return
+        }
+        var profile = Cc.profileByUid(profiles, job.profileUid)
+        if (!profile) {
+          if (done) done(false, { ok: false, status: 0, error: "That curve is not a saved profile" }, "The Silent fan pace was not saved.")
+          return
+        }
+        var draft = JSON.parse(JSON.stringify(profile))
+        var cloneUid = newUid()
+        draft.uid = cloneUid
+        draft.name = Cc.rampCloneName(profile.name)
+        draft.function_uid = uid
+        var shaped = Cc.withGraphPoints(draft, profile.speed_profile || [], 0)
+        shaped.function_uid = uid
+        call("POST", "/profiles", shaped, function(res) {
+          if (!res.ok) {
+            if (done) done(false, res, "The Silent fan pace was not saved.")
+            return
+          }
+          orphans.push(cloneUid)
+          posted.push({
+            cloneUid: cloneUid,
+            profileUid: String(job.profileUid || ""),
+            prevFunction: String(job.prevFunction || "0"),
+            channels: job.channels || []
+          })
+          step()
+        })
+      })
+    }
+    step()
+  }
+
+  function bindRampChannels(job, binds, done) {
+    var index = 0
+    var list = job.channels || []
+    function step() {
+      if (index >= list.length) {
+        if (done) done(true, null)
+        return
+      }
+      var channel = list[index++]
+      if (!channel || !channel.deviceUid || !channel.name) {
+        step()
+        return
+      }
+      call("PUT", deviceSettingPath(channel.deviceUid, channel.name, "profile"), { profile_uid: job.cloneUid }, function(res) {
+        if (!res.ok) {
+          var detail = res && res.error ? String(res.error) : ""
+          // A hidden duplicate is still named in an old mode. The daemon has
+          // no such device, so this channel cannot take the Silent copy.
+          if (Number(res.status) === 404 || /device not found/i.test(detail)) {
+            step()
+            return
+          }
+          if (done) done(false, res)
+          return
+        }
+        binds.push({
+          deviceUid: String(channel.deviceUid),
+          channel: String(channel.name),
+          profileUid: String(job.profileUid || ""),
+          cloneUid: String(job.cloneUid || ""),
+          prevFunction: String(job.prevFunction || "0")
+        })
+        step()
+      })
+    }
+    step()
+  }
+
+  // Silent has to be the running mode before a snapshot, or the snapshot
+  // would store the other mode's live fans inside Silent.
+  function attachRampClones(mode, posted, binds, orphans, done) {
+    var previous = String(activeModeUid || "")
+    var silentUid = String(mode.uid)
+    activateModeRaw(silentUid, function(res) {
+      if (!res || !res.ok) {
+        if (done) done(false, res, "Silent could not be selected.")
+        return
+      }
+      var index = 0
+      function finish(ok, failed, note) {
+        call("PUT", "/modes/" + encodeURIComponent(silentUid) + "/settings", {}, function(saved) {
+          var modeNote = note || ""
+          if (!saved.ok) {
+            if (!previous || previous === silentUid) {
+              if (done) done(false, saved, "Silent did not keep the eased fans.")
+              return
+            }
+            activateModeRaw(previous, function(back) {
+              var text = "Silent did not keep the eased fans."
+              if (!back.ok) text = "Silent is running. Apply the previous mode again."
+              if (done) done(false, saved, text)
+            })
+            return
+          }
+          if (!previous || previous === silentUid) {
+            if (done) done(ok, failed, modeNote)
+            return
+          }
+          activateModeRaw(previous, function(back) {
+            if (!back.ok) modeNote = "Silent is running. Apply the previous mode again."
+            if (done) done(ok, failed, modeNote)
+          })
+        })
+      }
+      function step() {
+        if (index >= posted.length) {
+          finish(true, null, "")
+          return
+        }
+        bindRampChannels(posted[index++], binds, function(ok, res2) {
+          if (!ok) {
+            finish(false, res2, "The Silent fan pace was not saved.")
+            return
+          }
+          step()
+        })
+      }
+      step()
+    })
+  }
+
+  function clearSilentRamp() {
+    var fnUid = String(silentRampUid || "")
+    var rows = silentRampBinds || []
+    var inplace = []
+    var clones = []
+    var loose = []
+    var seen = ({})
+    var i
+    for (i = 0; i < rows.length; i++) {
+      var row = rows[i]
+      if (!row) continue
+      if (row.cloneUid) {
+        if (!row.profileUid || !row.deviceUid || !row.channel) loose.push(row)
+        else clones.push(row)
+        continue
+      }
+      if (!row.profileUid || seen[row.profileUid]) continue
+      seen[row.profileUid] = true
+      inplace.push({ profileUid: String(row.profileUid), prevFunction: String(row.prevFunction || "0") })
+    }
+    restoreRampFunctions(inplace, function(leftIn) {
+      undoRampClones(clones, function(leftClones, modeNote) {
+        var looseIds = []
+        for (i = 0; i < loose.length; i++) looseIds.push(loose[i].cloneUid)
+        dropProfiles(looseIds, function(failed) {
+          var kept = []
+          var keepUids = ({})
+          var n
+          for (n = 0; n < leftIn.length; n++) {
+            kept.push(leftIn[n])
+            if (leftIn[n].profileUid) keepUids[leftIn[n].profileUid] = true
+          }
+          for (n = 0; n < leftClones.length; n++) {
+            kept.push(leftClones[n])
+            if (leftClones[n].cloneUid) keepUids[leftClones[n].cloneUid] = true
+          }
+          for (n = 0; n < loose.length; n++) {
+            if (!failed[loose[n].cloneUid]) continue
+            kept.push(loose[n])
+            keepUids[loose[n].cloneUid] = true
+          }
+          if (kept.length) {
+            persistRamp(true, fnUid, kept)
+            silentRampNote = modeNote || "A Silent copy could not be put back."
+            silentRampBusy = false
+            refresh()
+            return
+          }
+          detachOtherRampProfiles(fnUid, keepUids, function(leftOther) {
+            if (leftOther.length) {
+              persistRamp(true, fnUid, leftOther)
+              silentRampNote = modeNote || "A Silent copy could not be put back."
+              silentRampBusy = false
+              refresh()
+              return
+            }
+            removeRampFunction(fnUid, function(ok) {
+              if (!ok) {
+                persistRamp(true, fnUid, [])
+                silentRampNote = modeNote || "The Silent fan pace could not be removed."
+                silentRampBusy = false
+                refresh()
+                return
+              }
+              persistRamp(false, "", [])
+              silentRampNote = modeNote || ""
+              silentRampBusy = false
+              refresh()
+            })
+          })
+        })
+      })
+    })
+  }
+
+  // A Silent fan curve made while the pace is on has no undo row. Put it
+  // back on the default response before the pace function is removed.
+  function detachOtherRampProfiles(fnUid, keepUids, done) {
+    if (!fnUid || fnUid === "0") {
+      if (done) done([])
+      return
+    }
+    var jobs = []
+    var list = profiles || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var profile = list[i]
+      if (!profile || String(profile.function_uid || "0") !== String(fnUid)) continue
+      if (keepUids && keepUids[profile.uid]) continue
+      jobs.push({ profileUid: String(profile.uid), prevFunction: "0" })
+    }
+    restoreRampFunctions(jobs, done)
+  }
+
+  function restoreRampFunctions(jobs, done) {
+    var index = 0
+    var left = []
+    function step() {
+      if (index >= jobs.length) {
+        if (done) done(left)
+        return
+      }
+      var job = jobs[index++]
+      var profile = Cc.profileByUid(profiles, job.profileUid)
+      if (!profile) {
+        step()
+        return
+      }
+      var draft = JSON.parse(JSON.stringify(profile))
+      draft.function_uid = job.prevFunction ? String(job.prevFunction) : "0"
+      call("PUT", "/profiles", draft, function(res) {
+        if (!res.ok && Number(res.status) !== 404) {
+          left.push({
+            deviceUid: "",
+            channel: "",
+            profileUid: job.profileUid,
+            cloneUid: "",
+            prevFunction: job.prevFunction || "0"
+          })
+        }
+        step()
+      })
+    }
+    step()
+  }
+
+  function undoRampClones(rows, done) {
+    if (!rows.length) {
+      if (done) done([], "")
+      return
+    }
+    var mode = Cc.modeNamed(modes, "silent")
+    if (!mode || !mode.uid) {
+      if (done) done(rows, "Silent mode is not on this daemon.")
+      return
+    }
+    var previous = String(activeModeUid || "")
+    var silentUid = String(mode.uid)
+    activateModeRaw(silentUid, function(res) {
+      if (!res || !res.ok) {
+        if (done) done(rows, "Silent could not be selected.")
+        return
+      }
+      var index = 0
+      var left = []
+      function restorePrevious(note, kept) {
+        if (!previous || previous === silentUid) {
+          if (done) done(kept, note)
+          return
+        }
+        activateModeRaw(previous, function(back) {
+          var text = note
+          if (!back.ok) text = "Silent is running. Apply the previous mode again."
+          if (done) done(kept, text)
+        })
+      }
+      function finish() {
+        call("PUT", "/modes/" + encodeURIComponent(silentUid) + "/settings", {}, function(saved) {
+          if (!saved.ok) {
+            restorePrevious("Silent did not keep the restored fans.", rows)
+            return
+          }
+          var removable = []
+          var seenClone = ({})
+          var c
+          for (c = 0; c < rows.length; c++) {
+            var id = rows[c].cloneUid
+            if (!id || seenClone[id]) continue
+            seenClone[id] = true
+            var still = false
+            var k
+            for (k = 0; k < left.length; k++) if (left[k].cloneUid === id) still = true
+            if (!still) removable.push(id)
+          }
+          dropProfiles(removable, function(failed) {
+            var kept = []
+            var n
+            for (n = 0; n < left.length; n++) kept.push(left[n])
+            for (n = 0; n < rows.length; n++) {
+              if (failed[rows[n].cloneUid]) kept.push(rows[n])
+            }
+            restorePrevious("", unionRampBinds(kept, []))
+          })
+        })
+      }
+      function step() {
+        if (index >= rows.length) {
+          finish()
+          return
+        }
+        var row = rows[index++]
+        call("PUT", deviceSettingPath(row.deviceUid, row.channel, "profile"), { profile_uid: row.profileUid }, function(put) {
+          if (!put.ok && Number(put.status) !== 404) left.push(row)
+          step()
+        })
+      }
+      step()
+    })
+  }
+
   function loadUi() {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "ui-get" }, function(res) {
       var body = res && res.body ? res.body : ({})
       dynamicScale = body.dynamicScale === true
       // A toggle that landed before this read must not be put back.
@@ -745,10 +1504,15 @@ Item {
       var seconds = Number(body.lcdSeconds)
       lcdSeconds = root.lcdSecondsOk(seconds) ? seconds : 5
       lcdThemeSync = body.lcdThemeSync === true
+      if (!pumpFloorHeld) pumpFloor = body.pumpFloor !== false
+      if (!silentRampHeld) {
+        silentRamp = body.silentRamp === true
+        silentRampUid = String(body.silentRampUid || "")
+        var binds = body.silentRampBinds
+        silentRampBinds = binds && binds.length !== undefined ? binds : []
+      }
       uiReady = true
-    }
-    pending = next
-    send({ op: "ui-get", id: id })
+    })
   }
 
   function setUi(patch) {
@@ -761,26 +1525,39 @@ Item {
       lcdSeconds: lcdSeconds,
       lcdThemeSync: lcdThemeSync
     }
-    // Leave showBar out until the file has been read, unless this patch sets it.
-    if (uiReady) body.showBar = showBar
+    // Leave the new keys out until the file has been read, unless this patch sets them.
+    if (uiReady) {
+      body.showBar = showBar
+      body.pumpFloor = pumpFloor
+      body.silentRamp = silentRamp
+      body.silentRampUid = silentRampUid
+      body.silentRampBinds = silentRampBinds
+    }
     var src = patch || ({})
-    if (src.dynamicScale !== undefined) body.dynamicScale = src.dynamicScale === true
-    if (src.pinGroups !== undefined) {
-      body.pinGroups = src.pinGroups === true
-      pinGroupsHeld = true
+    // Exact true matches Python write_ui. The other flags stay on unless the patch says false.
+    var exact = ["dynamicScale", "pinGroups", "lcdThemeSync", "silentRamp"]
+    var loose = ["textFollow", "showBar", "lcdBackground", "pumpFloor"]
+    var i
+    for (i = 0; i < exact.length; i++) {
+      if (src[exact[i]] === undefined) continue
+      body[exact[i]] = src[exact[i]] === true
     }
-    if (src.textFollow !== undefined) body.textFollow = src.textFollow !== false
+    for (i = 0; i < loose.length; i++) {
+      if (src[loose[i]] === undefined) continue
+      body[loose[i]] = src[loose[i]] !== false
+    }
+    if (src.pinGroups !== undefined) pinGroupsHeld = true
+    if (src.showBar !== undefined) showBarHeld = true
+    if (src.pumpFloor !== undefined) pumpFloorHeld = true
+    if (src.silentRamp !== undefined || src.silentRampUid !== undefined || src.silentRampBinds !== undefined)
+      silentRampHeld = true
     if (src.textSize !== undefined) body.textSize = Number(src.textSize)
-    if (src.showBar !== undefined) {
-      body.showBar = src.showBar !== false
-      showBarHeld = true
-    }
-    if (src.lcdBackground !== undefined) body.lcdBackground = src.lcdBackground !== false
     if (src.lcdSeconds !== undefined) {
       var seconds = Number(src.lcdSeconds)
       if (lcdSecondsOk(seconds)) body.lcdSeconds = seconds
     }
-    if (src.lcdThemeSync !== undefined) body.lcdThemeSync = src.lcdThemeSync === true
+    if (src.silentRampUid !== undefined) body.silentRampUid = String(src.silentRampUid || "")
+    if (src.silentRampBinds !== undefined) body.silentRampBinds = src.silentRampBinds || []
     dynamicScale = body.dynamicScale
     pinGroups = body.pinGroups === true
     textFollow = body.textFollow
@@ -789,42 +1566,31 @@ Item {
     lcdSeconds = lcdSecondsOk(body.lcdSeconds) ? body.lcdSeconds : 5
     lcdThemeSync = body.lcdThemeSync === true
     if (body.showBar !== undefined) showBar = body.showBar
-    var id = rpcId
-    rpcId = rpcId + 1
-    send({ op: "ui-set", id: id, body: body })
+    if (body.pumpFloor !== undefined) pumpFloor = body.pumpFloor !== false
+    if (body.silentRamp !== undefined) silentRamp = body.silentRamp === true
+    if (body.silentRampUid !== undefined) silentRampUid = String(body.silentRampUid || "")
+    if (body.silentRampBinds !== undefined) silentRampBinds = body.silentRampBinds || []
+    post({ op: "ui-set", body: body })
   }
 
   function loadPack() {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "pack-get" }, function(res) {
       var body = res && res.body ? res.body : ({})
       curvePack = Cc.validCurvePack(body) ? body : ({})
-    }
-    pending = next
-    send({ op: "pack-get", id: id })
+    })
   }
 
   function setCurvePack(pack) {
     if (!Cc.validCurvePack(pack)) return
     curvePack = pack || ({})
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "pack-set", body: pack }, function(res) {
       if (!res.ok) fail(res)
-    }
-    pending = next
-    send({ op: "pack-set", id: id, body: pack })
+    })
   }
 
   function clearCurvePack() {
     curvePack = ({})
-    send({ op: "pack-clear", id: rpcId })
-    rpcId = rpcId + 1
+    post({ op: "pack-clear" })
   }
 
   function consumePackMode(name) {
@@ -844,34 +1610,21 @@ Item {
       clearCurvePack()
       return
     }
-    var next = ({})
-    for (var k in pack) next[k] = pack[k]
+    var next = Cc.copyMap(pack)
     next.modes = kept
     setCurvePack(next)
   }
 
   function writeUserFile(path, body, done) {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "file-write", path: path, body: body }, function(res) {
       if (done) done(res)
-    }
-    pending = next
-    send({ op: "file-write", id: id, path: path, body: body })
+    }, true)
   }
 
   function readUserFile(path, done) {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "file-read", path: path }, function(res) {
       if (done) done(res)
-    }
-    pending = next
-    send({ op: "file-read", id: id, path: path })
+    }, true)
   }
 
   function saveGraphs(modeUid, jobs, done) {
@@ -884,14 +1637,17 @@ Item {
       }
       var job = list[index++]
       // A shared profile is one object. Writing it would move every mode
-      // that still points at it. Those jobs are copied instead.
+      // that still points at it. The caller copies those jobs once this
+      // mode is the running one.
       if (Cc.otherModeUsesProfile(modes, job.profileUid, modeUid)) {
-        lastError = "That curve is used by another mode, so it was not written"
+        step()
         return
       }
       var profile = Cc.profileByUid(profiles, job.profileUid)
       if (!profile) {
         lastError = "That curve is not a saved profile"
+        notice = lastError
+        step()
         return
       }
       var next = Cc.withGraphPoints(profile, job.points, job.minDuty)
@@ -944,8 +1700,7 @@ Item {
         step()
         return
       }
-      var path = "/devices/" + encodeURIComponent(channel.deviceUid) + "/settings/" + encodeURIComponent(channel.name) + "/profile"
-      call("PUT", path, { profile_uid: profileUid }, function(res) {
+      call("PUT", deviceSettingPath(channel.deviceUid, channel.name, "profile"), { profile_uid: profileUid }, function(res) {
         if (!res.ok) return fail(res)
         step()
       })
@@ -970,29 +1725,38 @@ Item {
     }
     var mode = Cc.modeByUid(modes, uid)
     var modeName = mode && mode.name ? mode.name : "Mode"
+    var known = ({})
+    var live = channels || []
+    var c
+    for (c = 0; c < live.length; c++) if (live[c] && live[c].key) known[live[c].key] = true
     function step() {
       if (index >= list.length) {
-        call("PUT", "/modes/" + encodeURIComponent(uid) + "/settings", {}, function(res) {
-          if (!res.ok) return fail(res)
-          refresh()
-          if (done) done()
-        })
+        snapshotMode(uid, done)
         return
       }
       var job = list[index++]
       var profile = Cc.profileByUid(profiles, job.profileUid)
       if (!profile) {
         lastError = "That curve is not a saved profile"
+        notice = lastError
+        step()
         return
       }
-      var channels = Cc.modeProfileChannels(mode, job.profileUid)
-      if (!channels.length) {
+      var stored = Cc.modeProfileChannels(mode, job.profileUid)
+      var present = []
+      for (c = 0; c < stored.length; c++) {
+        var one = stored[c]
+        if (!one || !one.deviceUid || !one.name) continue
+        if (!known[String(one.deviceUid) + "/" + String(one.name)]) continue
+        present.push(one)
+      }
+      if (!present.length) {
         step()
         return
       }
       var copyName = (modeName + " " + (profile.name || "curve") + " " + newUid().slice(0, 4)).replace(/\s+/g, " ")
       cloneGraph(profile, job.points, job.minDuty, copyName, function(newId) {
-        assignChannels(channels, newId, step)
+        assignChannels(present, newId, step)
       })
     }
     step()
@@ -1028,45 +1792,44 @@ Item {
     })
   }
 
-  function startCalibration(deviceUid, channel) {
-    startCalibrations([{ deviceUid: deviceUid, name: channel }])
+  function takeCalibrationList(res) {
+    if (!res || !res.ok) {
+      if (res && Number(res.status) === 404) {
+        calibrations = []
+        return
+      }
+      if (res) fail(res)
+      return
+    }
+    calibrations = (res.body && res.body.calibrations) || []
   }
 
   function loadCalibrations() {
-    call("GET", "/calibrations", null, function(res) {
-      if (!res.ok) {
-        if (Number(res.status) === 404) {
-          calibrations = []
-          return
-        }
-        return fail(res)
-      }
-      calibrations = (res.body && res.body.calibrations) || []
-    })
+    call("GET", "/calibrations", null, function(res) { root.takeCalibrationList(res) })
   }
 
   // GET /calibrations/batch is JSON null when this daemon has never swept.
   // A start that just returned 202 can beat the first read, so a few empty
   // replies keep the queued card instead of dropping the sweep.
-  function loadCalibrationBatch() {
-    call("GET", "/calibrations/batch", null, function(res) {
-      if (!res.ok) {
-        if (Number(res.status) === 404) {
-          calibrationAwait = false
-          calibrationMiss = 0
-          calibrationBatch = Calib.emptyBatch()
-          calibrationStatus = ({})
-          return
-        }
-        if (calibrationAwait) {
-          calibrationMiss = calibrationMiss + 1
-          if (calibrationMiss < 3) return
-          calibrationAwait = false
-        }
-        return fail(res)
+  function takeCalibrationBatch(res) {
+    if (!res || !res.ok) {
+      if (res && Number(res.status) === 404) {
+        calibrationAwait = false
+        calibrationMiss = 0
+        calibrationBatch = Calib.emptyBatch()
+        calibrationStatus = ({})
+        return
       }
-      var was = calibrationBusy
-      var next = Calib.normalizeBatch(res.body)
+      if (calibrationAwait) {
+        calibrationMiss = calibrationMiss + 1
+        if (calibrationMiss < 3) return
+        calibrationAwait = false
+      }
+      if (res) fail(res)
+      return
+    }
+    var was = calibrationBusy
+    var next = Calib.normalizeBatch(res.body)
       if (!next.active && calibrationAwait && !(next.entries && next.entries.length)) {
         calibrationMiss = calibrationMiss + 1
         if (calibrationMiss < 3) return
@@ -1101,7 +1864,10 @@ Item {
         }
         notice = failed || "Calibration finished"
       }
-    })
+  }
+
+  function loadCalibrationBatch() {
+    call("GET", "/calibrations/batch", null, function(res) { root.takeCalibrationBatch(res) })
   }
 
   function loadCalibrationStatus(deviceUid, channel) {
@@ -1116,32 +1882,6 @@ Item {
       for (name in cur) copy[name] = cur[name]
       copy[key] = res.body || ({})
       calibrationStatus = copy
-    })
-  }
-
-  function setLighting(deviceUid, channel, modeName) {
-    var path = "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/lighting"
-    call("PUT", path, { mode: modeName, speed: null, backward: false, colors: [] }, function(res) {
-      if (!res.ok) return fail(res)
-      notice = ""
-    })
-  }
-
-  function saveGraph(profileUid, points, minDuty) {
-    if (Cc.profileModeCount(modes, profileUid) > 1) {
-      lastError = "That curve is used by another mode, so it was not written"
-      return
-    }
-    var profile = Cc.profileByUid(profiles, profileUid)
-    if (!profile) {
-      lastError = "That curve is not a saved profile"
-      return
-    }
-    var next = Cc.withGraphPoints(profile, points, minDuty)
-    call("PUT", "/profiles", next, function(res) {
-      if (!res.ok) return fail(res)
-      notice = "Curve saved."
-      refresh()
     })
   }
 
@@ -1189,7 +1929,7 @@ Item {
   }
 
   function lcdSecondsOk(seconds) {
-    return seconds === 2 || seconds === 5 || seconds === 10 || seconds === 30 || seconds === 60
+    return seconds === 0 || seconds === 2 || seconds === 5 || seconds === 10 || seconds === 30 || seconds === 60
   }
 
   function msUntilNextMinute() {
@@ -1207,7 +1947,7 @@ Item {
     } catch (e) {
       face = "liquid"
     }
-    if (face !== "liquid" && face !== "cpu" && face !== "cpu-gpu" && face !== "cpu-liquid" && face !== "omarchy" && face !== "omarchy-time")
+    if (face !== "liquid" && face !== "cpu" && face !== "cpu-gpu" && face !== "cpu-liquid" && face !== "omarchy" && face !== "omarchy-time" && face !== "picture")
       face = "liquid"
     lcdFace = face
     if (face === "omarchy-time") lcdClockWait = msUntilNextMinute()
@@ -1219,41 +1959,28 @@ Item {
     themeLcdDelay.restart()
   }
 
-  function previewLcd(deviceName, width, height, face, accent, done) {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
-      if (done) done(res)
-    }
-    pending = next
-    if (!send({
+  function previewLcd(deviceName, width, height, face, accent, done, picture, scale) {
+    dispatch({
       op: "lcd-preview",
-      id: id,
       deviceName: String(deviceName || ""),
       width: Math.max(0, Math.round(Number(width) || 0)),
       height: Math.max(0, Math.round(Number(height) || 0)),
       face: String(face || "omarchy"),
-      accent: String(accent || "")
-    })) {
-      dropPending(id)
-      if (done) done({ ok: false, status: 0, error: "not connected" })
-    }
+      accent: String(accent || ""),
+      picture: String(picture || ""),
+      scale: Math.max(50, Math.min(300, Math.round(Number(scale) || 100)))
+    }, function(res) {
+      if (done) done(res)
+    }, true)
   }
 
-  function pushLcdImage(deviceUid, channel, brightness, face, angle, accent, accent2, tempText, temp2, shape, width, height, deviceName, done) {
+  function pushLcdImage(deviceUid, channel, brightness, face, angle, accent, accent2, tempText, temp2, shape, width, height, deviceName, done, picture, scale) {
     if (!deviceUid || !channel) return
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    var id = track(function(res) {
       if (!res.ok) fail(res)
       else notice = ""
       if (done) done(res)
-    }
-    pending = next
+    })
     if (!send({
       op: "lcd-image",
       id: id,
@@ -1269,7 +1996,9 @@ Item {
       shape: String(shape || "round") === "square" ? "square" : "round",
       width: Math.max(0, Math.round(Number(width) || 0)),
       height: Math.max(0, Math.round(Number(height) || 0)),
-      deviceName: String(deviceName || "")
+      deviceName: String(deviceName || ""),
+      picture: String(picture || ""),
+      scale: Math.max(50, Math.min(300, Math.round(Number(scale) || 100)))
     })) {
       dropPending(id)
       if (done) done({ ok: false, status: 0, error: "not connected" })
@@ -1278,19 +2007,14 @@ Item {
 
   function setLcd(deviceUid, channel, lcd) {
     if (!deviceUid || !channel || !lcd) return
-    var path = "/devices/" + encodeURIComponent(deviceUid) + "/settings/" + encodeURIComponent(channel) + "/lcd"
-    call("PUT", path, lcd, function(res) {
+    call("PUT", deviceSettingPath(deviceUid, channel, "lcd"), lcd, function(res) {
       if (!res.ok) return fail(res)
       notice = ""
     })
   }
 
   function loadProcesses() {
-    var id = rpcId
-    rpcId = rpcId + 1
-    var next = ({})
-    for (var k in pending) next[k] = pending[k]
-    next[id] = function(res) {
+    dispatch({ op: "processes" }, function(res) {
       if (!res || !res.ok) return
       var body = res.body || ({})
       var cpuTotal = Number(body.cpuTotal)
@@ -1300,9 +2024,7 @@ Item {
       processCpu = body.cpu || []
       processGpuOk = body.gpuOk !== false
       processGpu = body.gpu || []
-    }
-    pending = next
-    if (!send({ op: "processes", id: id })) dropPending(id)
+    })
   }
 
   function handleLine(line) {
@@ -1318,16 +2040,26 @@ Item {
       connection = msg.token ? "down" : "need-token"
       loadUi()
       loadPack()
-      if (msg.token) refresh()
-      else lastError = "Pair coolercontrold with ~/.config/omaflow/coolercontrol.token"
+      if (msg.token) {
+        skipNextUp = true
+        refresh()
+      } else lastError = "Pair coolercontrold with ~/.config/omaflow/coolercontrol.token"
       return
     }
     if (msg.event === "up") {
-      if (connection !== "unauthorized" && connection !== "need-token") {
-        // The daemon can appear after this process started. Status events
-        // alone do not load devices, modes, or profiles.
-        refresh()
+      if (connection === "unauthorized" || connection === "need-token") return
+      // Status events do not carry devices, modes, or profiles.
+      if (skipNextUp) {
+        skipNextUp = false
+        if (catalogBusy) catalogIfStale = true
+        else if (!(connection === "ready" && modesKnown)) refresh()
+        return
       }
+      if (catalogBusy || catalogAgain) {
+        catalogAgain = true
+        return
+      }
+      refresh()
       return
     }
     if (msg.event === "down") {
@@ -1355,6 +2087,10 @@ Item {
       rebuild()
       return
     }
+    if (msg.event === "alert" || msg.event === "alerts") {
+      refreshAlerts()
+      return
+    }
     if (msg.id === undefined || msg.id === null) return
     var done = pending[msg.id]
     dropPending(msg.id)
@@ -1380,6 +2116,11 @@ Item {
       onRead: function(line) { console.warn("omaflow cc: " + line) }
     }
     onExited: function() {
+      root.pending = ({})
+      root.catalogBusy = false
+      root.catalogAgain = false
+      root.catalogIfStale = false
+      root.skipNextUp = false
       if (root.stopping) return
       root.connection = "down"
       root.lcdKeepBusy = false
@@ -1442,6 +2183,13 @@ Item {
     }
   }
 
+  // The password stays in the polkit dialog. This command does no work.
+  Process {
+    id: floorConfirm
+    command: ["pkexec", "/usr/bin/true"]
+    onExited: function(code) { root.finishPumpFloorOff(code) }
+  }
+
   Timer {
     interval: 3000
     repeat: true
@@ -1486,7 +2234,7 @@ Item {
     id: lcdKeep
     interval: root.lcdFace === "omarchy-time" ? root.lcdClockWait : Math.max(2000, root.lcdSeconds * 1000)
     repeat: true
-    running: !root.stopping && root.lcdBackground && root.connection === "ready" && root.lcdChannels.length > 0 && !(root.lcdFace === "omarchy" && root.lcdThemeSync)
+    running: !root.stopping && root.lcdBackground && root.connection === "ready" && root.lcdChannels.length > 0 && root.lcdFace !== "picture" && root.lcdSeconds !== 0 && !(root.lcdFace === "omarchy" && root.lcdThemeSync)
     onTriggered: {
       root.keepLcd()
       if (root.lcdFace === "omarchy-time") root.lcdClockWait = root.msUntilNextMinute()

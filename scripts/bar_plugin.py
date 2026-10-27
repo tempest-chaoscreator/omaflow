@@ -54,22 +54,6 @@ def plugin_rows() -> list:
     return []
 
 
-def plugin_state() -> dict:
-    version = ""
-    manifest = DEST / "manifest.json"
-    if manifest.is_file():
-        try:
-            version = str(json.loads(manifest.read_text()).get("version") or "")
-        except (OSError, json.JSONDecodeError):
-            version = ""
-    enabled = False
-    for row in plugin_rows():
-        if isinstance(row, dict) and row.get("id") == PLUGIN_ID:
-            enabled = row.get("enabled") is True
-            break
-    return {"ok": True, "enabled": enabled, "version": version}
-
-
 def installed_version() -> str:
     manifest = DEST / "manifest.json"
     if not manifest.is_file():
@@ -78,6 +62,15 @@ def installed_version() -> str:
         return str(json.loads(manifest.read_text()).get("version") or "")
     except (OSError, json.JSONDecodeError):
         return ""
+
+
+def plugin_state() -> dict:
+    enabled = False
+    for row in plugin_rows():
+        if isinstance(row, dict) and row.get("id") == PLUGIN_ID:
+            enabled = row.get("enabled") is True
+            break
+    return {"ok": True, "enabled": enabled, "version": installed_version()}
 
 
 def omarchy(action: str) -> subprocess.CompletedProcess[str]:
@@ -90,11 +83,19 @@ def omarchy(action: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def fail_state(detail: str) -> dict:
+def fail_state(detail: str, fallback: str = "could not enable the plugin", state: dict | None = None) -> dict:
+    current = plugin_state() if state is None else state
+    current["ok"] = False
+    current["error"] = (detail or fallback).splitlines()[-1][:180]
+    return current
+
+
+def settle(result: subprocess.CompletedProcess[str], fallback: str, enabled: bool) -> dict:
     state = plugin_state()
-    state["ok"] = False
-    state["error"] = (detail or "could not enable the plugin").splitlines()[-1][:180]
-    return state
+    if result.returncode == 0 and state.get("enabled") is enabled:
+        return state
+    detail = (result.stderr or result.stdout or fallback).strip()
+    return fail_state(detail, fallback, state)
 
 
 def enable() -> dict:
@@ -109,42 +110,23 @@ def enable() -> dict:
             text=True,
             timeout=120,
         )
-        state = plugin_state()
-        if result.returncode != 0 or not state.get("enabled"):
-            detail = (result.stderr or result.stdout or "could not install the plugin").strip()
-            return fail_state(detail)
-        return state
-    result = omarchy("enable")
-    state = plugin_state()
-    if result.returncode != 0 or not state.get("enabled"):
-        detail = (result.stderr or result.stdout or "could not enable the plugin").strip()
-        return fail_state(detail)
-    return state
+        return settle(result, "could not install the plugin", True)
+    return settle(omarchy("enable"), "could not enable the plugin", True)
 
 
 def disable() -> dict:
-    result = omarchy("disable")
-    state = plugin_state()
-    if result.returncode != 0 or state.get("enabled"):
-        detail = (result.stderr or result.stdout or "could not disable the plugin").strip()
-        state["ok"] = False
-        state["error"] = detail.splitlines()[-1][:180] if detail else "could not disable the plugin"
-    return state
+    return settle(omarchy("disable"), "could not disable the plugin", False)
 
 
 def main() -> int:
     action = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if action == "status":
-        emit(plugin_state())
-        return 0
-    if action == "enable":
-        emit(enable())
-        return 0
-    if action == "disable":
-        emit(disable())
-        return 0
-    emit({"ok": False, "enabled": False, "error": "unknown action"})
-    return 1
+    actions = {"status": plugin_state, "enable": enable, "disable": disable}
+    fn = actions.get(action)
+    if fn is None:
+        emit({"ok": False, "enabled": False, "error": "unknown action"})
+        return 1
+    emit(fn())
+    return 0
 
 
 if __name__ == "__main__":

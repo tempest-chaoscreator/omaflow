@@ -80,9 +80,7 @@ Column {
     var out = []
     var i
     for (i = 0; i < members.length; i++) {
-      var row = ({})
-      var src = members[i]
-      for (var k in src) row[k] = src[k]
+      var row = Cc.copyMap(members[i])
       row.inMode = true
       out.push(row)
     }
@@ -144,8 +142,7 @@ Column {
       for (var m = 0; m < keys.length; m++) {
         var found = rowByKey(keys[m])
         if (!found) continue
-        var copy = ({})
-        for (var k in found) copy[k] = found[k]
+        var copy = Cc.copyMap(found)
         copy.sharedHost = true
         sharedRows.push(copy)
       }
@@ -368,7 +365,9 @@ Column {
   }
 
   function rpmText(row) {
-    var live = row ? liveChannel(row.key) : null
+    var map = service && service.channelLive
+    var reading = map && row && row.key ? map[row.key] : null
+    var live = reading || (row ? liveChannel(row.key) : null)
     var rpm = Number(live ? live.rpm : (row && row.rpm))
     return isFinite(rpm) ? Math.round(rpm) + " rpm" : ""
   }
@@ -416,8 +415,7 @@ Column {
 
   function togglePick(key) {
     if (groupedKey(key)) return
-    var next = ({})
-    for (var k in picked) next[k] = picked[k]
+    var next = Cc.copyMap(picked)
     next[key] = !next[key]
     picked = next
   }
@@ -428,6 +426,18 @@ Column {
     return out
   }
 
+  function anyPump(rows) {
+    var list = rows || []
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].isPump) return true
+    return false
+  }
+
+  function silentPace(isPump) {
+    if (isPump || !service || service.silentRamp !== true || !service.silentRampUid) return ""
+    if (!mode || String(mode.name || "").toLowerCase() !== "silent") return ""
+    return String(service.silentRampUid)
+  }
+
   function addChannel(channel) {
     if (!service || !mode) return
     var temp = sourceFor([channel])
@@ -436,7 +446,7 @@ Column {
       service.bindChannel(mode.uid, channel.deviceUid, channel.name, uid, function() {
         selectRow(channel.key)
       })
-    })
+    }, silentPace(channel.isPump))
   }
 
   function toggleChannel(row) {
@@ -457,7 +467,9 @@ Column {
       service.releaseChannel(mode.uid, row.deviceUid, row.name)
       return
     }
-    var uid = group.profileUid || ""
+    // A group's fans share one curve inside this mode. Another mode gets its
+    // own curve, even when the speeds are the same.
+    var uid = Cc.modeGroupProfile(mode, service.modes, group.members)
     if (!uid) {
       ensureSharedCurve(group, row)
       return
@@ -480,14 +492,10 @@ Column {
     for (var n = 0; n < chosen.length; n++) floor = Math.max(floor, Number(chosen[n].minDuty) || 0)
     var temp = sourceFor(chosen)
     service.createGraph(group.name || "Group", Cc.defaultPoints(floor >= 50), temp, floor, function(uid) {
-      var copy = ({})
-      for (var k in group) copy[k] = group[k]
-      copy.profileUid = uid
-      service.rememberGroup(copy)
       if (row && mode) service.bindChannel(mode.uid, row.deviceUid, row.name, uid, function() {
         selectRow(row.key)
       })
-    })
+    }, silentPace(anyPump(chosen)))
   }
 
   function makeGroup() {
@@ -510,7 +518,7 @@ Column {
         picked = ({})
         groupName = ""
       })
-    })
+    }, silentPace(anyPump(chosen)))
   }
 
   function profileUidFor(row) {
@@ -518,10 +526,10 @@ Column {
     // The mode's own profile wins. A shared group only fills in when this
     // mode has not assigned one, so another mode's curve is not reused.
     if (row.profileUid) return row.profileUid
-    if (!row.inMode) return ""
+    if (!row.inMode || !mode) return ""
     var shared = sharedFor(row.key)
-    if (shared && shared.profileUid) return shared.profileUid
-    return ""
+    if (!shared) return ""
+    return Cc.modeGroupProfile(mode, service.modes, shared.members)
   }
 
   function rowFloor(row) {
@@ -535,8 +543,7 @@ Column {
     return floor
   }
 
-  // Drafts stay on this mode. Two modes can store the same CoolerControl
-  // profile uid, and a shared key would make Fixed's edit draw on Hell.
+  // Drafts are keyed by mode and profile, so an edit stays on this mode.
   function draftKey(profileUid) {
     if (!mode || !mode.uid || !profileUid) return ""
     return mode.uid + "\n" + profileUid
@@ -560,8 +567,7 @@ Column {
   function rememberDraft(uid, points) {
     var key = draftKey(uid)
     if (!key) return
-    var next = ({})
-    for (var k in drafts) next[k] = drafts[k]
+    var next = Cc.copyMap(drafts)
     var copy = []
     var src = points || []
     var i
@@ -656,17 +662,6 @@ Column {
     var gap = Style.space(8)
     var cols = columnCount(avail)
     return Math.max(1, Math.floor((avail - gap * (cols - 1)) / cols))
-  }
-
-  function fanCaption(row) {
-    if (!row) return ""
-    var bits = [chipText(row)]
-    var now = tempNow(row)
-    if (isFinite(now) && now >= 0) bits.push(Math.round(now) + "°")
-    if (row.isPump) bits.push("floor 50%")
-    var rpmLabel = rpmText(row)
-    if (rpmLabel) bits.push(rpmLabel)
-    return bits.join("  ·  ")
   }
 
   function navAt() {
@@ -865,8 +860,7 @@ Column {
     if (!key) return false
     var entry = Cc.pushCurveHistory(curveHistory[key], graphPoints, points, 40)
     if (!entry) return false
-    var next = ({})
-    for (var k in curveHistory) next[k] = curveHistory[k]
+    var next = Cc.copyMap(curveHistory)
     next[key] = entry
     curveHistory = next
     return true
@@ -886,8 +880,7 @@ Column {
     if (!entry || !entry.steps) return
     var index = (Number(entry.index) || 0) + dir
     if (index < 0 || index >= entry.steps.length) return
-    var next = ({})
-    for (var k in curveHistory) next[k] = curveHistory[k]
+    var next = Cc.copyMap(curveHistory)
     next[key] = { steps: entry.steps, index: index }
     curveHistory = next
     writeGraphDrafts(entry.steps[index])
@@ -960,7 +953,8 @@ Column {
     var now = tempNow(row)
     if (isFinite(now) && now >= 0) bits.push("now " + Math.round(now) + "° " + (deviceKind(row) === "GPU" ? "GPU" : "CPU"))
     if (!linked && selectedGroup) bits.push(selectedGroup.name)
-    if (row.isPump) bits.push("floor 50%")
+    var floorLabel = Cc.floorCaption(row.isPump, row.minDuty)
+    if (floorLabel) bits.push(floorLabel)
     if (!graphLive && row.fixed !== null && row.fixed !== undefined)
       bits.push("fixed " + row.fixed + "%")
     var rpmLabel = rpmText(row)

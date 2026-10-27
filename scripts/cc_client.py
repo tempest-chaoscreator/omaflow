@@ -20,6 +20,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -47,9 +48,11 @@ UI_PATH = TOKEN_PATH.with_name("ui.json")
 PACK_PATH = TOKEN_PATH.with_name("curve-pack.json")
 THEME_COLORS = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
 _TEXT_STOPS = {9, 10, 11, 12, 14, 16, 20}
-_LCD_STOPS = {2, 5, 10, 30, 60}
-_LCD_FACES = ("liquid", "cpu", "cpu-gpu", "cpu-liquid", "omarchy", "omarchy-time")
+_LCD_STOPS = {0, 2, 5, 10, 30, 60}
+_LCD_FACES = ("liquid", "cpu", "cpu-gpu", "cpu-liquid", "omarchy", "omarchy-time", "picture")
 _LOGO_FACES = ("omarchy", "omarchy-time")
+_STILL_FACES = _LOGO_FACES + ("picture",)
+_PICTURE_LIMIT = 20 * 1024 * 1024
 # First look at a channel whose saved view never recorded Sync or Off.
 _lcd_mode_cache: dict[str, str] = {}
 _FILE_LIMIT = 1_000_000
@@ -69,14 +72,41 @@ def emit(obj: dict) -> None:
         sys.stdout.flush()
 
 
-def _store_token(token: str) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _write_all(fd: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
+
+
+def _nofollow_flags(base: int, nonblock: bool = False) -> int:
+    """Refuse a symlink. Directory walks leave O_NONBLOCK off."""
+    flags = base
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if nonblock and hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    return flags
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    """Create or replace a 0600 file. A symlink is left untouched."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    fd = os.open(path, flags, 0o600)
     try:
-        os.write(fd, (token + "\n").encode("utf-8"))
+        _write_all(fd, payload)
     finally:
         os.close(fd)
-    os.chmod(TOKEN_PATH, 0o600)
+    os.chmod(path, 0o600)
+
+
+def _store_token(token: str) -> None:
+    _write_private(TOKEN_PATH, (token + "\n").encode("utf-8"))
 
 
 def _proc_addr(ip: str, port: int) -> str:
@@ -318,8 +348,18 @@ def _daemon_opener(jar: CookieJar | None = None) -> urllib.request.OpenerDirecto
     return urllib.request.build_opener(*handlers)
 
 
+_DAEMON_OPENER: urllib.request.OpenerDirector | None = None
+
+
 def _open(req: urllib.request.Request, timeout: float | None, jar: CookieJar | None = None):
-    return _daemon_opener(jar).open(req, timeout=timeout)
+    # Pairing carries a cookie jar and stays on its own opener. Every other
+    # call shares one. Each connection still identifies the listener.
+    if jar is not None:
+        return _daemon_opener(jar).open(req, timeout=timeout)
+    global _DAEMON_OPENER
+    if _DAEMON_OPENER is None:
+        _DAEMON_OPENER = _daemon_opener(None)
+    return _DAEMON_OPENER.open(req, timeout=timeout)
 
 
 def pair(password: str) -> dict:
@@ -391,44 +431,44 @@ def _clean_groups(groups: object) -> list:
     return clean
 
 
-def read_groups() -> dict:
+def _read_json(path: Path) -> object | None:
     try:
-        data = json.loads(GROUPS_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"groups": []}
+        return None
+
+
+def read_groups() -> dict:
+    data = _read_json(GROUPS_PATH)
     if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
         return {"groups": []}
     return {"groups": _clean_groups(data.get("groups"))}
 
 
 def write_groups(data: dict) -> None:
-    GROUPS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"groups": _clean_groups(data.get("groups") if isinstance(data, dict) else None)}, indent=2).encode("utf-8")
-    fd = os.open(GROUPS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    os.chmod(GROUPS_PATH, 0o600)
+    payload = json.dumps(
+        {"groups": _clean_groups(data.get("groups") if isinstance(data, dict) else None)},
+        indent=2,
+    ).encode("utf-8")
+    _write_private(GROUPS_PATH, payload)
 
 
 def read_links() -> dict:
     """Per-card curve link flags. Missing keys use the app defaults."""
-    try:
-        data = json.loads(LINKS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"links": {}}
+    data = _read_json(LINKS_PATH)
     raw = data.get("links") if isinstance(data, dict) else None
     if not isinstance(raw, dict):
         return {"links": {}}
     clean = {}
+    examined = 0
     for key, value in raw.items():
+        examined += 1
+        if examined > 200:
+            break
         if not isinstance(key, str) or len(key) > 80:
             continue
         if isinstance(value, bool):
             clean[key] = value
-        if len(clean) >= 200:
-            break
     return {"links": clean}
 
 
@@ -437,36 +477,28 @@ def _clean_hidden(raw: object) -> dict:
     if not isinstance(raw, dict):
         return {}
     clean = {}
+    examined = 0
     for key, value in raw.items():
+        examined += 1
+        if examined > 200:
+            break
         if not isinstance(key, str) or not key or len(key) > 80:
             continue
         if value is True:
             clean[key] = True
-        if len(clean) >= 200:
-            break
     return clean
 
 
 def read_hidden() -> dict:
-    try:
-        data = json.loads(HIDDEN_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"devices": {}}
+    data = _read_json(HIDDEN_PATH)
     raw = data.get("devices") if isinstance(data, dict) else None
     return {"devices": _clean_hidden(raw)}
 
 
 def write_hidden(data: dict) -> None:
     raw = data.get("devices") if isinstance(data, dict) else None
-    clean = _clean_hidden(raw)
-    HIDDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"devices": clean}, indent=2).encode("utf-8")
-    fd = os.open(HIDDEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    os.chmod(HIDDEN_PATH, 0o600)
+    payload = json.dumps({"devices": _clean_hidden(raw)}, indent=2).encode("utf-8")
+    _write_private(HIDDEN_PATH, payload)
 
 
 def _lcd_seconds(value: object) -> int:
@@ -477,24 +509,41 @@ def _lcd_seconds(value: object) -> int:
     return seconds if seconds in _LCD_STOPS else 5
 
 
-def read_ui() -> dict:
-    default = {
-        "dynamicScale": False,
-        "pinGroups": False,
-        "textFollow": True,
-        "textSize": 12,
-        "showBar": True,
-        # Absent means the plugin keeps drawing the pump. Only an explicit false stops it.
-        "lcdBackground": True,
-        "lcdSeconds": 5,
-        "lcdThemeSync": False,
-    }
-    try:
-        raw = json.loads(UI_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
-    if not isinstance(raw, dict):
-        return default
+def _ui_text(value: object, limit: int) -> str:
+    text = str(value or "").replace("\n", "").replace("\r", "").replace("\x00", "")
+    if len(text) > limit:
+        return ""
+    return text
+
+
+def _ui_binds(raw: object) -> list:
+    """Silent-ramp undo records. A bad or huge list is dropped, not applied."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for row in raw[:128]:
+        if not isinstance(row, dict):
+            continue
+        device = _ui_text(row.get("deviceUid"), 80)
+        channel = _ui_text(row.get("channel"), 80)
+        profile = _ui_text(row.get("profileUid"), 80)
+        clone = _ui_text(row.get("cloneUid"), 80)
+        prev = _ui_text(row.get("prevFunction"), 80)
+        if any(ch in device + channel for ch in ("/", "?", "#", "\\")):
+            continue
+        if not device and not channel and not profile and not clone:
+            continue
+        out.append({
+            "deviceUid": device,
+            "channel": channel,
+            "profileUid": profile,
+            "cloneUid": clone,
+            "prevFunction": prev or "0",
+        })
+    return out
+
+
+def _ui_from(raw: dict) -> dict:
     try:
         size = int(raw.get("textSize"))
     except (TypeError, ValueError):
@@ -511,18 +560,38 @@ def read_ui() -> dict:
         "lcdBackground": raw.get("lcdBackground") is not False,
         "lcdSeconds": _lcd_seconds(raw.get("lcdSeconds")),
         "lcdThemeSync": raw.get("lcdThemeSync") is True,
+        # Absent means the 50% pump floor stays on.
+        "pumpFloor": raw.get("pumpFloor") is not False,
+        "silentRamp": raw.get("silentRamp") is True,
+        "silentRampUid": _ui_text(raw.get("silentRampUid"), 80),
+        "silentRampBinds": _ui_binds(raw.get("silentRampBinds")),
     }
+
+
+def read_ui() -> dict:
+    default = _ui_from({})
+    raw = _read_json(UI_PATH)
+    if not isinstance(raw, dict):
+        return default
+    return _ui_from(raw)
+
+
+def _copy_ui_flags(clean: dict, data: dict, keys: tuple[str, ...], exact_true: bool) -> None:
+    """Copy flags that are present in this patch. Absent keys stay as read_ui left them.
+
+    exact_true stores only a real true. The other flags stay on for every value except false.
+    """
+    for key in keys:
+        if key not in data:
+            continue
+        clean[key] = data.get(key) is True if exact_true else data.get(key) is not False
 
 
 def write_ui(data: dict) -> None:
     clean = read_ui()
     if isinstance(data, dict):
-        if "dynamicScale" in data:
-            clean["dynamicScale"] = data.get("dynamicScale") is True
-        if "pinGroups" in data:
-            clean["pinGroups"] = data.get("pinGroups") is True
-        if "textFollow" in data:
-            clean["textFollow"] = data.get("textFollow") is not False
+        _copy_ui_flags(clean, data, ("dynamicScale", "pinGroups", "lcdThemeSync", "silentRamp"), True)
+        _copy_ui_flags(clean, data, ("textFollow", "showBar", "lcdBackground", "pumpFloor"), False)
         if "textSize" in data:
             try:
                 size = int(data.get("textSize"))
@@ -530,14 +599,12 @@ def write_ui(data: dict) -> None:
                 size = clean["textSize"]
             if size in _TEXT_STOPS:
                 clean["textSize"] = size
-        if "showBar" in data:
-            clean["showBar"] = data.get("showBar") is not False
-        if "lcdBackground" in data:
-            clean["lcdBackground"] = data.get("lcdBackground") is not False
         if "lcdSeconds" in data:
             clean["lcdSeconds"] = _lcd_seconds(data.get("lcdSeconds"))
-        if "lcdThemeSync" in data:
-            clean["lcdThemeSync"] = data.get("lcdThemeSync") is True
+        if "silentRampUid" in data:
+            clean["silentRampUid"] = _ui_text(data.get("silentRampUid"), 80)
+        if "silentRampBinds" in data:
+            clean["silentRampBinds"] = _ui_binds(data.get("silentRampBinds"))
     _write_private(UI_PATH, json.dumps(clean, indent=2).encode("utf-8"))
 
 
@@ -595,10 +662,7 @@ def valid_curve_pack(data: object) -> bool:
 
 
 def read_pack() -> dict:
-    try:
-        raw = json.loads(PACK_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    raw = _read_json(PACK_PATH)
     if not valid_curve_pack(raw):
         return {}
     return raw
@@ -676,39 +740,21 @@ def write_user_json(path_text: str, body: dict) -> dict:
     return {"ok": True, "status": 200, "error": "", "body": {"path": str(target)}}
 
 
-def _write_private(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
-
-
 def write_links(data: dict) -> None:
     raw = data.get("links") if isinstance(data, dict) else None
     if not isinstance(raw, dict):
         raw = {}
     clean = {}
+    examined = 0
     for key, value in raw.items():
+        examined += 1
+        if examined > 200:
+            break
         if not isinstance(key, str) or len(key) > 80:
             continue
         if isinstance(value, bool):
             clean[key] = value
-        if len(clean) >= 200:
-            break
-    LINKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"links": clean}, indent=2).encode("utf-8")
-    fd = os.open(LINKS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    os.chmod(LINKS_PATH, 0o600)
+    _write_private(LINKS_PATH, json.dumps({"links": clean}, indent=2).encode("utf-8"))
 
 
 def read_token() -> str:
@@ -758,19 +804,6 @@ def _face_labels(face: str) -> tuple[str, str]:
     return ("LIQUID", "")
 
 
-def _draw_center(draw, size: int, text: str, y: float, font, fill) -> None:
-    box = draw.textbbox((0, 0), text, font=font)
-    width = box[2] - box[0]
-    draw.text(
-        ((size - width) / 2 - box[0], y - box[1]),
-        text,
-        font=font,
-        fill=fill,
-        stroke_width=2,
-        stroke_fill=(0, 0, 0),
-    )
-
-
 def _draw_at(draw, cx: float, y: float, text: str, font, fill) -> None:
     box = draw.textbbox((0, 0), text, font=font)
     width = box[2] - box[0]
@@ -784,79 +817,9 @@ def _draw_at(draw, cx: float, y: float, text: str, font, fill) -> None:
     )
 
 
-def _render_round(face: str, primary: str, secondary: str, accent: str, accent2: str, angle: int, size: int) -> bytes:
-    """Upright frame, then turned clockwise by `angle`. The daemon orientation stays 0.
-
-    Stroke and type scale from the 320 design so a 240 circle and a 640 circle match it.
-    """
-    from PIL import Image, ImageDraw
-    image = Image.new("RGB", (size, size), _LCD_BG)
-    draw = ImageDraw.Draw(image)
-    ink = _parse_hex(accent)
-    ink2 = _parse_hex(accent2 or accent)
-    scale = size / 320
-    margin = max(8, int(round(22 * scale)))
-    stroke = max(4, int(round(14 * scale)))
-    box = [margin, margin, size - margin - 1, size - margin - 1]
-    combo = face in ("cpu-gpu", "cpu-liquid")
+def _paint_readings(draw, width: float, height: float, scale: float, combo: bool, number: str, other: str, left: str, right: str, ink, ink2) -> None:
+    """Shared type for the round glass and the square panel. Positions stay proportional."""
     if combo:
-        # Pillow measures arcs clockwise from 3 o'clock. Left half, then right half.
-        draw.arc(box, start=90, end=270, fill=ink, width=stroke)
-        draw.arc(box, start=270, end=90, fill=ink2, width=stroke)
-    else:
-        draw.ellipse(box, outline=ink, width=stroke)
-    left, right = _face_labels(face)
-    number = primary if primary else "—"
-    if combo:
-        other = secondary if secondary else "—"
-        number_font = _lcd_font(max(12, int(round(78 * scale))))
-        label_font = _lcd_font(max(10, int(round(22 * scale))))
-        _draw_at(draw, size * 0.34, size * 0.40, number, number_font, ink)
-        _draw_at(draw, size * 0.66, size * 0.40, other, number_font, ink2)
-        _draw_at(draw, size * 0.34, size * 0.62, left, label_font, ink)
-        _draw_at(draw, size * 0.66, size * 0.62, right, label_font, ink2)
-        draw.line(
-            [(size / 2, size * 0.34), (size / 2, size * 0.70)],
-            fill=(250, 252, 251),
-            width=max(1, int(round(2 * scale))),
-        )
-    else:
-        number_font = _lcd_font(max(16, int(round(104 * scale))))
-        label_font = _lcd_font(max(10, int(round(26 * scale))))
-        _draw_center(draw, size, number, size * 0.36, number_font, ink)
-        _draw_center(draw, size, left, size * 0.62, label_font, ink)
-    turned = int(angle) % 360
-    if turned:
-        image = image.rotate(-turned, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=_LCD_BG)
-    buf = io.BytesIO()
-    image.save(buf, "PNG")
-    image.close()
-    return buf.getvalue()
-
-
-def _render_square(face: str, primary: str, secondary: str, accent: str, accent2: str, angle: int, width: int, height: int) -> bytes:
-    """Square-panel frame. Rotation stays inside the reported pixel buffer."""
-    from PIL import Image, ImageDraw
-    image = Image.new("RGB", (width, height), _LCD_BG)
-    draw = ImageDraw.Draw(image)
-    ink = _parse_hex(accent)
-    ink2 = _parse_hex(accent2 or accent)
-    scale = min(width, height) / 320
-    margin = max(8, int(round(22 * scale)))
-    stroke = max(4, int(round(14 * scale)))
-    right_edge = width - margin - 1
-    bottom = height - margin - 1
-    combo = face in ("cpu-gpu", "cpu-liquid")
-    draw.rectangle([margin, margin, right_edge, bottom], outline=ink, width=stroke)
-    if combo:
-        mid = width / 2
-        draw.line([(mid, margin), (right_edge, margin)], fill=ink2, width=stroke)
-        draw.line([(right_edge, margin), (right_edge, bottom)], fill=ink2, width=stroke)
-        draw.line([(mid, bottom), (right_edge, bottom)], fill=ink2, width=stroke)
-    left, right = _face_labels(face)
-    number = primary if primary else "—"
-    if combo:
-        other = secondary if secondary else "—"
         number_font = _lcd_font(max(12, int(round(78 * scale))))
         label_font = _lcd_font(max(10, int(round(22 * scale))))
         _draw_at(draw, width * 0.34, height * 0.40, number, number_font, ink)
@@ -868,18 +831,219 @@ def _render_square(face: str, primary: str, secondary: str, accent: str, accent2
             fill=(250, 252, 251),
             width=max(1, int(round(2 * scale))),
         )
+        return
+    number_font = _lcd_font(max(16, int(round(104 * scale))))
+    label_font = _lcd_font(max(10, int(round(26 * scale))))
+    _draw_at(draw, width / 2, height * 0.36, number, number_font, ink)
+    _draw_at(draw, width / 2, height * 0.62, left, label_font, ink)
+
+
+def _plate(face: str, primary: str, secondary: str, accent: str, accent2: str, width: int, height: int):
+    """Ink, stroke, and the two readings. Both plates scale from the 320 design."""
+    ink = _parse_hex(accent)
+    ink2 = _parse_hex(accent2 or accent)
+    scale = min(width, height) / 320
+    margin = max(8, int(round(22 * scale)))
+    stroke = max(4, int(round(14 * scale)))
+    combo = face in ("cpu-gpu", "cpu-liquid")
+    left, right = _face_labels(face)
+    number = primary if primary else "—"
+    other = secondary if secondary else "—"
+    return ink, ink2, scale, margin, stroke, combo, number, other, left, right
+
+
+def _render_round(face: str, primary: str, secondary: str, accent: str, accent2: str, angle: int, size: int) -> bytes:
+    """Upright frame, then turned clockwise by `angle`. The daemon orientation stays 0."""
+    from PIL import Image, ImageDraw
+    image = Image.new("RGB", (size, size), _LCD_BG)
+    draw = ImageDraw.Draw(image)
+    ink, ink2, scale, margin, stroke, combo, number, other, left, right = _plate(
+        face, primary, secondary, accent, accent2, size, size,
+    )
+    box = [margin, margin, size - margin - 1, size - margin - 1]
+    if combo:
+        # Pillow measures arcs clockwise from 3 o'clock. Left half, then right half.
+        draw.arc(box, start=90, end=270, fill=ink, width=stroke)
+        draw.arc(box, start=270, end=90, fill=ink2, width=stroke)
     else:
-        number_font = _lcd_font(max(16, int(round(104 * scale))))
-        label_font = _lcd_font(max(10, int(round(26 * scale))))
-        _draw_center(draw, width, number, height * 0.36, number_font, ink)
-        _draw_center(draw, width, left, height * 0.62, label_font, ink)
-    turned = int(angle) % 360
-    if turned:
-        image = image.rotate(-turned, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=_LCD_BG)
-    buf = io.BytesIO()
-    image.save(buf, "PNG")
-    image.close()
-    return buf.getvalue()
+        draw.ellipse(box, outline=ink, width=stroke)
+    _paint_readings(draw, size, size, scale, combo, number, other, left, right, ink, ink2)
+    return lcd_logo.bake_png(image, angle, _LCD_BG)
+
+
+def _render_square(face: str, primary: str, secondary: str, accent: str, accent2: str, angle: int, width: int, height: int) -> bytes:
+    """Square-panel frame. Rotation stays inside the reported pixel buffer."""
+    from PIL import Image, ImageDraw
+    image = Image.new("RGB", (width, height), _LCD_BG)
+    draw = ImageDraw.Draw(image)
+    ink, ink2, scale, margin, stroke, combo, number, other, left, right = _plate(
+        face, primary, secondary, accent, accent2, width, height,
+    )
+    right_edge = width - margin - 1
+    bottom = height - margin - 1
+    draw.rectangle([margin, margin, right_edge, bottom], outline=ink, width=stroke)
+    if combo:
+        mid = width / 2
+        draw.line([(mid, margin), (right_edge, margin)], fill=ink2, width=stroke)
+        draw.line([(right_edge, margin), (right_edge, bottom)], fill=ink2, width=stroke)
+        draw.line([(mid, bottom), (right_edge, bottom)], fill=ink2, width=stroke)
+    _paint_readings(draw, width, height, scale, combo, number, other, left, right, ink, ink2)
+    return lcd_logo.bake_png(image, angle, _LCD_BG)
+
+
+def _lcd_view() -> dict | None:
+    view = _read_json(LCD_VIEW_PATH)
+    return view if isinstance(view, dict) else None
+
+
+def _bound_int(value: object, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(100, number))
+
+
+def _picture_path_from_view() -> str:
+    view = _lcd_view()
+    if view is None:
+        return ""
+    return str(view.get("picture") or "")
+
+
+def _picture_fd(raw: object) -> tuple[int, str] | None:
+    """Open one regular image under the home directory. A symlink is refused.
+
+    The walk opens each directory with O_NOFOLLOW, so a link in the middle
+    cannot point the read outside home. The caller closes the file descriptor.
+    """
+    text = str(raw or "").strip()
+    if not text or len(text) > 4096 or "\x00" in text or not text.startswith("/"):
+        return None
+    path = Path(text)
+    if ".." in path.parts:
+        return None
+    try:
+        home = Path.home().resolve()
+        rel = path.relative_to(home)
+    except (OSError, ValueError):
+        return None
+    if not rel.parts:
+        return None
+    dir_flags = _nofollow_flags(os.O_RDONLY | os.O_DIRECTORY)
+    file_flags = _nofollow_flags(os.O_RDONLY, True)
+    try:
+        dir_fd = os.open(home, dir_flags)
+    except OSError:
+        return None
+    fd = -1
+    try:
+        for part in rel.parts[:-1]:
+            if part in ("", ".", ".."):
+                return None
+            nxt = os.open(part, dir_flags, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = nxt
+        leaf = rel.parts[-1]
+        if leaf in ("", ".", ".."):
+            return None
+        fd = os.open(leaf, file_flags, dir_fd=dir_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _PICTURE_LIMIT:
+            os.close(fd)
+            return None
+        ident = "%s:%s:%s" % (getattr(info, "st_mtime_ns", int(info.st_mtime)), info.st_size, path)
+        return fd, ident
+    except OSError:
+        if fd >= 0:
+            os.close(fd)
+        return None
+    finally:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+
+
+def _load_picture(raw: object) -> tuple[bytes, str] | None:
+    opened = _picture_fd(raw)
+    if not opened:
+        return None
+    fd, ident = opened
+    try:
+        info = os.fstat(fd)
+        blob = bytearray()
+        while len(blob) < info.st_size:
+            chunk = os.read(fd, min(1024 * 1024, info.st_size - len(blob)))
+            if not chunk:
+                break
+            blob.extend(chunk)
+        if len(blob) != info.st_size:
+            return None
+        return bytes(blob), ident
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _picture_scale(value: object) -> int:
+    """100 fits the image. Smaller leaves a margin. Larger crops from the center."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 100
+    return max(50, min(300, number))
+
+
+def _render_picture_png(blob: bytes, width: int, height: int, shape: str, angle: int, scale_pct: int = 100) -> bytes:
+    """Place the image on the AIO LCD, centered. Round glass is masked. The dial angle is baked in."""
+    from PIL import Image, ImageDraw
+
+    Image.MAX_IMAGE_PIXELS = 24_000_000
+    src = Image.open(io.BytesIO(blob))
+    try:
+        try:
+            src.seek(0)
+        except EOFError:
+            pass
+        frame = src.convert("RGB")
+    finally:
+        src.close()
+    w = max(32, min(1280, int(width or 320)))
+    h = max(32, min(1280, int(height or 320)))
+    fit = min(w / max(1, frame.width), h / max(1, frame.height))
+    scale = fit * (_picture_scale(scale_pct) / 100)
+    fitted = frame.resize(
+        (max(1, int(round(frame.width * scale))), max(1, int(round(frame.height * scale)))),
+        Image.Resampling.LANCZOS,
+    )
+    frame.close()
+    canvas = Image.new("RGB", (w, h), _LCD_BG)
+    canvas.paste(fitted, ((w - fitted.width) // 2, (h - fitted.height) // 2))
+    fitted.close()
+    if str(shape or "round") != "square":
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, w - 1, h - 1), fill=255)
+        masked = Image.new("RGB", (w, h), _LCD_BG)
+        masked.paste(canvas, mask=mask)
+        canvas.close()
+        mask.close()
+        canvas = masked
+    return lcd_logo.bake_png(canvas, angle, _LCD_BG, optimize=True)
+
+
+def render_picture_png(path: str, width: int, height: int, shape: str, angle: int, scale: object = None) -> tuple[bytes, str] | None:
+    loaded = _load_picture(path)
+    if not loaded:
+        return None
+    blob, ident = loaded
+    try:
+        return _render_picture_png(blob, width, height, shape, angle, _picture_scale(scale)), ident
+    except Exception as err:  # noqa: BLE001 — a bad image must not stop the helper
+        sys.stderr.write("omaflow lcd picture: %s\n" % type(err).__name__)
+        sys.stderr.flush()
+        return None
 
 
 def render_lcd_png(
@@ -918,10 +1082,7 @@ def render_lcd_png(
         glyph = Image.open(io.BytesIO(tile))
         base.paste(glyph, ((w - glyph.width) // 2, (h - glyph.height) // 2))
         glyph.close()
-        buf = io.BytesIO()
-        base.save(buf, "PNG")
-        base.close()
-        return buf.getvalue()
+        return lcd_logo.bake_png(base, 0, _LCD_BG)
     return _render_square(face, primary, secondary, accent, accent2, angle, w, h)
 
 
@@ -986,8 +1147,19 @@ def _upload_mark(
     secondary: str,
     brightness: int,
     angle: int,
+    picture_id: str = "",
+    picture_scale: object = None,
 ) -> str:
-    """The lease key. Logo faces ignore temperatures. The clock changes once a minute."""
+    """The lease key. Logo faces ignore temperatures. The clock changes once a minute.
+
+    A picture's second field is the zoom. The file identity alone would treat
+    two sizes of the same file as the plate already on the cooler.
+    """
+    if face == "picture":
+        return _lcd_mark(
+            shape, width, height, face, picture_id, str(_picture_scale(picture_scale)),
+            "", "", brightness, angle,
+        )
     if face in _LOGO_FACES:
         theme_accent, _second, _background, _foreground = _theme_fields()
         lit = accent if re.fullmatch(r"#[0-9A-Fa-f]{6}", str(accent or "")) else (theme_accent or "#b59790")
@@ -1004,15 +1176,29 @@ def _upload_mark(
 
 
 def _with_lcd_lease(update):
-    """Exclusive access to the one-writer stamp shared by the window and the plugin."""
-    LCD_LEASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(LCD_LEASE_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+    """Exclusive access to the one-writer stamp shared by the window and the plugin.
+
+    A symlink is left untouched. Anything that is not a regular file is ignored,
+    so a replaced lease cannot block the helper or be followed.
+    """
     try:
+        LCD_LEASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        flags = _nofollow_flags(os.O_RDWR | os.O_CREAT, True)
+        fd = os.open(LCD_LEASE_PATH, flags, 0o600)
+    except OSError:
+        return {}
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return {}
         fcntl.flock(fd, fcntl.LOCK_EX)
-        os.chmod(LCD_LEASE_PATH, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
         blob = b""
-        while len(blob) <= 16384:
-            chunk = os.read(fd, 4096)
+        while len(blob) < 16384:
+            chunk = os.read(fd, min(4096, 16384 - len(blob)))
             if not chunk:
                 break
             blob += chunk
@@ -1028,10 +1214,15 @@ def _with_lcd_lease(update):
             raw = json.dumps(nxt).encode("utf-8")
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
-            os.write(fd, raw)
+            _write_all(fd, raw)
         return prev
+    except OSError:
+        return {}
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
         os.close(fd)
 
 
@@ -1046,7 +1237,9 @@ def lcd_claim(mark: str, interval: float) -> bool:
             prev_at = float(prev.get("at") or 0)
         except (TypeError, ValueError):
             prev_at = 0.0
-        if str(prev.get("mark") or "") == mark and now - prev_at < window:
+        # A backward clock step makes the age negative. That stamp is stale.
+        age = now - prev_at
+        if str(prev.get("mark") or "") == mark and age >= 0 and age < window:
             decision["go"] = False
             return None
         decision["go"] = True
@@ -1108,7 +1301,7 @@ def _lcd_dim(value: object) -> int:
 
 
 def _face_text(face: str, cpu: object, gpu: object, coolant: object) -> tuple[str, str]:
-    if face in _LOGO_FACES:
+    if face in _STILL_FACES:
         return "", ""
     if face in ("cpu", "cpu-gpu", "cpu-liquid"):
         primary = _whole(cpu)
@@ -1169,11 +1362,8 @@ def lcd_keep(msg: dict) -> dict:
     """
     if read_ui().get("lcdBackground") is False:
         return _lcd_skip("background-off")
-    try:
-        view = json.loads(LCD_VIEW_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _lcd_skip("no-view")
-    if not isinstance(view, dict):
+    view = _lcd_view()
+    if view is None:
         return _lcd_skip("no-view")
     device = str(msg.get("device") or "")
     channel = str(msg.get("channel") or "")
@@ -1187,18 +1377,12 @@ def lcd_keep(msg: dict) -> dict:
     if not live:
         return _lcd_skip("lcd-off")
     face = str(view.get("face") or "liquid")
+    # An unknown face is left alone. Substituting Liquid is what painted over
+    # a picture this helper did not know how to draw.
     if face not in _LCD_FACES:
-        face = "liquid"
-    try:
-        brightness = int(view.get("brightness"))
-    except (TypeError, ValueError):
-        brightness = 80
-    brightness = max(0, min(100, brightness))
-    try:
-        saturation = int(view.get("saturation"))
-    except (TypeError, ValueError):
-        saturation = 0
-    saturation = max(0, min(100, saturation))
+        return _lcd_skip("other-face")
+    brightness = _bound_int(view.get("brightness"), 80)
+    saturation = _bound_int(view.get("saturation"), 0)
     try:
         angle = int(view.get("angle") or 0)
     except (TypeError, ValueError):
@@ -1208,8 +1392,10 @@ def lcd_keep(msg: dict) -> dict:
     height = _lcd_dim(msg.get("height"))
     device_name = str(msg.get("deviceName") or "")
     shape = detect_shape(device_name, width, height)
+    if face == "picture":
+        return _lcd_skip("still")
     primary, secondary = _face_text(face, msg.get("cpu"), msg.get("gpu"), msg.get("coolant"))
-    if face not in _LOGO_FACES:
+    if face not in _STILL_FACES:
         if primary == "—":
             return _lcd_skip("no-temp")
         if face in ("cpu-gpu", "cpu-liquid") and secondary == "—":
@@ -1217,10 +1403,12 @@ def lcd_keep(msg: dict) -> dict:
     accent, second = _theme_colors()
     ink = _deepen_hex(accent, saturation) if accent else ""
     ink2 = _deepen_hex(second or accent, saturation) if (second or accent) else ""
-    mark = _upload_mark(shape, width, height, face, ink, ink2, primary, secondary, brightness, angle)
-    # A logo plate stays up until its mark changes. Temperature faces still
+    mark = _upload_mark(
+        shape, width, height, face, ink, ink2, primary, secondary, brightness, angle,
+    )
+    # A still plate stays up until its mark changes. Temperature faces still
     # refresh on the interval so a quiet sensor does not look frozen.
-    if face in _LOGO_FACES and lcd_current_mark() == mark:
+    if face in _STILL_FACES and lcd_current_mark() == mark:
         return _lcd_skip("fresh")
     if not lcd_claim(mark, _lcd_seconds(msg.get("interval"))):
         return _lcd_skip("fresh")
@@ -1243,10 +1431,8 @@ def _preview_pixels(width: int, height: int) -> tuple[int, int]:
 
 
 def lcd_preview(msg: dict) -> dict:
-    """Write an upright transparent plate for the dial. This does not touch the cooler."""
+    """Write an upright plate for the dial. This does not touch the cooler."""
     face = str(msg.get("face") or "omarchy")
-    if face not in _LOGO_FACES:
-        face = "omarchy"
     width = _lcd_dim(msg.get("width")) or 320
     height = _lcd_dim(msg.get("height")) or 320
     device_name = str(msg.get("deviceName") or "")
@@ -1260,15 +1446,30 @@ def lcd_preview(msg: dict) -> dict:
     preview_w, preview_h = _preview_pixels(width, height)
     path = Path.home() / ".cache" / "omaflow" / "lcd-preview.png"
     try:
-        png = lcd_logo.render_logo_png(
-            face,
-            lit or "#b59790",
-            preview_w,
-            preview_h,
-            shape,
-            0,
-            clear=True,
-        )
+        if face == "picture":
+            rendered = render_picture_png(
+                str(msg.get("picture") or "") or _picture_path_from_view(),
+                preview_w,
+                preview_h,
+                shape,
+                0,
+                msg.get("scale"),
+            )
+            if not rendered:
+                return {"ok": False, "status": 0, "error": "picture unreadable", "body": None}
+            png = rendered[0]
+        else:
+            if face not in _LOGO_FACES:
+                face = "omarchy"
+            png = lcd_logo.render_logo_png(
+                face,
+                lit or "#b59790",
+                preview_w,
+                preview_h,
+                shape,
+                0,
+                clear=True,
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(png)
         os.chmod(path, 0o600)
@@ -1291,6 +1492,8 @@ def push_lcd_image(
     width: int = 0,
     height: int = 0,
     device_name: str = "",
+    picture: str = "",
+    scale: object = None,
 ) -> dict:
     token = read_token()
     if not token:
@@ -1300,18 +1503,36 @@ def push_lcd_image(
         "square" if str(shape or "round") == "square" else "round"
     )
     # The frame already carries the dial angle. A second daemon orientation would turn it again.
-    png = render_lcd_png(
-        face or "liquid",
-        temp_text or "—",
-        temp2 or "",
-        accent or "#b59790",
-        accent2 or "#87a9b0",
-        int(angle or 0),
-        320,
-        painted,
-        int(width or 0) or None,
-        int(height or 0) or None,
-    )
+    picture_id = ""
+    used_scale = None
+    if str(face or "") == "picture":
+        used_scale = _picture_scale(
+            scale if scale is not None else (_lcd_view() or {}).get("pictureScale")
+        )
+        rendered = render_picture_png(
+            picture or _picture_path_from_view(),
+            int(width or 0) or 320,
+            int(height or 0) or 320,
+            painted,
+            int(angle or 0),
+            used_scale,
+        )
+        if not rendered:
+            return {"ok": False, "status": 0, "error": "picture unreadable", "body": None}
+        png, picture_id = rendered
+    else:
+        png = render_lcd_png(
+            face or "liquid",
+            temp_text or "—",
+            temp2 or "",
+            accent or "#b59790",
+            accent2 or "#87a9b0",
+            int(angle or 0),
+            320,
+            painted,
+            int(width or 0) or None,
+            int(height or 0) or None,
+        )
     body, content_type = _multipart(
         [("mode", "image"), ("brightness", str(level)), ("orientation", "0")],
         "lcd.png",
@@ -1356,6 +1577,8 @@ def push_lcd_image(
                         str(temp2 or ""),
                         level,
                         int(angle or 0) % 360,
+                        picture_id,
+                        used_scale,
                     )
                 )
             except OSError:
@@ -1523,7 +1746,7 @@ def _whole(value) -> str:
 
 
 def _screen_numbers(face: str, devices: list, status: dict) -> tuple[str, str]:
-    if face in _LOGO_FACES:
+    if face in _STILL_FACES:
         return "", ""
     info_by = {d.get("uid"): d for d in devices if isinstance(d, dict)}
     cpu = None
@@ -1590,12 +1813,8 @@ def restore_saved_lcd() -> None:
         sys.stderr.flush()
 
     _own(LCD_VIEW_PATH)
-    try:
-        view = json.loads(LCD_VIEW_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        give_up("saved lcd view is unreadable")
-        return
-    if not isinstance(view, dict):
+    view = _lcd_view()
+    if view is None:
         give_up("saved lcd view is unreadable")
         return
     devices = call("GET", "/devices", None)
@@ -1616,14 +1835,8 @@ def restore_saved_lcd() -> None:
     status_body = status.get("body") if status.get("ok") and isinstance(status.get("body"), dict) else {"devices": []}
     face = str(view.get("face") or "liquid")
     primary, secondary = _screen_numbers(face, devs, status_body)
-    try:
-        brightness = int(view.get("brightness"))
-    except (TypeError, ValueError):
-        brightness = 80
-    try:
-        saturation = int(view.get("saturation"))
-    except (TypeError, ValueError):
-        saturation = 0
+    brightness = _bound_int(view.get("brightness"), 80)
+    saturation = _bound_int(view.get("saturation"), 0)
     try:
         angle = int(view.get("angle") or 0)
     except (TypeError, ValueError):
@@ -1673,6 +1886,16 @@ def _speed_signature(setting: dict) -> tuple[str, str, str] | None:
     return (channel, str(profile or ""), "" if fixed is None else str(fixed))
 
 
+def _mode_setting_rows(mode: dict) -> list:
+    """device_settings is a list of pairs, or a map of device uid to rows."""
+    raw = mode.get("device_settings") if isinstance(mode, dict) else None
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return [[key, value] for key, value in raw.items()]
+    return []
+
+
 def _infer_active_mode() -> str:
     """Mode whose fan and pump assignments match the live device settings.
 
@@ -1708,7 +1931,7 @@ def _infer_active_mode() -> str:
             continue
         compared = 0
         mismatch = False
-        for pair in mode.get("device_settings") or []:
+        for pair in _mode_setting_rows(mode):
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
                 continue
             dev = str(pair[0] or "")
@@ -1767,9 +1990,9 @@ def _request(method: str, path: str, body) -> dict:
         return {"ok": False, "status": 0, "error": str(err), "body": None}
 
 
-def call(method: str, path: str, body) -> dict:
-    result = _request(method, path, body)
-    if not result.get("ok") or method != "GET" or path.rstrip("/") != "/modes-active":
+def _fill_active_mode(result: dict) -> dict:
+    """An empty active mode follows a pump-image upload. Infer it once."""
+    if not result.get("ok"):
         return result
     payload = result.get("body")
     if not isinstance(payload, dict) or payload.get("current_mode_uid"):
@@ -1781,6 +2004,87 @@ def call(method: str, path: str, body) -> dict:
     filled["current_mode_uid"] = inferred
     result["body"] = filled
     return result
+
+
+def call(method: str, path: str, body) -> dict:
+    result = _request(method, path, body)
+    if method != "GET" or path.rstrip("/") != "/modes-active":
+        return result
+    return _fill_active_mode(result)
+
+
+_CATALOG = (
+    ("devices", "/devices"),
+    ("profiles", "/profiles"),
+    ("modes", "/modes"),
+    ("modesActive", "/modes-active"),
+    ("settings", "/settings"),
+    ("functions", "/functions"),
+    ("alerts", "/alerts"),
+    ("status", "/status"),
+    ("calibrations", "/calibrations"),
+    ("calibrationBatch", "/calibrations/batch"),
+)
+
+
+def _exchange(conn: http.client.HTTPConnection, path: str, token: str) -> dict:
+    """One request on an already identified connection. Redirects are not followed."""
+    conn.request(
+        "GET",
+        path,
+        headers={
+            "Host": "%s:%s" % (_DAEMON_HOST, _DAEMON_PORT),
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+            "Connection": "keep-alive",
+        },
+    )
+    res = conn.getresponse()
+    raw = res.read()
+    if res.status in (301, 302, 303, 307, 308):
+        return {"ok": False, "status": res.status, "error": "redirect refused", "body": None}
+    parsed = None
+    if raw:
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            parsed = {"raw": raw.decode("utf-8", "replace")[:400]}
+    if 200 <= res.status < 300:
+        return {"ok": True, "status": res.status, "error": "", "body": parsed}
+    detail = ""
+    if isinstance(parsed, str):
+        detail = parsed[:400]
+    elif raw:
+        detail = raw.decode("utf-8", "replace")[:400]
+    return {"ok": False, "status": res.status, "error": detail or str(res.status), "body": None}
+
+
+def catalog() -> dict:
+    """The window's startup reads, on one connection so the listener is checked once."""
+    token = read_token()
+    if not token:
+        return {"ok": False, "status": 0, "error": "need-token", "body": None}
+    conn = _DaemonConnection(_DAEMON_HOST, _DAEMON_PORT, timeout=8)
+    body: dict = {}
+    try:
+        conn.connect()
+        for key, path in _CATALOG:
+            try:
+                result = _exchange(conn, path, token)
+            except Exception as err:  # noqa: BLE001 — one dropped socket ends the burst
+                body[key] = {"ok": False, "status": 0, "error": str(err), "body": None}
+                break
+            if path == "/modes-active":
+                result = _fill_active_mode(result)
+            body[key] = result
+            status = int(result.get("status") or 0)
+            if status in (301, 302, 303, 307, 308, 401, 403):
+                break
+        return {"ok": True, "status": 200, "error": "", "body": body}
+    except OSError as err:
+        return {"ok": False, "status": 0, "error": str(err), "body": None}
+    finally:
+        conn.close()
 
 
 def _parse_sse(block: str) -> None:
@@ -1813,7 +2117,7 @@ def watch() -> None:
             continue
         announced = False
         req = urllib.request.Request(
-            BASE + "/sse?events=status,modes",
+            BASE + "/sse?events=status,modes,alerts",
             headers={"Authorization": "Bearer " + token, "Accept": "text/event-stream"},
             method="GET",
         )
@@ -1889,330 +2193,15 @@ def lcd_face_check() -> None:
     print("lcd faces ok")
 
 
-_NVIDIA_SMI = "/usr/bin/nvidia-smi"
-_GPU_LOCK = threading.Lock()
-_GPU = {"ok": True, "rows": [], "util": 0.0, "fail": 0, "empty": 0, "running": False}
-_CPU_PREV: tuple | None = None
-_PMON_ROW = re.compile(
-    r"^\s*\d+\s+(\d+)\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.*\S)\s*$"
-)
-
-
-def _user_comm(pid: int) -> str | None:
-    """Command name for a userspace process. Kernel threads have an empty cmdline."""
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return None
-    if not raw.strip(b"\x00"):
-        return None
-    try:
-        name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return name or None
-
-
-def _stat_ticks(pid: int) -> int | None:
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    end = text.rfind(")")
-    if end < 0:
-        return None
-    fields = text[end + 2 :].split()
-    if len(fields) < 13:
-        return None
-    try:
-        return int(fields[11]) + int(fields[12])
-    except ValueError:
-        return None
-
-
-def _cpu_times() -> tuple[int, int] | None:
-    """Aggregate cpu ticks and idle ticks (idle + iowait) from /proc/stat."""
-    try:
-        first = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]
-    except OSError:
-        return None
-    parts = first.split()
-    if not parts or parts[0] != "cpu":
-        return None
-    nums: list[int] = []
-    for part in parts[1:]:
-        try:
-            nums.append(int(part))
-        except ValueError:
-            return None
-    if len(nums) < 5:
-        return None
-    return sum(nums), nums[3] + nums[4]
-
-
-def _share_percent(delta_ticks: int, total_delta: int) -> float:
-    """This process's share of the whole CPU, 0 to 100, not one core."""
-    if delta_ticks <= 0 or total_delta <= 0:
-        return 0.0
-    return delta_ticks / total_delta * 100.0
-
-
-def _cpu_sample() -> tuple[list[dict], float]:
-    """Rows grouped by command, plus total CPU load from 0 to 100.
-
-    percent stays the per-core sample the LED scale already uses.
-    share is the label: that same time as a percent of every core.
-    Idle commands stay in the list so a quiet sample still fills the table.
-    """
-    global _CPU_PREV
-    times = _cpu_times()
-    total = times[0] if times else None
-    idle = times[1] if times else None
-    now = time.monotonic()
-    procs: dict[int, tuple[str, int]] = {}
-    try:
-        names = os.listdir("/proc")
-    except OSError:
-        names = []
-    for name in names:
-        if not name.isdigit():
-            continue
-        pid = int(name)
-        comm = _user_comm(pid)
-        if not comm or comm == "nvidia-smi":
-            continue
-        ticks = _stat_ticks(pid)
-        if ticks is None:
-            continue
-        procs[pid] = (comm, ticks)
-    prev = _CPU_PREV
-    _CPU_PREV = (now, total, idle, procs)
-    if prev is None or total is None or idle is None or prev[1] is None or prev[2] is None:
-        return [], 0.0
-    dt = now - prev[0]
-    if dt <= 0.2:
-        return [], 0.0
-    try:
-        hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
-    except (OSError, ValueError, KeyError):
-        hz = 100
-    if hz <= 0:
-        hz = 100
-    total_delta = total - int(prev[1])
-    idle_delta = idle - int(prev[2])
-    busy = 0.0
-    if total_delta > 0:
-        busy = (1.0 - (idle_delta / total_delta)) * 100.0
-        if busy < 0:
-            busy = 0.0
-        if busy > 100:
-            busy = 100.0
-    grouped: dict[str, list] = {}
-    old_procs = prev[3]
-    for pid, (comm, ticks) in procs.items():
-        old = old_procs.get(pid)
-        delta = ticks - old[1] if old else 0
-        if delta < 0:
-            delta = 0
-        meter = (delta / hz) / dt * 100.0
-        share = _share_percent(delta, total_delta)
-        bucket = grouped.setdefault(comm, [0.0, 0.0, 0])
-        bucket[0] += meter
-        bucket[1] += share
-        bucket[2] += 1
-    rows = [
-        {
-            "name": name,
-            "percent": round(meter, 1),
-            "share": round(share, 1),
-            "count": count,
-        }
-        for name, (meter, share, count) in grouped.items()
-    ]
-    rows.sort(key=lambda row: (-row["percent"], row["name"]))
-    active = [row for row in rows if row["percent"] > 0]
-    # A quiet sample still fills the table. Extra idle commands stay out of name sort.
-    if len(active) < 8:
-        idle = [row for row in rows if row["percent"] <= 0]
-        active.extend(idle[: 8 - len(active)])
-    return active[:80], round(busy, 1)
-
-
-def _pmon_percent(token: str) -> float:
-    if token in ("", "-"):
-        return 0.0
-    try:
-        return float(token)
-    except ValueError:
-        return 0.0
-
-
-def _gpu_label(pid: int, command: str) -> str:
-    try:
-        name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
-    except OSError:
-        name = ""
-    if name:
-        return name
-    token = command.split()[0] if command else ""
-    return Path(token).name or "process"
-
-
-def _parse_pmon(text: str) -> list[dict]:
-    """Max sm across repeated lines of one pid, then sum pids that share a command."""
-    best: dict[int, float] = {}
-    labels: dict[int, str] = {}
-    for line in text.splitlines():
-        match = _PMON_ROW.match(line)
-        if not match:
-            continue
-        pid = int(match.group(1))
-        percent = _pmon_percent(match.group(2))
-        labels[pid] = _gpu_label(pid, match.group(3).strip())
-        if percent > best.get(pid, 0.0):
-            best[pid] = percent
-    grouped: dict[str, list] = {}
-    for pid, label in labels.items():
-        percent = best.get(pid, 0.0)
-        bucket = grouped.setdefault(label, [0.0, 0])
-        bucket[0] += percent
-        bucket[1] += 1
-    rows = [
-        {
-            "name": name,
-            "percent": round(val, 1),
-            "share": 0.0,
-            "count": count,
-        }
-        for name, (val, count) in grouped.items()
-    ]
-    rows.sort(key=lambda row: (-row["percent"], row["name"]))
-    return rows[:80]
-
-
-def _apply_gpu_share(rows: list[dict], util: float | None) -> None:
-    """The label is this command's part of the GPU's total load, 0 to 100.
-
-    percent stays the SM sample the LED scale uses. The shares of one sample
-    add up to utilization.gpu, the same 0–100 reading as the total bar.
-    """
-    total = 0.0
-    for row in rows:
-        total += float(row.get("percent") or 0.0)
-    cap = None if util is None else max(0.0, min(100.0, float(util)))
-    for row in rows:
-        sample = float(row.get("percent") or 0.0)
-        if cap is None:
-            share = sample
-        elif total <= 0 or sample <= 0 or cap <= 0:
-            share = 0.0
-        else:
-            share = sample / total * cap
-        if share < 0:
-            share = 0.0
-        if share > 100:
-            share = 100.0
-        row["share"] = round(share, 1)
-
-
-def _gpu_util() -> float | None:
-    try:
-        env = os.environ.copy()
-        env["LC_ALL"] = "C"
-        out = subprocess.run(
-            [_NVIDIA_SMI, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            check=False,
-            env=env,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if out.returncode != 0:
-        return None
-    line = out.stdout.strip().splitlines()
-    if not line:
-        return None
-    try:
-        value = float(line[0].strip().split()[0])
-    except ValueError:
-        return None
-    if value < 0:
-        return 0.0
-    if value > 100:
-        return 100.0
-    return value
-
-
-def _gpu_sample() -> None:
-    ok = False
-    rows: list[dict] = []
-    util = _gpu_util()
-    try:
-        env = os.environ.copy()
-        env["LC_ALL"] = "C"
-        # One pmon frame is often all dashes. Three frames a second apart
-        # catch a real sm reading without blocking the client thread.
-        out = subprocess.run(
-            [_NVIDIA_SMI, "pmon", "-c", "3", "-d", "1", "-s", "u"],
-            capture_output=True,
-            text=True,
-            timeout=3.6,
-            check=False,
-            env=env,
-        )
-        if out.returncode == 0:
-            rows = _parse_pmon(out.stdout)
-            _apply_gpu_share(rows, util)
-            ok = True
-    except (OSError, subprocess.TimeoutExpired):
-        ok = False
-    with _GPU_LOCK:
-        _GPU["running"] = False
-        if util is not None:
-            _GPU["util"] = util
-        if ok and rows:
-            _GPU["rows"] = rows
-            _GPU["ok"] = True
-            _GPU["fail"] = 0
-            _GPU["empty"] = 0
-        elif ok:
-            _GPU["ok"] = True
-            _GPU["fail"] = 0
-            _GPU["empty"] = int(_GPU["empty"]) + 1
-            if _GPU["empty"] >= 2:
-                _GPU["rows"] = []
-        else:
-            _GPU["fail"] = int(_GPU["fail"]) + 1
-            if _GPU["fail"] >= 2:
-                _GPU["ok"] = False
-                _GPU["rows"] = []
-
-
-def _kick_gpu() -> None:
-    with _GPU_LOCK:
-        if _GPU["running"]:
-            return
-        _GPU["running"] = True
-    threading.Thread(target=_gpu_sample, name="omaflow-gpu", daemon=True).start()
-
-
 def processes_snapshot() -> dict:
-    """CPU from /proc and GPU from nvidia-smi. Neither reads hwmon or changes poll_rate."""
-    try:
-        cpu, cpu_total = _cpu_sample()
-    except Exception:
-        cpu, cpu_total = [], 0.0
-    _kick_gpu()
-    with _GPU_LOCK:
-        return {
-            "cpu": cpu,
-            "cpuTotal": cpu_total,
-            "gpu": list(_GPU["rows"]),
-            "gpuTotal": float(_GPU.get("util") or 0.0),
-            "gpuOk": bool(_GPU["ok"]),
-        }
+    """Shared CPU and GPU sample for the window and the bar.
+
+    Temperatures, fans, and the pump stay on coolercontrold's one poll.
+    Process lists are not in that daemon, so both clients share one snapshot
+    and one nvidia-smi.
+    """
+    import process_snap
+    return process_snap.snapshot()
 
 
 def main() -> None:
@@ -2339,7 +2328,14 @@ def main() -> None:
                 int(msg.get("width") or 0),
                 int(msg.get("height") or 0),
                 str(msg.get("deviceName") or ""),
+                str(msg.get("picture") or ""),
+                msg.get("scale"),
             )
+            result["id"] = msg.get("id")
+            emit(result)
+            continue
+        if op == "catalog":
+            result = catalog()
             result["id"] = msg.get("id")
             emit(result)
             continue

@@ -45,20 +45,6 @@ function assigned(setting) {
   return !(uid === undefined || uid === null || uid === "" || uid === "0" || uid === 0)
 }
 
-function channelSetting(mode, deviceUid, channelName) {
-  if (!mode) return null
-  var rows = mode.device_settings || []
-  for (var r = 0; r < rows.length; r++) {
-    var row = rows[r]
-    if (!row || row[0] !== deviceUid) continue
-    var settings = row[1] || []
-    for (var s = 0; s < settings.length; s++) {
-      if (settings[s] && settings[s].channel_name === channelName) return settings[s]
-    }
-  }
-  return null
-}
-
 function rawGraphPoints(profile) {
   if (!profile || profile.p_type !== "Graph" || !profile.speed_profile) return []
   var src = profile.speed_profile
@@ -147,9 +133,30 @@ function spreadPoints(points, minDuty) {
   return out
 }
 
-function graphPoints(profile) {
-  var floor = profile && /pump/i.test(String(profile.name || "")) ? 50 : 0
-  return spreadPoints(rawGraphPoints(profile), floor)
+// 0 is a real floor. A missing value is the only case that still means 50.
+function dutyFloor(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback
+  var n = Number(value)
+  if (!isFinite(n)) return fallback
+  if (n < 0) return 0
+  if (n > 100) return 100
+  return n
+}
+
+function graphPoints(profile, floor) {
+  var limit
+  if (floor === undefined || floor === null || floor === "")
+    limit = profile && /pump/i.test(String(profile.name || "")) ? 50 : 0
+  else
+    limit = dutyFloor(floor, 0)
+  return spreadPoints(rawGraphPoints(profile), limit)
+}
+
+function floorCaption(isPump, minDuty) {
+  if (!isPump) return ""
+  var floor = Number(minDuty)
+  if (isFinite(floor) && floor >= 50) return "floor 50%"
+  return "floor off"
 }
 
 function withGraphPoints(profile, points, minDuty) {
@@ -169,18 +176,31 @@ function withGraphPoints(profile, points, minDuty) {
   return copy
 }
 
-function pickTemp(candidates, pattern) {
-  for (var i = 0; i < candidates.length; i++) {
-    if (pattern.test(candidates[i].name)) return candidates[i].temp
+function matchTemp(candidates, pattern) {
+  var list = candidates || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    if (list[i] && pattern.test(list[i].name)) return list[i].temp
   }
+  return null
+}
+
+// A named sensor when the pattern hits, otherwise the hottest reading.
+// Callers that need "absent" rather than a stand-in use matchTemp.
+function pickTemp(candidates, pattern) {
+  var found = matchTemp(candidates, pattern)
+  if (found !== null) return found
   var best = null
-  for (var j = 0; j < candidates.length; j++) {
-    if (best === null || candidates[j].temp > best) best = candidates[j].temp
+  var list = candidates || []
+  var j
+  for (j = 0; j < list.length; j++) {
+    if (!list[j] || !isFinite(Number(list[j].temp))) continue
+    if (best === null || list[j].temp > best) best = list[j].temp
   }
   return best
 }
 
-function view(devices, statusDevices, modes, profiles, activeUid, selectedKey, pumpMin) {
+function view(devices, statusDevices, modes, activeUid, pumpMin) {
   var byStatus = statusByUid(statusDevices)
   var channels = []
   var lcdChannels = []
@@ -190,11 +210,8 @@ function view(devices, statusDevices, modes, profiles, activeUid, selectedKey, p
   var pumpDuty = null
   var pumpRpm = null
   var pumpRank = -1
-  var cpuPower = null
-  var cpuLoad = null
   var gpuPower = null
   var gpuLoad = null
-  var gpuFan = null
   var gpuName = ""
   var cpuName = "CPU"
   var devs = devices || []
@@ -241,19 +258,15 @@ function view(devices, statusDevices, modes, profiles, activeUid, selectedKey, p
           name: name,
           label: label,
           screenWidth: isFinite(screenW) && screenW > 0 ? screenW : 0,
-          screenHeight: isFinite(screenH) && screenH > 0 ? screenH : 0
+          screenHeight: isFinite(screenH) && screenH > 0 ? screenH : 0,
+          hasImage: lcdHasImage(info.lcd_modes)
         })
       }
-      if (dev.type === "CPU") {
-        cpuName = dev.name || cpuName
-        if (/power/i.test(name) && isFinite(wattsBy[name])) cpuPower = wattsBy[name]
-        if (/load/i.test(name) && isFinite(Number(dutyBy[name]))) cpuLoad = Number(dutyBy[name])
-      }
+      if (dev.type === "CPU") cpuName = dev.name || cpuName
       if (dev.type === "GPU") {
         gpuName = dev.name || gpuName
         if (/power/i.test(name) && isFinite(wattsBy[name])) gpuPower = wattsBy[name]
         if (/load/i.test(name) && isFinite(Number(dutyBy[name]))) gpuLoad = Number(dutyBy[name])
-        if (/fan/i.test(name) && isFinite(Number(dutyBy[name]))) gpuFan = Number(dutyBy[name])
       }
       if (!info.speed_options) continue
       var pump = isPumpName(name, label)
@@ -282,47 +295,21 @@ function view(devices, statusDevices, modes, profiles, activeUid, selectedKey, p
         rpm: rpmBy[name] === undefined ? null : Number(rpmBy[name]),
         isPump: pump,
         controllable: info.speed_options.fixed_enabled !== false,
-        minDuty: pump ? Math.max(deviceMin, Number(pumpMin) || 50) : deviceMin
+        minDuty: pump ? Math.max(deviceMin, dutyFloor(pumpMin, 50)) : deviceMin
       })
     }
   }
 
   var active = modeByUid(modes, activeUid)
-  var selected = null
-  for (var i = 0; i < channels.length; i++) {
-    if (channels[i].key === selectedKey) selected = channels[i]
-  }
-  if (!selected && channels.length) selected = channels[0]
-
-  var curve = emptyCurve()
-  if (selected) {
-    var setting = channelSetting(active, selected.deviceUid, selected.name)
-    var profile = setting && setting.profile_uid ? profileByUid(profiles, setting.profile_uid) : null
-    curve = {
-      key: selected.key,
-      label: selected.label,
-      deviceName: selected.deviceName,
-      duty: selected.duty,
-      rpm: selected.rpm,
-      isPump: selected.isPump,
-      minDuty: selected.minDuty,
-      profileUid: profile ? profile.uid : "",
-      profileName: profile ? profile.name : (setting && setting.speed_fixed !== undefined ? "Fixed " + setting.speed_fixed + "%" : ""),
-      pType: profile ? profile.p_type : (setting && setting.speed_fixed !== undefined ? "Fixed" : ""),
-      points: graphPoints(profile),
-      fixed: setting && setting.speed_fixed !== undefined ? Number(setting.speed_fixed) : null
-    }
-  }
-
   var cpu = pickTemp(cpuTemps, /package|tctl|tdie/i)
-  var cpuCcd1 = pickTemp(cpuTemps, /tccd1|ccd1/i)
-  var cpuCcd2 = pickTemp(cpuTemps, /tccd2|ccd2/i)
-  var gpu = pickTemp(gpuTemps, /gpu temp$/i)
-  if (!isFinite(gpu)) gpu = pickTemp(gpuTemps, /edge|gpu|temp/i)
-  var gpuHotspot = pickTemp(gpuTemps, /hotspot/i)
+  var cpuCcd1 = matchTemp(cpuTemps, /tccd1|ccd1/i)
+  var cpuCcd2 = matchTemp(cpuTemps, /tccd2|ccd2/i)
+  var gpu = matchTemp(gpuTemps, /gpu temp$/i)
+  if (gpu === null) gpu = pickTemp(gpuTemps, /edge|gpu|temp/i)
   var hottest = null
   if (isFinite(cpu)) hottest = cpu
   if (isFinite(gpu) && (hottest === null || gpu > hottest)) hottest = gpu
+  if (isFinite(coolant) && (hottest === null || coolant > hottest)) hottest = coolant
 
   return {
     channels: channels,
@@ -331,50 +318,104 @@ function view(devices, statusDevices, modes, profiles, activeUid, selectedKey, p
       cpu: cpu,
       cpuCcd1: cpuCcd1,
       cpuCcd2: cpuCcd2,
-      cpuPower: cpuPower,
-      cpuLoad: cpuLoad,
       cpuName: cpuName,
       gpu: gpu,
-      gpuHotspot: gpuHotspot,
       gpuPower: gpuPower,
       gpuLoad: gpuLoad,
-      gpuFan: gpuFan,
       gpuName: gpuName,
       coolant: coolant,
       pumpDuty: pumpDuty,
       pumpRpm: pumpRpm,
       hottest: hottest
     },
-    activeModeName: active ? active.name : "",
-    curve: curve
+    activeModeName: active ? active.name : ""
   }
 }
 
-function profileMinDuty(profile, channels, modes, pumpMin) {
-  if (!profile) return 0
-  var floor = Number(pumpMin) || 50
-  if (/pump/i.test(profile.name || "")) return floor
-  var list = modes || []
-  for (var m = 0; m < list.length; m++) {
-    var rows = (list[m] && list[m].device_settings) || []
-    for (var r = 0; r < rows.length; r++) {
-      var deviceUid = rows[r] && rows[r][0]
-      var settings = (rows[r] && rows[r][1]) || []
-      for (var s = 0; s < settings.length; s++) {
-        if (!settings[s] || settings[s].profile_uid !== profile.uid) continue
-        for (var c = 0; c < (channels || []).length; c++) {
-          var channel = channels[c]
-          if (channel.isPump && channel.deviceUid === deviceUid && channel.name === settings[s].channel_name)
-            return floor
-        }
-      }
+// Membership of the channel list. Duty and RPM numbers are not part of it.
+// "spin" is a tach above 0. "idle" is a stopped channel with a duty of 0.
+// "held" is a duty above 0 that has not produced a tach. "none" is an unused header.
+function channelPresence(channel) {
+  var rpm = Number(channel && channel.rpm)
+  if (isFinite(rpm) && rpm > 0) return "spin"
+  var duty = channel ? channel.duty : null
+  if (duty === null || duty === undefined || duty === "") return "none"
+  var level = Number(duty)
+  if (!isFinite(level)) return "none"
+  if (level <= 0) return "idle"
+  return "held"
+}
+
+function channelShape(channels) {
+  var out = []
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var ch = list[i]
+    if (!ch) continue
+    out.push([
+      ch.key || "",
+      ch.deviceUid || "",
+      ch.deviceName || "",
+      ch.deviceType || "",
+      ch.name || "",
+      ch.label || "",
+      ch.isPump ? 1 : 0,
+      ch.controllable === false ? 0 : 1,
+      Number(ch.minDuty) || 0,
+      channelPresence(ch)
+    ])
+  }
+  return out
+}
+
+function channelLive(channels) {
+  var out = {}
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var ch = list[i]
+    if (!ch || !ch.key) continue
+    out[ch.key] = {
+      duty: ch.duty === undefined ? null : ch.duty,
+      rpm: ch.rpm === undefined ? null : ch.rpm
     }
   }
-  return 0
+  return out
+}
+
+// Write the latest duty and RPM onto the channel objects already on screen.
+function paintLive(target, fresh) {
+  var list = target || []
+  var src = fresh || []
+  var i
+  for (i = 0; i < list.length && i < src.length; i++) {
+    if (!list[i] || !src[i] || list[i].key !== src[i].key) continue
+    list[i].duty = src[i].duty
+    list[i].rpm = src[i].rpm
+  }
 }
 
 function liquidName(text) {
   return /liquid|coolant|water/i.test(String(text || ""))
+}
+
+// True when the AIO LCD channel can take a still image.
+function lcdHasImage(modes) {
+  var list = modes || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var mode = list[i]
+    if (!mode) continue
+    if (typeof mode === "string") {
+      if (mode === "image") return true
+      continue
+    }
+    if (mode.image === true) return true
+    var name = String(mode.name || mode.type || "")
+    if (name === "image") return true
+  }
+  return false
 }
 
 // CPU package temp, or the GPU edge temp when the channel belongs to a GPU.
@@ -449,7 +490,8 @@ function modeDefaultPoints(name, isPump) {
   return defaultPoints(false)
 }
 
-function speedChannels(devices) {
+function speedChannels(devices, pumpMin) {
+  var floor = dutyFloor(pumpMin, 50)
   var out = []
   var devs = devices || []
   var d
@@ -473,7 +515,7 @@ function speedChannels(devices) {
         deviceUid: dev.uid,
         name: name,
         isPump: pump,
-        minDuty: pump ? Math.max(deviceMin, 50) : deviceMin
+        minDuty: pump ? Math.max(deviceMin, floor) : deviceMin
       })
     }
   }
@@ -493,18 +535,38 @@ function modeSettingRows(mode) {
   return out
 }
 
-function modeUsesProfile(mode, profileUid) {
-  if (!mode || !profileUid) return false
+// `visit` returns false to stop. A bare return walks the next setting.
+function eachModeSetting(mode, visit) {
   var rows = modeSettingRows(mode)
   var r
   var s
   for (r = 0; r < rows.length; r++) {
     var settings = (rows[r] && rows[r][1]) || []
+    var deviceUid = rows[r] && rows[r][0]
     for (s = 0; s < settings.length; s++) {
-      if (settings[s] && settings[s].profile_uid === profileUid) return true
+      if (visit(deviceUid, settings[s]) === false) return
     }
   }
-  return false
+}
+
+function copyMap(src) {
+  var next = ({})
+  if (!src) return next
+  var k
+  for (k in src) next[k] = src[k]
+  return next
+}
+
+function modeUsesProfile(mode, profileUid) {
+  if (!mode || !profileUid) return false
+  var found = false
+  eachModeSetting(mode, function(deviceUid, setting) {
+    if (setting && setting.profile_uid === profileUid) {
+      found = true
+      return false
+    }
+  })
+  return found
 }
 
 function otherModeUsesProfile(modes, profileUid, modeUid) {
@@ -519,32 +581,34 @@ function otherModeUsesProfile(modes, profileUid, modeUid) {
   return false
 }
 
-function profileModeCount(modes, profileUid) {
-  if (!profileUid) return 0
-  var list = modes || []
-  var count = 0
-  var m
-  for (m = 0; m < list.length; m++) {
-    if (modeUsesProfile(list[m], profileUid)) count++
-  }
-  return count
+// The curve this mode already uses for one of a group's fans.
+// Another mode may store the same speeds. It may not store this profile uid.
+function modeGroupProfile(mode, modes, members) {
+  var keys = {}
+  var list = members || []
+  var i
+  for (i = 0; i < list.length; i++) if (list[i]) keys[String(list[i])] = true
+  var found = ""
+  eachModeSetting(mode, function(deviceUid, setting) {
+    if (!setting || !setting.channel_name || !setting.profile_uid) return
+    var key = String(deviceUid || "") + "/" + String(setting.channel_name)
+    if (!keys[key]) return
+    var uid = String(setting.profile_uid)
+    if (!uid || uid === "0") return
+    if (otherModeUsesProfile(modes, uid, mode && mode.uid)) return
+    found = uid
+    return false
+  })
+  return found
 }
 
 function modeProfileChannels(mode, profileUid) {
   var out = []
   if (!mode || !profileUid) return out
-  var rows = modeSettingRows(mode)
-  var r
-  var s
-  for (r = 0; r < rows.length; r++) {
-    var deviceUid = rows[r] && rows[r][0]
-    var settings = (rows[r] && rows[r][1]) || []
-    for (s = 0; s < settings.length; s++) {
-      var setting = settings[s]
-      if (!setting || setting.profile_uid !== profileUid || !setting.channel_name) continue
-      out.push({ deviceUid: deviceUid, name: setting.channel_name })
-    }
-  }
+  eachModeSetting(mode, function(deviceUid, setting) {
+    if (!setting || setting.profile_uid !== profileUid || !setting.channel_name) return
+    out.push({ deviceUid: deviceUid, name: setting.channel_name })
+  })
   return out
 }
 
@@ -596,9 +660,7 @@ function cleanGroupList(groups) {
   for (i = 0; i < list.length; i++) {
     var group = list[i]
     if (!group || typeof group !== "object" || Array.isArray(group)) continue
-    var copy = ({})
-    var k
-    for (k in group) copy[k] = group[k]
+    var copy = copyMap(group)
     copy.name = plainLabel(group.name, "Group")
     out.push(copy)
   }
@@ -655,6 +717,28 @@ function samePointList(a, b) {
     if (Number(left[i][1]) !== Number(right[i][1])) return false
   }
   return true
+}
+
+// One drag step from the points captured at press. Later points rise to the
+// dragged duty. Earlier points fall to it. A colder point does not stay above
+// a hotter one. Callers pass the press-time points, not the previous step.
+function monotonicPoints(src, index, duty) {
+  var next = []
+  var list = src || []
+  var i
+  for (i = 0; i < list.length; i++) next.push([Number(list[i][0]), Number(list[i][1])])
+  if (index < 0 || index >= next.length) return next
+  var level = Number(duty)
+  if (!isFinite(level)) return next
+  next[index] = [next[index][0], level]
+  var j
+  for (j = index + 1; j < next.length; j++) {
+    if (next[j][1] < level) next[j] = [next[j][0], level]
+  }
+  for (j = index - 1; j >= 0; j--) {
+    if (next[j][1] > level) next[j] = [next[j][0], level]
+  }
+  return next
 }
 
 // One curve's undo stack. `entry` is { steps, index } or empty.
@@ -805,35 +889,29 @@ function modeMembers(mode, channels, profiles) {
   var list = channels || []
   for (var i = 0; i < list.length; i++) byKey[list[i].key] = list[i]
   var out = []
-  var rows = (mode && mode.device_settings) || []
-  for (var r = 0; r < rows.length; r++) {
-    var deviceUid = rows[r] && rows[r][0]
-    var settings = (rows[r] && rows[r][1]) || []
-    for (var s = 0; s < settings.length; s++) {
-      var setting = settings[s]
-      if (!assigned(setting) || !setting.channel_name) continue
-      var key = deviceUid + "/" + setting.channel_name
-      var channel = byKey[key]
-      if (!channel) continue
-      var profile = setting.profile_uid ? profileByUid(profiles, setting.profile_uid) : null
-      out.push({
-        key: key,
-        deviceUid: deviceUid,
-        name: setting.channel_name,
-        label: channel.label,
-        deviceName: channel.deviceName,
-        rpm: channel.rpm,
-        isPump: channel.isPump,
-        deviceType: channel.deviceType || "",
-        minDuty: channel.minDuty,
-        profileUid: profile ? profile.uid : "",
-        profileName: profile ? profile.name : "",
-        pType: profile ? profile.p_type : (setting.speed_fixed !== undefined ? "Fixed" : ""),
-        points: graphPoints(profile),
-        fixed: setting.speed_fixed !== undefined ? Number(setting.speed_fixed) : null
-      })
-    }
-  }
+  eachModeSetting(mode, function(deviceUid, setting) {
+    if (!assigned(setting) || !setting.channel_name) return
+    var key = deviceUid + "/" + setting.channel_name
+    var channel = byKey[key]
+    if (!channel) return
+    var profile = setting.profile_uid ? profileByUid(profiles, setting.profile_uid) : null
+    out.push({
+      key: key,
+      deviceUid: deviceUid,
+      name: setting.channel_name,
+      label: channel.label,
+      deviceName: channel.deviceName,
+      rpm: channel.rpm,
+      isPump: channel.isPump,
+      deviceType: channel.deviceType || "",
+      minDuty: channel.minDuty,
+      profileUid: profile ? profile.uid : "",
+      profileName: profile ? profile.name : "",
+      pType: profile ? profile.p_type : (setting.speed_fixed !== undefined ? "Fixed" : ""),
+      points: graphPoints(profile, channel && channel.isPump ? channel.minDuty : 0),
+      fixed: setting.speed_fixed !== undefined ? Number(setting.speed_fixed) : null
+    })
+  })
   return out
 }
 
@@ -856,16 +934,10 @@ function controlledKeys(modes) {
   var out = {}
   var list = modes || []
   for (var m = 0; m < list.length; m++) {
-    var rows = (list[m] && list[m].device_settings) || []
-    for (var r = 0; r < rows.length; r++) {
-      var deviceUid = rows[r] && rows[r][0]
-      var settings = (rows[r] && rows[r][1]) || []
-      for (var s = 0; s < settings.length; s++) {
-        var setting = settings[s]
-        if (!assigned(setting) || !setting.channel_name) continue
-        out[deviceUid + "/" + setting.channel_name] = true
-      }
-    }
+    eachModeSetting(list[m], function(deviceUid, setting) {
+      if (!assigned(setting) || !setting.channel_name) return
+      out[deviceUid + "/" + setting.channel_name] = true
+    })
   }
   return out
 }
@@ -909,29 +981,253 @@ function deviceGroups(channels, modes) {
   return groups
 }
 
-function groupColor(type, name, index) {
-  var text = String(type || "") + " " + String(name || "")
-  if (/gpu|nvidia/i.test(text)) return "#e08a4f"
-  if (/kraken|liquid/i.test(text)) return "#8b7cff"
-  if (/smart|nzxtsmart/i.test(text)) return "#5dbe7a"
-  if (/nct|asus|cpu/i.test(text)) return "#6aa8ff"
-  var palette = ["#e08a4f", "#8b7cff", "#6aa8ff", "#5dbe7a", "#d06b8a", "#c9a227"]
-  return palette[Math.abs(Number(index) || 0) % palette.length]
+function modeNamed(modes, name) {
+  var want = String(name || "").toLowerCase()
+  var list = modes || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    if (list[i] && String(list[i].name || "").toLowerCase() === want) return list[i]
+  }
+  return null
 }
 
-function emptyCurve() {
-  return {
-    key: "",
-    label: "",
-    deviceName: "",
-    duty: null,
-    rpm: null,
-    isPump: false,
-    minDuty: 0,
-    profileUid: "",
-    profileName: "",
-    pType: "",
-    points: [],
-    fixed: null
+// CPU package, GPU edge, and coolant. Hotspot is not the GPU alert.
+function alertSensors(devices) {
+  var cpu = null
+  var gpu = null
+  var gpuRank = -1
+  var coolant = null
+  var list = devices || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var dev = list[i]
+    if (!dev || !dev.uid || !dev.info || !dev.info.temps) continue
+    var temps = dev.info.temps
+    var name
+    for (name in temps) {
+      if (!Object.prototype.hasOwnProperty.call(temps, name)) continue
+      var info = temps[name] || {}
+      var label = info.label ? String(info.label) : String(name)
+      var source = { device_uid: dev.uid, channel_name: name, channel_metric: "Temp" }
+      if (liquidName(name) || liquidName(label)) {
+        coolant = source
+        continue
+      }
+      if (dev.type === "CPU" && /package|tctl|tdie/i.test(name + " " + label)) {
+        if (!cpu || /tctl|package|tdie/i.test(label)) cpu = source
+      }
+      if (dev.type === "GPU") {
+        var rank = 1
+        if (/hotspot/i.test(name) || /hotspot/i.test(label)) rank = 0
+        if (/^gpu temp$/i.test(String(name)) || /^gpu temp$/i.test(label)) rank = 2
+        if (rank > gpuRank) {
+          gpuRank = rank
+          gpu = source
+        }
+      }
+    }
   }
+  return { cpu: cpu, gpu: gpu, coolant: coolant }
+}
+
+function alertNamed(alerts, name) {
+  var want = String(name || "")
+  var list = alerts || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    if (list[i] && String(list[i].name || "") === want) return list[i]
+  }
+  return null
+}
+
+function alertStateLabel(alert) {
+  if (!alert) return ""
+  if (alert.enabled === false) return "Off"
+  var state = alert.state
+  if (state && typeof state === "object") return "Warming"
+  var text = String(state || "")
+  if (text === "Active") return "Active"
+  if (text === "Error") return "Error"
+  if (text === "Inactive") return "Watching"
+  if (/warm/i.test(text)) return "Warming"
+  return text
+}
+
+function activeAlertNames(alerts) {
+  var out = []
+  var list = alerts || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var alert = list[i]
+    if (!alert || alert.enabled === false) continue
+    if (String(alert.state || "") !== "Active") continue
+    var name = String(alert.name || "").replace(/^\s+|\s+$/g, "")
+    if (name) out.push(name)
+  }
+  return out
+}
+
+function activeAlertLine(alerts) {
+  var names = activeAlertNames(alerts)
+  if (!names.length) return ""
+  if (names.length === 1) return names[0]
+  return names[0] + " +" + (names.length - 1)
+}
+
+// The body this daemon accepts. shutdown_on_activation is never forwarded as true.
+function alertWriteBody(alert, enabled) {
+  var src = alert && alert.channel_source
+  if (!src && alert && alert.channel_sources && alert.channel_sources.length) src = alert.channel_sources[0]
+  src = src || {}
+  var max = Number(alert && alert.max)
+  var min = Number(alert && alert.min)
+  var warm = Number(alert && alert.warmup_duration)
+  return {
+    uid: String(alert && alert.uid || ""),
+    name: String(alert && alert.name || ""),
+    channel_source: {
+      device_uid: String(src.device_uid || ""),
+      channel_name: String(src.channel_name || ""),
+      channel_metric: String(src.channel_metric || "Temp")
+    },
+    min: isFinite(min) ? min : 0,
+    max: isFinite(max) ? max : 0,
+    warmup_duration: isFinite(warm) && warm > 0 ? warm : 12,
+    desktop_notify: !alert || alert.desktop_notify !== false,
+    desktop_notify_audio: !!(alert && alert.desktop_notify_audio === true),
+    desktop_notify_recovery: !alert || alert.desktop_notify_recovery !== false,
+    shutdown_on_activation: false,
+    enabled: enabled !== false
+  }
+}
+
+// Eight seconds ignores a short spike. The delay applies on the way down too,
+// because this daemon has no upward-only delay. Steps stay small after that.
+function silentRampFunction(uid) {
+  return {
+    uid: String(uid || ""),
+    name: "Omaflow silent ramp",
+    f_type: "Standard",
+    duty_minimum: 2,
+    duty_maximum: 6,
+    step_size_min_decreasing: 2,
+    step_size_max_decreasing: 12,
+    threshold_hopping: false,
+    bypass_min_at_extremes: true,
+    response_delay: 8,
+    deviance: 1,
+    only_downward: false
+  }
+}
+
+function rampCloneName(name) {
+  var suffix = " omaflow"
+  var base = String(name || "curve").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
+  if (!base) base = "curve"
+  if (base.length + suffix.length <= 48) return base + suffix
+  return base.slice(0, 48 - suffix.length) + suffix
+}
+
+// Fan graphs on Silent. Pumps, fixed duties, and the default profile stay put.
+// A profile another mode uses is cloned onto Silent. An exclusive profile is
+// edited in place. A channel missing from the live device list is skipped.
+// A hidden duplicate can still sit in an old mode, and the daemon rejects a
+// write to that device.
+function planSilentRamp(mode, modes, profiles, channels, rampUid) {
+  var inplace = []
+  var clones = []
+  var already = []
+  var cloneAt = {}
+  var seenInplace = {}
+  var byKey = {}
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) if (list[i] && list[i].key) byKey[list[i].key] = list[i]
+  var ramp = String(rampUid || "")
+  eachModeSetting(mode, function(deviceUid, setting) {
+    if (!setting || !setting.channel_name || !setting.profile_uid) return
+    var channelName = String(setting.channel_name)
+    var channel = byKey[String(deviceUid || "") + "/" + channelName]
+    if (!channel) return
+    var pump = channel.isPump === true
+    if (pump) return
+    var profile = profileByUid(profiles, setting.profile_uid)
+    if (!profile || String(profile.p_type || "") !== "Graph") return
+    if (String(profile.uid || "") === "0") return
+    var pname = String(profile.name || "")
+    if (/^(fixed|default|unmanaged)$/i.test(pname)) return
+    var shared = otherModeUsesProfile(modes, profile.uid, mode && mode.uid)
+    var fn = String(profile.function_uid || "0")
+    var ours = ramp !== "" && fn === ramp
+    var cloneNamed = / omaflow$/i.test(pname)
+    if (ours && !shared) {
+      already.push({
+        deviceUid: String(deviceUid || ""),
+        channel: channelName,
+        profileUid: cloneNamed ? "" : String(profile.uid || ""),
+        cloneUid: cloneNamed ? String(profile.uid || "") : "",
+        prevFunction: "0"
+      })
+      return
+    }
+    if (!shared) {
+      if (seenInplace[profile.uid]) return
+      seenInplace[profile.uid] = true
+      inplace.push({ profileUid: String(profile.uid), prevFunction: fn || "0" })
+      return
+    }
+    if (cloneAt[profile.uid] === undefined) {
+      cloneAt[profile.uid] = clones.length
+      clones.push({
+        profileUid: String(profile.uid),
+        prevFunction: ours ? "0" : (fn || "0"),
+        restore: ours,
+        channels: []
+      })
+    }
+    clones[cloneAt[profile.uid]].channels.push({
+      deviceUid: String(deviceUid || ""),
+      name: channelName
+    })
+  })
+  return { inplace: inplace, clones: clones, already: already }
+}
+
+// Pump profiles whose saved duty is below 50. Turning the floor back on
+// raises those points. Turning it off does not call this.
+function pumpProfilesToLift(modes, profiles, channels) {
+  var byKey = {}
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) if (list[i] && list[i].key) byKey[list[i].key] = list[i]
+  var ids = {}
+  var modeList = modes || []
+  var m
+  for (m = 0; m < modeList.length; m++) {
+    eachModeSetting(modeList[m], function(deviceUid, setting) {
+      if (!setting || !setting.channel_name || !setting.profile_uid) return
+      var channelName = String(setting.channel_name)
+      var channel = byKey[String(deviceUid || "") + "/" + channelName]
+      var pump = channel ? channel.isPump === true : isPumpName(channelName, channelName)
+      if (!pump) return
+      ids[String(setting.profile_uid)] = true
+    })
+  }
+  var out = []
+  var uid
+  for (uid in ids) {
+    if (!Object.prototype.hasOwnProperty.call(ids, uid)) continue
+    var profile = profileByUid(profiles, uid)
+    if (!profile || String(profile.p_type || "") !== "Graph") continue
+    var points = profile.speed_profile || []
+    var low = false
+    var p
+    for (p = 0; p < points.length; p++) {
+      if (!points[p] || points[p].length < 2) continue
+      var duty = Number(points[p][1])
+      if (isFinite(duty) && duty < 50) low = true
+    }
+    if (low) out.push(profile)
+  }
+  return out
 }

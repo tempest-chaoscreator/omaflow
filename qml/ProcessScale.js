@@ -1,10 +1,14 @@
 // Per-process meter scale. Plain functions so a node harness can load this file.
+// `floor` is the quiet-row scale top: the row never zooms tighter than that percent.
+// CPU passes 2. GPU passes 20. Header totals stay on a fixed 0–100 scale.
 
-function ceiling(recordedMax) {
+function ceiling(recordedMax, floor) {
   var max = Number(recordedMax)
   if (!isFinite(max) || max < 0) max = 0
+  var minTop = Number(floor)
+  if (!isFinite(minTop) || minTop < 0) minTop = 0
   var top = max * 1.15
-  return top > 4 ? top : 4
+  return top > minTop ? top : minTop
 }
 
 function litCount(percent, top, squares) {
@@ -19,14 +23,18 @@ function litCount(percent, top, squares) {
   return lit
 }
 
-function decayMax(recorded, latest) {
+function decayMax(recorded, latest, floor) {
   var max = Number(recorded)
   var sample = Number(latest)
   if (!isFinite(max) || max < 0) max = 0
   if (!isFinite(sample) || sample < 0) sample = 0
+  var minTop = Number(floor)
+  if (!isFinite(minTop) || minTop < 0) minTop = 0
   var next = max * 0.9
-  var floor = Math.max(sample, 4)
-  if (next < floor) next = floor
+  // Keep the peak on the display floor. ceiling() multiplies by 1.15,
+  // so dividing here makes a quiet row land on that floor instead of above it.
+  var bottom = Math.max(sample, minTop > 0 ? minTop / 1.15 : 0)
+  if (next < bottom) next = bottom
   return next
 }
 

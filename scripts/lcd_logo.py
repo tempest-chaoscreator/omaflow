@@ -271,7 +271,11 @@ def _cached_plate(kind: str, width: int, height: int, shape: str, accent: str, c
     radius = _blur_radius(width, height) if kind == "blur" else 0.0
     path = _cache_path(kind, width, height, shape, accent, radius, clear)
     if path.is_file():
-        return Image.open(path).convert("RGBA" if clear else "RGB")
+        opened = Image.open(path)
+        try:
+            return opened.convert("RGBA" if clear else "RGB")
+        finally:
+            opened.close()
     bands = band_colors(accent)
     side = _logo_side(width, height, shape)
     mask = _raster_mask(side)
@@ -347,6 +351,34 @@ def _draw_clock(image, text: str, fill: str) -> None:
     )
 
 
+def bake_png(image, angle: int, fill, optimize: bool = False) -> bytes:
+    """Turn clockwise by `angle`, encode PNG, and close every image involved.
+
+    Angle 0 leaves the pixels alone. `optimize` is only for the custom picture.
+    """
+    import io
+
+    turned = int(angle) % 360
+    if turned:
+        from PIL import Image
+
+        spun = image.rotate(
+            -turned,
+            resample=Image.Resampling.BICUBIC,
+            expand=False,
+            fillcolor=fill,
+        )
+        image.close()
+        image = spun
+    buf = io.BytesIO()
+    if optimize:
+        image.save(buf, "PNG", optimize=True)
+    else:
+        image.save(buf, "PNG")
+    image.close()
+    return buf.getvalue()
+
+
 def render_logo_png(
     face: str,
     accent: str,
@@ -363,10 +395,6 @@ def render_logo_png(
     transparent for the window preview. The clock is drawn in `accent` with a
     1px black edge at the 320 reference.
     """
-    import io
-
-    from PIL import Image
-
     kind = "blur" if face == "omarchy-time" else "sharp"
     plate = _cached_plate(
         kind, width, height, "square" if shape == "square" else "round", accent, clear
@@ -376,18 +404,7 @@ def render_logo_png(
     if face == "omarchy-time":
         label = clock if clock is not None else time.strftime("%H:%M")
         _draw_clock(image, label, accent or "#b59790")
-    turned = int(angle) % 360
-    if turned:
-        image = image.rotate(
-            -turned,
-            resample=Image.Resampling.BICUBIC,
-            expand=False,
-            fillcolor=(0, 0, 0, 0) if clear else _PLATE_BG,
-        )
-    buf = io.BytesIO()
-    image.save(buf, "PNG")
-    image.close()
-    return buf.getvalue()
+    return bake_png(image, angle, (0, 0, 0, 0) if clear else _PLATE_BG)
 
 
 def _fail(message: str) -> None:

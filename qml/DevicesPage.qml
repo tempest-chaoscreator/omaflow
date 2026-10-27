@@ -270,8 +270,7 @@ Column {
   }
 
   function toggleFold(uid) {
-    var next = ({})
-    for (var k in opened) next[k] = opened[k]
+    var next = Cc.copyMap(opened)
     next[uid] = next[uid] !== true
     opened = next
   }
@@ -299,8 +298,16 @@ Column {
     service.setDeviceHidden(uid, !deviceHidden(uid))
   }
 
+  function liveReading(channel) {
+    var src = channelOf(channel) || channel || {}
+    var map = service && service.channelLive
+    var key = src && src.key
+    if (map && key && map[key]) return map[key]
+    return src
+  }
+
   function dutyText(channel) {
-    var src = channelOf(channel) || {}
+    var src = liveReading(channel)
     var duty = isFinite(Number(src.duty)) ? Math.round(Number(src.duty)) + "%" : "—"
     var rpm = isFinite(Number(src.rpm)) ? Math.round(Number(src.rpm)) + " rpm" : ""
     return rpm ? duty + "    " + rpm : duty
@@ -313,7 +320,7 @@ Column {
   }
 
   function fanOn(channel) {
-    var src = channelOf(channel)
+    var src = liveReading(channel)
     return Number(src && src.rpm) > 0
   }
 

@@ -22,7 +22,6 @@ Panel {
   readonly property bool ready: connection === "ready"
   readonly property string daemonGate: service ? String(service.daemonGate || "unknown") : "unknown"
   readonly property bool showPair: daemonGate === "up" && (connection === "need-token" || connection === "unauthorized")
-  readonly property var temps: service && service.temps ? service.temps : ({})
   readonly property var modes: service && service.modes ? service.modes : []
   readonly property string activeModeUid: service ? String(service.activeModeUid || "") : ""
   readonly property string activeModeName: service ? String(service.activeModeName || "") : ""
@@ -30,7 +29,16 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color accent: Commons.Color.accent
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
-  readonly property real hottest: temps && isFinite(Number(temps.hottest)) ? Number(temps.hottest) : NaN
+  readonly property real hottest: {
+    var sample = service && service.temps ? service.temps : null
+    return sample && isFinite(Number(sample.hottest)) ? Number(sample.hottest) : NaN
+  }
+  readonly property string alertLine: ready && service ? Cc.activeAlertLine(service.alerts) : ""
+  readonly property string alertTip: {
+    if (!ready || !service) return ""
+    var names = Cc.activeAlertNames(service.alerts)
+    return names.length ? (" · " + names.join(" · ")) : ""
+  }
   readonly property string openPath: Repo.rootFile("scripts/open_app.sh")
 
   property string tab: "telemetry"
@@ -141,6 +149,35 @@ Panel {
     pickMode(modes[index].uid)
   }
 
+  component TabFace: Rectangle {
+    id: face
+    property string tabId: ""
+    property string label: ""
+    width: parent ? (parent.width - parent.spacing) / 2 : 0
+    height: root.modeH
+    radius: 0
+    color: root.tab === tabId
+      ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+      : "transparent"
+    border.width: 1
+    border.color: root.aim("tab", tabId) || root.tab === tabId ? root.accent : root.line
+
+    Text {
+      anchors.centerIn: parent
+      text: face.label
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(12)
+      font.bold: root.tab === face.tabId
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.tab = face.tabId
+    }
+  }
+
   onModesChanged: ensureMode()
   onActiveModeUidChanged: ensureMode()
   onOpenedChanged: {
@@ -172,9 +209,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰈐 " + (root.ready ? root.tempText(root.hottest) : "…")
+    text: "󰈐 " + (root.ready ? root.tempText(root.hottest) : "…") + (root.alertLine ? ("  " + root.alertLine) : "")
     tooltipText: root.ready
-      ? ("Omaflow Plugin · " + (root.activeModeName || "no mode"))
+      ? ("Omaflow Plugin · " + (root.activeModeName || "no mode") + root.alertTip)
       : "Omaflow Plugin · " + root.connection
     foreground: root.accent
     onPressed: root.toggle()
@@ -254,13 +291,25 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               text: Model.flavorText(
                 root.mode ? root.mode.name : root.activeModeName,
-                Model.hottest(root.temps)
+                root.hottest
               )
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.space(13)
               font.bold: true
             }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            visible: root.alertLine !== ""
+            text: root.alertTip.substring(3)
+            textFormat: Text.PlainText
+            color: root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(12)
+            font.bold: true
           }
 
           Text {
@@ -333,53 +382,8 @@ Panel {
             spacing: Style.space(6)
             visible: root.ready
 
-            Rectangle {
-              width: (parent.width - parent.spacing) / 2
-              height: root.modeH
-              radius: 0
-              color: root.tab === "telemetry"
-                ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-                : "transparent"
-              border.width: 1
-              border.color: root.aim("tab", "telemetry") || root.tab === "telemetry" ? root.accent : root.line
-              Text {
-                anchors.centerIn: parent
-                text: "Telemetry"
-                color: root.fg
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(12)
-                font.bold: root.tab === "telemetry"
-              }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.tab = "telemetry"
-              }
-            }
-
-            Rectangle {
-              width: (parent.width - parent.spacing) / 2
-              height: root.modeH
-              radius: 0
-              color: root.tab === "mode"
-                ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-                : "transparent"
-              border.width: 1
-              border.color: root.aim("tab", "mode") || root.tab === "mode" ? root.accent : root.line
-              Text {
-                anchors.centerIn: parent
-                text: "Mode"
-                color: root.fg
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(12)
-                font.bold: root.tab === "mode"
-              }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.tab = "mode"
-              }
-            }
+            TabFace { tabId: "telemetry"; label: "Telemetry" }
+            TabFace { tabId: "mode"; label: "Mode" }
           }
 
           Item {
@@ -439,9 +443,9 @@ Panel {
                 model: root.modes
                 delegate: Button {
                   required property var modelData
-                  required property int index
                   readonly property bool chosen: modelData.uid === root.modeUid
                   readonly property bool running: modelData.uid === root.activeModeUid
+                  readonly property bool hell: /hell/i.test(String(modelData.name || ""))
                   readonly property int slot: {
                     var count = root.modes.length
                     if (count < 1) return 0
@@ -456,10 +460,8 @@ Panel {
                   selected: chosen
                   hasCursor: root.aim("mode", modelData.uid)
                   bordered: true
-                  foreground: running
-                    ? (/hell/i.test(modelData.name) ? Commons.Color.urgent : root.accent)
-                    : root.fg
-                  accent: /hell/i.test(modelData.name) ? Commons.Color.urgent : root.accent
+                  foreground: running ? (hell ? Commons.Color.urgent : root.accent) : root.fg
+                  accent: hell ? Commons.Color.urgent : root.accent
                   fontFamily: root.fontFamily
                   fontSize: Style.font.caption
                   horizontalPadding: Style.space(2)
@@ -497,7 +499,7 @@ Panel {
 
           MonitoringPage {
             width: parent.width
-            visible: root.ready && root.tab === "telemetry"
+            visible: root.opened && root.ready && root.tab === "telemetry"
             service: root.service
             fg: root.fg
             accent: root.accent

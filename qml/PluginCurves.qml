@@ -27,38 +27,35 @@ Column {
   readonly property var curveBoard: buildCurves()
   readonly property string curveSig: curveSignature(curveBoard)
 
-  function concealed(uid) {
-    var map = service && service.hiddenDevices ? service.hiddenDevices : ({})
-    return map[String(uid || "")] === true
-  }
-
-  function groupNames(key) {
-    var names = []
+  function groupIndex() {
+    var named = ({})
     var groups = service && service.groups ? service.groups : []
-    var i
-    var m
-    for (i = 0; i < groups.length; i++) {
-      var members = groups[i].members || []
-      for (m = 0; m < members.length; m++) {
-        if (members[m] !== key) continue
-        var name = groups[i].name || "Group"
-        if (names.indexOf(name) < 0) names.push(name)
+    for (var i = 0; i < groups.length; i++) {
+      var keys = groups[i].members || []
+      var name = groups[i].name || "Group"
+      for (var m = 0; m < keys.length; m++) {
+        var bucket = named[keys[m]]
+        if (!bucket) named[keys[m]] = bucket = []
+        if (bucket.indexOf(name) < 0) bucket.push(name)
       }
     }
-    return names
+    return named
   }
 
   function buildCurves() {
     if (!mode || !service) return []
+    var hidden = service.hiddenDevices || ({})
+    var named = groupIndex()
     var members = Cc.modeMembers(mode, service.channels, service.profiles)
     var order = []
     var by = ({})
     for (var i = 0; i < members.length; i++) {
       var row = members[i]
-      if (concealed(row.deviceUid)) continue
+      if (hidden[String(row.deviceUid || "")] === true) continue
       var id = row.profileUid || ("fixed:" + row.key)
-      if (!by[id]) {
-        by[id] = {
+      var card = by[id]
+      if (!card) {
+        card = by[id] = {
           id: id,
           labels: [],
           groups: [],
@@ -71,15 +68,14 @@ Column {
       }
       var fan = row.label || row.name || ""
       var device = row.deviceName || ""
-      by[id].labels.push(device ? (device + "  ·  " + fan) : fan)
-      var names = groupNames(row.key)
-      var g
-      for (g = 0; g < names.length; g++) {
-        if (by[id].groups.indexOf(names[g]) < 0) by[id].groups.push(names[g])
+      card.labels.push(device ? (device + "  ·  " + fan) : fan)
+      var names = named[row.key] || []
+      for (var g = 0; g < names.length; g++) {
+        if (card.groups.indexOf(names[g]) < 0) card.groups.push(names[g])
       }
       if (row.isPump) {
-        by[id].pump = true
-        by[id].minDuty = Math.max(by[id].minDuty, Number(row.minDuty) || 0)
+        card.pump = true
+        card.minDuty = Math.max(card.minDuty, Number(row.minDuty) || 0)
       }
     }
     var out = []
@@ -87,24 +83,35 @@ Column {
     return out
   }
 
+  // The whole graph is the key. A resampled curve can change in the middle
+  // while the ends stay, and the pump floor caption follows minDuty.
   function curveSignature(board) {
-    var parts = []
+    var parts = [modeUid || ""]
     var list = board || []
     for (var i = 0; i < list.length; i++) {
       var card = list[i]
       var pts = card.points || []
-      var ends = pts.length ? (pts[0][0] + "," + pts[0][1] + ":" + pts[pts.length - 1][0] + "," + pts[pts.length - 1][1]) : ""
+      var flat = []
+      for (var p = 0; p < pts.length; p++) {
+        if (!pts[p] || pts[p].length < 2) continue
+        flat.push(pts[p][0] + "," + pts[p][1])
+      }
       parts.push([
         card.id || "",
         (card.groups || []).join("+"),
         (card.labels || []).join("+"),
-        String(pts.length),
-        ends,
+        flat.join(";"),
         card.fixed === null || card.fixed === undefined ? "" : String(card.fixed),
-        card.pump ? "p" : "f"
+        card.pump ? "p" : "f",
+        String(Number(card.minDuty) || 0)
       ].join("~"))
     }
-    return (modeUid || "") + "|" + parts.join("|")
+    return parts.join("|")
+  }
+
+  function floorNote(card) {
+    var label = Cc.floorCaption(card && card.pump, card && card.minDuty)
+    return label ? ("  ·  " + label) : ""
   }
 
   function shownPoints(card) {
@@ -131,7 +138,9 @@ Column {
   Repeater {
     model: root.stableCurves
     delegate: Column {
+      id: card
       required property var modelData
+      readonly property var drawn: root.shownPoints(modelData)
       width: root.width
       spacing: Style.space(4)
 
@@ -149,7 +158,7 @@ Column {
 
       Text {
         width: parent.width
-        text: (modelData.labels || []).join("  ·  ") + (modelData.pump ? "  ·  floor 50%" : "")
+        text: (modelData.labels || []).join("  ·  ") + root.floorNote(modelData)
         color: root.fg
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -159,10 +168,10 @@ Column {
 
       CurveView {
         width: parent.width
-        height: root.shownPoints(modelData).length > 1 ? Style.space(110) : 0
+        height: card.drawn.length > 1 ? Style.space(110) : 0
         visible: height > 0
         interactive: false
-        points: root.shownPoints(modelData)
+        points: card.drawn
         minDuty: modelData.minDuty || 0
         foreground: root.fg
         accent: root.accent
@@ -171,7 +180,7 @@ Column {
 
       Text {
         width: parent.width
-        visible: root.shownPoints(modelData).length < 2
+        visible: card.drawn.length < 2
         text: "No curve stored for this channel."
         color: root.muted
         font.family: root.fontFamily

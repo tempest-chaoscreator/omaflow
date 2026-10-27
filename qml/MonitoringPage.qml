@@ -74,11 +74,15 @@ Column {
   }
 
   function tempText(value) {
-    return isFinite(Number(value)) ? Math.round(Number(value)) + "°" : "—"
+    if (value === null || value === undefined || value === "") return "—"
+    var n = Number(value)
+    return isFinite(n) ? Math.round(n) + "°" : "—"
   }
 
   function oneDecimal(value) {
-    return isFinite(Number(value)) ? Number(value).toFixed(1) + "°" : "—"
+    if (value === null || value === undefined || value === "") return "—"
+    var n = Number(value)
+    return isFinite(n) ? n.toFixed(1) + "°" : "—"
   }
 
   function fullName(model, fallback) {
@@ -219,6 +223,8 @@ Column {
   }
 
   function liveOf(key) {
+    var map = service && service.channelLive
+    if (map && map[key]) return map[key]
     var list = service && service.channels ? service.channels : []
     for (var i = 0; i < list.length; i++) if (list[i].key === key) return list[i]
     return null
@@ -300,6 +306,10 @@ Column {
     if (service) service.watchProcesses = visible
   }
 
+  function scaleFloor(side) {
+    return side === "gpu" ? 20 : 2
+  }
+
   function noteRows(side, rows) {
     var now = Date.now()
     var next = ({})
@@ -317,11 +327,10 @@ Column {
       if (!row || !row.name) continue
       var id = side + "\n" + row.name
       var prev = cur[id]
-      var sample = Number(row.percent)
-      if (!isFinite(sample) || sample < 0) sample = 0
+      var sample = loadOf(row)
       var max = prev ? Number(prev.max) : sample
       if (!isFinite(max) || sample > max) max = sample
-      var lit = Scale.litCount(sample, Scale.ceiling(max), meterSquares)
+      var lit = Scale.litCount(sample, Scale.ceiling(max, scaleFloor(side)), meterSquares)
       next[id] = {
         max: max,
         seen: now,
@@ -504,6 +513,7 @@ Column {
         }
         Text {
           width: parent.width
+          visible: root.num(root.temps.cpuCcd1) !== null || root.num(root.temps.cpuCcd2) !== null
           text: "CCD1 " + root.oneDecimal(root.temps.cpuCcd1) + "  ·  CCD2 " + root.oneDecimal(root.temps.cpuCcd2)
           color: root.muted
           font.family: root.fontFamily
@@ -550,9 +560,16 @@ Column {
         Text {
           width: parent.width
           text: {
-            var load = isFinite(Number(root.temps.gpuLoad)) ? Math.round(Number(root.temps.gpuLoad)) + "%" : "—"
+            // The process header is nvidia-smi utilization. The daemon's
+            // "GPU Load" channel is a different sensor and was drawing 0%
+            // beside a 43% header.
+            var load = NaN
+            if (root.service && root.service.processGpuOk !== false)
+              load = Number(root.service.processGpuTotal)
+            if (!isFinite(load)) load = Number(root.temps.gpuLoad)
+            var loadText = isFinite(load) ? Math.round(load) + "%" : "—"
             var watts = isFinite(Number(root.temps.gpuPower)) ? Math.round(Number(root.temps.gpuPower)) + " W" : "—"
-            return load + "  ·  " + watts
+            return loadText + "  ·  " + watts
           }
           color: root.muted
           font.family: root.fontFamily
@@ -744,373 +761,205 @@ Column {
     font.pixelSize: Style.space(12)
   }
 
+  component ProcessColumn: Column {
+    id: column
+    property string side: "cpu"
+    property string title: "CPU"
+    property string emptyText: "No CPU samples yet"
+    property var rows: []
+    width: (parent.width - parent.spacing) / 2
+    spacing: Style.space(6)
+
+    Item {
+      width: parent.width
+      height: Style.space(22)
+
+      Item {
+        id: nameHit
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        width: nameWord.implicitWidth + Style.space(4) + Style.space(14)
+        height: parent.height
+
+        Text {
+          id: nameWord
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: column.title
+          color: root.sortOn(column.side, "name") ? root.accent : root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(13)
+          font.bold: true
+        }
+        OpticalGlyph {
+          anchors.left: nameWord.right
+          anchors.leftMargin: Style.space(4)
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(14)
+          height: Style.space(14)
+          text: root.sortGlyph(column.side, "name")
+          fontFamily: root.fontFamily
+          fontSize: Style.space(14)
+          color: root.sortOn(column.side, "name") ? root.accent : root.muted
+        }
+        MouseArea {
+          id: nameMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.toggleSort(column.side, "name")
+        }
+        PanelToolTip {
+          visible: nameMouse.containsMouse
+          text: root.sortTip(column.side, "name")
+          fontFamily: root.fontFamily
+          panelBackground: Commons.Color.background
+          panelForeground: Commons.Color.foreground
+          panelBorder: Commons.Color.accent
+        }
+      }
+
+      Item {
+        id: loadHit
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        height: parent.height
+        width: totalMeter.implicitWidth + Style.space(6) + root.pctWidth + root.sortSlot
+
+        LoadMeter {
+          id: totalMeter
+          anchors.right: totalPct.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          squares: root.meterSquares
+          lit: Scale.litCount(root.totalOf(column.side), 100, root.meterSquares)
+          hold: root.totalHold[column.side] === undefined ? -1 : root.totalHold[column.side]
+          palette: root.palette
+        }
+        Text {
+          id: totalPct
+          anchors.right: loadGlyph.left
+          anchors.rightMargin: Style.space(4)
+          anchors.verticalCenter: parent.verticalCenter
+          width: root.pctWidth
+          horizontalAlignment: Text.AlignRight
+          text: root.pctText(root.totalOf(column.side))
+          color: root.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(12)
+        }
+        OpticalGlyph {
+          id: loadGlyph
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(14)
+          height: Style.space(14)
+          text: root.sortGlyph(column.side, "load")
+          fontFamily: root.fontFamily
+          fontSize: Style.space(14)
+          color: root.sortOn(column.side, "load") ? root.accent : root.muted
+        }
+        MouseArea {
+          id: loadMouse
+          anchors.left: totalMeter.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.toggleSort(column.side, "load")
+        }
+        PanelToolTip {
+          visible: loadMouse.containsMouse
+          text: root.sortTip(column.side, "load")
+          fontFamily: root.fontFamily
+          panelBackground: Commons.Color.background
+          panelForeground: Commons.Color.foreground
+          panelBorder: Commons.Color.accent
+        }
+      }
+    }
+
+    Text {
+      width: parent.width
+      visible: root.shownProcesses(column.rows, column.side).length === 0
+      text: column.emptyText
+      wrapMode: Text.WordWrap
+      color: root.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Repeater {
+      model: root.shownProcesses(column.rows, column.side)
+      delegate: Item {
+        id: procRow
+        required property var modelData
+        readonly property real sample: root.loadOf(modelData)
+        readonly property var remembered: root.scales[column.side + "\n" + modelData.name]
+        readonly property real scaleTop: Scale.ceiling(remembered ? remembered.max : sample, root.scaleFloor(column.side))
+        readonly property int lit: Scale.litCount(sample, scaleTop, root.meterSquares)
+        readonly property int hold: remembered ? remembered.hold : -1
+        width: column.width
+        height: Style.space(22)
+
+        Text {
+          anchors.left: parent.left
+          anchors.right: procMeter.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          text: modelData.name + (Number(modelData.count) > 1 ? "  ×" + modelData.count : "")
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(12)
+          elide: Text.ElideRight
+        }
+
+        LoadMeter {
+          id: procMeter
+          anchors.right: procPct.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          squares: root.meterSquares
+          lit: procRow.lit
+          hold: procRow.hold
+          palette: root.palette
+        }
+
+        Text {
+          id: procPct
+          anchors.right: parent.right
+          anchors.rightMargin: root.sortSlot
+          anchors.verticalCenter: parent.verticalCenter
+          width: root.pctWidth
+          horizontalAlignment: Text.AlignRight
+          text: root.pctText(root.loadOf(procRow.modelData))
+          color: root.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(12)
+        }
+      }
+    }
+  }
+
   Row {
     id: processBlock
     width: parent.width
     spacing: Style.space(16)
     visible: root.service && root.service.connection === "ready"
 
-    Column {
-      id: cpuProc
-      width: (parent.width - parent.spacing) / 2
-      spacing: Style.space(6)
-      property string side: "cpu"
-
-      Item {
-        width: parent.width
-        height: Style.space(22)
-
-        Item {
-          id: cpuNameHit
-          anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-          width: cpuWord.implicitWidth + Style.space(4) + Style.space(14)
-          height: parent.height
-
-          Text {
-            id: cpuWord
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: "CPU"
-            color: root.sortOn("cpu", "name") ? root.accent : root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(13)
-            font.bold: true
-          }
-          OpticalGlyph {
-            anchors.left: cpuWord.right
-            anchors.leftMargin: Style.space(4)
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(14)
-            height: Style.space(14)
-            text: root.sortGlyph("cpu", "name")
-            fontFamily: root.fontFamily
-            fontSize: Style.space(14)
-            color: root.sortOn("cpu", "name") ? root.accent : root.muted
-          }
-          MouseArea {
-            id: cpuNameMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.toggleSort("cpu", "name")
-          }
-          PanelToolTip {
-            visible: cpuNameMouse.containsMouse
-            text: root.sortTip("cpu", "name")
-            fontFamily: root.fontFamily
-            panelBackground: Commons.Color.background
-            panelForeground: Commons.Color.foreground
-            panelBorder: Commons.Color.accent
-          }
-        }
-
-        Item {
-          id: cpuLoadHit
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          height: parent.height
-          width: cpuTotalMeter.implicitWidth + Style.space(6) + root.pctWidth + root.sortSlot
-
-          LoadMeter {
-            id: cpuTotalMeter
-            anchors.right: cpuTotalPct.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            squares: root.meterSquares
-            lit: Scale.litCount(root.totalOf("cpu"), 100, root.meterSquares)
-            hold: root.totalHold.cpu === undefined ? -1 : root.totalHold.cpu
-            palette: root.palette
-          }
-          Text {
-            id: cpuTotalPct
-            anchors.right: cpuLoadGlyph.left
-            anchors.rightMargin: Style.space(4)
-            anchors.verticalCenter: parent.verticalCenter
-            width: root.pctWidth
-            horizontalAlignment: Text.AlignRight
-            text: root.pctText(root.totalOf("cpu"))
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-          }
-          OpticalGlyph {
-            id: cpuLoadGlyph
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(14)
-            height: Style.space(14)
-            text: root.sortGlyph("cpu", "load")
-            fontFamily: root.fontFamily
-            fontSize: Style.space(14)
-            color: root.sortOn("cpu", "load") ? root.accent : root.muted
-          }
-          MouseArea {
-            id: cpuLoadMouse
-            anchors.left: cpuTotalMeter.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.toggleSort("cpu", "load")
-          }
-          PanelToolTip {
-            visible: cpuLoadMouse.containsMouse
-            text: root.sortTip("cpu", "load")
-            fontFamily: root.fontFamily
-            panelBackground: Commons.Color.background
-            panelForeground: Commons.Color.foreground
-            panelBorder: Commons.Color.accent
-          }
-        }
-      }
-
-      Text {
-        width: parent.width
-        visible: root.shownProcesses(root.service ? root.service.processCpu : [], "cpu").length === 0
-        text: "No CPU samples yet"
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      Repeater {
-        model: root.shownProcesses(root.service ? root.service.processCpu : [], "cpu")
-        delegate: Item {
-          id: cpuRow
-          required property var modelData
-          readonly property real sample: {
-            var value = Number(modelData.percent)
-            return isFinite(value) && value > 0 ? value : 0
-          }
-          readonly property var remembered: root.scales[cpuProc.side + "\n" + modelData.name]
-          readonly property real scaleTop: Scale.ceiling(remembered ? remembered.max : sample)
-          readonly property int lit: Scale.litCount(sample, scaleTop, root.meterSquares)
-          readonly property int hold: remembered ? remembered.hold : -1
-          width: cpuProc.width
-          height: Style.space(22)
-
-          Text {
-            id: cpuName
-            anchors.left: parent.left
-            anchors.right: cpuMeter.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            text: modelData.name + (Number(modelData.count) > 1 ? "  ×" + modelData.count : "")
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-            elide: Text.ElideRight
-          }
-
-          LoadMeter {
-            id: cpuMeter
-            anchors.right: cpuPct.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            squares: root.meterSquares
-            lit: cpuRow.lit
-            hold: cpuRow.hold
-            palette: root.palette
-          }
-
-          Text {
-            id: cpuPct
-            anchors.right: parent.right
-            anchors.rightMargin: root.sortSlot
-            anchors.verticalCenter: parent.verticalCenter
-            width: root.pctWidth
-            horizontalAlignment: Text.AlignRight
-            text: root.pctText(root.loadOf(cpuRow.modelData))
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-          }
-        }
-      }
+    ProcessColumn {
+      side: "cpu"
+      title: "CPU"
+      emptyText: "No CPU samples yet"
+      rows: root.service ? root.service.processCpu : []
     }
 
-    Column {
-      id: gpuProc
-      width: (parent.width - parent.spacing) / 2
-      spacing: Style.space(6)
-      property string side: "gpu"
-
-      Item {
-        width: parent.width
-        height: Style.space(22)
-
-        Item {
-          id: gpuNameHit
-          anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-          width: gpuWord.implicitWidth + Style.space(4) + Style.space(14)
-          height: parent.height
-
-          Text {
-            id: gpuWord
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: "GPU"
-            color: root.sortOn("gpu", "name") ? root.accent : root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(13)
-            font.bold: true
-          }
-          OpticalGlyph {
-            anchors.left: gpuWord.right
-            anchors.leftMargin: Style.space(4)
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(14)
-            height: Style.space(14)
-            text: root.sortGlyph("gpu", "name")
-            fontFamily: root.fontFamily
-            fontSize: Style.space(14)
-            color: root.sortOn("gpu", "name") ? root.accent : root.muted
-          }
-          MouseArea {
-            id: gpuNameMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.toggleSort("gpu", "name")
-          }
-          PanelToolTip {
-            visible: gpuNameMouse.containsMouse
-            text: root.sortTip("gpu", "name")
-            fontFamily: root.fontFamily
-            panelBackground: Commons.Color.background
-            panelForeground: Commons.Color.foreground
-            panelBorder: Commons.Color.accent
-          }
-        }
-
-        Item {
-          id: gpuLoadHit
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          height: parent.height
-          width: gpuTotalMeter.implicitWidth + Style.space(6) + root.pctWidth + root.sortSlot
-
-          LoadMeter {
-            id: gpuTotalMeter
-            anchors.right: gpuTotalPct.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            squares: root.meterSquares
-            lit: Scale.litCount(root.totalOf("gpu"), 100, root.meterSquares)
-            hold: root.totalHold.gpu === undefined ? -1 : root.totalHold.gpu
-            palette: root.palette
-          }
-          Text {
-            id: gpuTotalPct
-            anchors.right: gpuLoadGlyph.left
-            anchors.rightMargin: Style.space(4)
-            anchors.verticalCenter: parent.verticalCenter
-            width: root.pctWidth
-            horizontalAlignment: Text.AlignRight
-            text: root.pctText(root.totalOf("gpu"))
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-          }
-          OpticalGlyph {
-            id: gpuLoadGlyph
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(14)
-            height: Style.space(14)
-            text: root.sortGlyph("gpu", "load")
-            fontFamily: root.fontFamily
-            fontSize: Style.space(14)
-            color: root.sortOn("gpu", "load") ? root.accent : root.muted
-          }
-          MouseArea {
-            id: gpuLoadMouse
-            anchors.left: gpuTotalMeter.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.toggleSort("gpu", "load")
-          }
-          PanelToolTip {
-            visible: gpuLoadMouse.containsMouse
-            text: root.sortTip("gpu", "load")
-            fontFamily: root.fontFamily
-            panelBackground: Commons.Color.background
-            panelForeground: Commons.Color.foreground
-            panelBorder: Commons.Color.accent
-          }
-        }
-      }
-
-      Text {
-        width: parent.width
-        visible: root.shownProcesses(root.service ? root.service.processGpu : [], "gpu").length === 0
-        text: root.service && root.service.processGpuOk === false ? "GPU processes unavailable" : "No GPU samples yet"
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
-      }
-
-      Repeater {
-        model: root.shownProcesses(root.service ? root.service.processGpu : [], "gpu")
-        delegate: Item {
-          id: gpuRow
-          required property var modelData
-          readonly property real sample: {
-            var value = Number(modelData.percent)
-            return isFinite(value) && value > 0 ? value : 0
-          }
-          readonly property var remembered: root.scales[gpuProc.side + "\n" + modelData.name]
-          readonly property real scaleTop: Scale.ceiling(remembered ? remembered.max : sample)
-          readonly property int lit: Scale.litCount(sample, scaleTop, root.meterSquares)
-          readonly property int hold: remembered ? remembered.hold : -1
-          width: gpuProc.width
-          height: Style.space(22)
-
-          Text {
-            id: gpuName
-            anchors.left: parent.left
-            anchors.right: gpuMeter.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            text: modelData.name + (Number(modelData.count) > 1 ? "  ×" + modelData.count : "")
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-            elide: Text.ElideRight
-          }
-
-          LoadMeter {
-            id: gpuMeter
-            anchors.right: gpuPct.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            squares: root.meterSquares
-            lit: gpuRow.lit
-            hold: gpuRow.hold
-            palette: root.palette
-          }
-
-          Text {
-            id: gpuPct
-            anchors.right: parent.right
-            anchors.rightMargin: root.sortSlot
-            anchors.verticalCenter: parent.verticalCenter
-            width: root.pctWidth
-            horizontalAlignment: Text.AlignRight
-            text: root.pctText(root.loadOf(gpuRow.modelData))
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-          }
-        }
-      }
+    ProcessColumn {
+      side: "gpu"
+      title: "GPU"
+      emptyText: root.service && root.service.processGpuOk === false ? "GPU processes unavailable" : "No GPU samples yet"
+      rows: root.service ? root.service.processGpu : []
     }
   }
 
@@ -1138,8 +987,9 @@ Column {
       for (key in cur) {
         var row = cur[key]
         if (!row || now - row.seen >= 180000) continue
+        var side = String(key).indexOf("gpu\n") === 0 ? "gpu" : "cpu"
         next[key] = {
-          max: Scale.decayMax(row.max, row.sample),
+          max: Scale.decayMax(row.max, row.sample, root.scaleFloor(side)),
           seen: row.seen,
           hold: row.hold,
           sample: row.sample
