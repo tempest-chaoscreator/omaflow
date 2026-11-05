@@ -911,11 +911,12 @@ def _picture_path_from_view() -> str:
     return str(view.get("picture") or "")
 
 
-def _picture_fd(raw: object) -> tuple[int, str] | None:
+def _picture_fd(raw: object) -> tuple[int, str, int] | None:
     """Open one regular image under the home directory. A symlink is refused.
 
     The walk opens each directory with O_NOFOLLOW, so a link in the middle
-    cannot point the read outside home. The caller closes the file descriptor.
+    cannot point the read outside home. The third value is the size already
+    checked against the ceiling. The caller closes the file descriptor.
     """
     text = str(raw or "").strip()
     if not text or len(text) > 4096 or "\x00" in text or not text.startswith("/"):
@@ -953,7 +954,7 @@ def _picture_fd(raw: object) -> tuple[int, str] | None:
             os.close(fd)
             return None
         ident = "%s:%s:%s" % (getattr(info, "st_mtime_ns", int(info.st_mtime)), info.st_size, path)
-        return fd, ident
+        return fd, ident, info.st_size
     except OSError:
         if fd >= 0:
             os.close(fd)
@@ -966,20 +967,21 @@ def _picture_fd(raw: object) -> tuple[int, str] | None:
 
 
 def _load_picture(raw: object) -> tuple[bytes, str] | None:
+    """Read the checked size. A later stat would follow a growth of that same file."""
     opened = _picture_fd(raw)
     if not opened:
         return None
-    fd, ident = opened
+    fd, ident, size = opened
     try:
-        info = os.fstat(fd)
-        blob = bytearray()
-        while len(blob) < info.st_size:
-            chunk = os.read(fd, min(1024 * 1024, info.st_size - len(blob)))
-            if not chunk:
-                break
-            blob.extend(chunk)
-        if len(blob) != info.st_size:
+        if size <= 0 or size > _PICTURE_LIMIT:
             return None
+        blob = bytearray()
+        while len(blob) < size:
+            want = min(1024 * 1024, size - len(blob))
+            chunk = os.read(fd, want)
+            if not chunk:
+                return None
+            blob.extend(chunk[:want])
         return bytes(blob), ident
     except OSError:
         return None
