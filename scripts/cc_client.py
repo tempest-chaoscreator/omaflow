@@ -1733,6 +1733,24 @@ def _pick_temp(rows: list[tuple[str, float]], pattern: str):
     return max(temp for _, temp in rows)
 
 
+def _gpu_edge(rows: list[tuple[str, float]]):
+    """Edge temperature. Hotspot loses to any other GPU sensor."""
+    best = None
+    rank = -1
+    for name, temp in rows:
+        score = 1
+        if re.search(r"hotspot|hot spot", name, re.I):
+            score = 0
+        if re.search(r"edge", name, re.I):
+            score = 3
+        if re.search(r"gpu temp$", name, re.I):
+            score = 4
+        if score > rank:
+            rank = score
+            best = temp
+    return best
+
+
 def _whole(value) -> str:
     if value is None:
         return "—"
@@ -1761,9 +1779,7 @@ def _screen_numbers(face: str, devices: list, status: dict) -> tuple[str, str]:
         if kind == "CPU":
             cpu = _pick_temp(labeled, r"package|tctl|tdie")
         elif kind == "GPU":
-            gpu = _match_temp(labeled, r"gpu temp$")
-            if gpu is None:
-                gpu = _pick_temp(labeled, r"edge|gpu|temp")
+            gpu = _gpu_edge(labeled)
         for name, temp in labeled:
             if re.search(r"liquid|coolant|water", name, re.I):
                 coolant = temp

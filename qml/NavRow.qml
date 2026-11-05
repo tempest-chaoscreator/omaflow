@@ -21,8 +21,8 @@ Rectangle {
   height: Style.space(36)
   radius: 0
   color: on
-    ? Qt.rgba(accent.r, accent.g, accent.b, 0.14)
-    : (armed ? Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06) : "transparent")
+    ? Qt.rgba(accent.r, accent.g, accent.b, hit.containsMouse ? 0.20 : 0.14)
+    : ((armed || hit.containsMouse) ? Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06) : "transparent")
 
   Rectangle {
     width: 2
@@ -33,25 +33,26 @@ Rectangle {
 
   OpticalGlyph {
     id: glyph
+    visible: root.mark !== ""
     anchors.left: parent.left
     anchors.leftMargin: Style.space(8)
     anchors.verticalCenter: parent.verticalCenter
-    width: Style.space(16)
+    width: visible ? Style.space(16) : 0
     height: Style.space(16)
     text: root.mark
     fontFamily: root.fontFamily
     fontSize: Style.space(14)
-    color: root.on || root.armed ? root.accent : root.foreground
+    color: root.on || root.armed || hit.containsMouse ? root.accent : root.foreground
   }
 
   Text {
     anchors.left: glyph.right
-    anchors.leftMargin: Style.space(10)
+    anchors.leftMargin: root.mark !== "" ? Style.space(10) : Style.space(8)
     anchors.right: parent.right
     anchors.rightMargin: Style.space(8)
     anchors.verticalCenter: parent.verticalCenter
     text: root.label
-    color: root.on || root.armed ? root.accent : root.foreground
+    color: root.on || root.armed || hit.containsMouse ? root.accent : root.foreground
     font.family: root.fontFamily
     font.pixelSize: Style.space(13)
     font.bold: root.on
@@ -59,7 +60,9 @@ Rectangle {
   }
 
   MouseArea {
+    id: hit
     anchors.fill: parent
+    hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
     onClicked: root.picked()
   }

@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
+import "Marks.js" as Marks
 import "ProcessScale.js" as Scale
 import "ThemePalette.js" as ThemePalette
 
@@ -18,7 +19,7 @@ Column {
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
-  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
+  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
   property string fontFamily: Style.font.family
   property int chartHeight: Style.space(168)
   property bool fill: false
@@ -83,6 +84,16 @@ Column {
     if (value === null || value === undefined || value === "") return "—"
     var n = Number(value)
     return isFinite(n) ? n.toFixed(1) + "°" : "—"
+  }
+
+  function ccdLine() {
+    var a = num(temps.cpuCcd1)
+    var b = num(temps.cpuCcd2)
+    if (a === null && b === null) return ""
+    if (a !== null && b !== null)
+      return "CCD1 " + oneDecimal(a) + "  ·  CCD2 " + oneDecimal(b)
+    if (a !== null) return "CCD1 " + oneDecimal(a)
+    return "CCD2 " + oneDecimal(b)
   }
 
   function fullName(model, fallback) {
@@ -233,17 +244,24 @@ Column {
   function dutyOf(key) {
     var live = liveOf(key)
     if (!live) return -1
-    if (live.duty === null || live.duty === undefined || live.duty === "") {
-      var rpm = Number(live.rpm)
+    var duty = live.duty
+    if (duty === null || duty === undefined || duty === "") {
+      // Number(null) is 0. A missing tach is not a stopped fan.
+      var rawRpm = live.rpm
+      if (rawRpm === null || rawRpm === undefined || rawRpm === "") return -1
+      var rpm = Number(rawRpm)
       return isFinite(rpm) && rpm <= 0 ? 0 : -1
     }
-    var n = Number(live.duty)
+    var n = Number(duty)
     return isFinite(n) ? Math.max(0, Math.min(100, n)) : -1
   }
 
   function rpmOf(key) {
     var live = liveOf(key)
-    var n = live ? Number(live.rpm) : NaN
+    if (!live) return "—"
+    var raw = live.rpm
+    if (raw === null || raw === undefined || raw === "") return "—"
+    var n = Number(raw)
     return isFinite(n) ? Math.round(n) + " rpm" : "—"
   }
 
@@ -460,6 +478,33 @@ Column {
     onTriggered: root.pushSample()
   }
 
+  // The short name stays on its own line. The mark sits at the
+  // temperature's size, on the same baseline, to the left of the number.
+  component TempFigure: Row {
+    id: figureRow
+    property string mark: ""
+    property string value: ""
+    property color ink: root.accent
+    spacing: Style.space(6)
+
+    Text {
+      anchors.baseline: figureValue.baseline
+      text: figureRow.mark
+      color: figureRow.ink
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.displayLarge
+    }
+
+    Text {
+      id: figureValue
+      text: figureRow.value
+      color: figureRow.ink
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.displayLarge
+      font.bold: true
+    }
+  }
+
   Item {
     id: tempWrap
     width: parent.width
@@ -481,12 +526,24 @@ Column {
     Rectangle {
       id: cpuChip
       readonly property bool hot: tempHover.hx >= x && tempHover.hx < x + width
+      readonly property string model: root.fullName(root.temps.cpuName, "CPU")
       width: tempRow.chipW
       height: tempRow.boxH
       radius: 0
-      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+      clip: true
+      color: hot
+        ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.08)
+        : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
       border.width: 1
-      border.color: root.line
+      border.color: hot ? root.accent : root.line
+
+      Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 2
+        color: root.accent
+      }
 
       Column {
         id: cpuCol
@@ -495,26 +552,24 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         anchors.margins: Style.space(10)
         spacing: Style.space(2)
-        ChipTitle {
+        Text {
           width: parent.width
-          mark: "\uF4BC"
-          label: cpuChip.hot ? root.fullName(root.temps.cpuName, "CPU") : "CPU"
+          text: "CPU"
           color: root.fg
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          wrapLines: 2
-        }
-        Text {
-          text: root.tempText(root.temps.cpu)
-          color: root.accent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.displayLarge
-          font.bold: true
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+        TempFigure {
+          mark: Marks.cpu
+          value: root.tempText(root.temps.cpu)
+          ink: root.accent
         }
         Text {
           width: parent.width
-          visible: root.num(root.temps.cpuCcd1) !== null || root.num(root.temps.cpuCcd2) !== null
-          text: "CCD1 " + root.oneDecimal(root.temps.cpuCcd1) + "  ·  CCD2 " + root.oneDecimal(root.temps.cpuCcd2)
+          visible: root.ccdLine() !== ""
+          text: root.ccdLine()
+          textFormat: Text.PlainText
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -522,17 +577,38 @@ Column {
         }
       }
 
+      PanelToolTip {
+        visible: cpuChip.hot && cpuChip.model !== "CPU"
+        text: cpuChip.model
+        delay: 200
+        fontFamily: root.fontFamily
+        panelBackground: Commons.Color.background
+        panelForeground: Commons.Color.foreground
+        panelBorder: root.accent
+      }
     }
 
     Rectangle {
       id: gpuChip
       readonly property bool hot: tempHover.hx >= x && tempHover.hx < x + width
+      readonly property string model: root.fullName(root.temps.gpuName, "GPU")
       width: root.liquidOn ? tempRow.chipW : tempRow.chipLast
       height: tempRow.boxH
       radius: 0
-      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+      clip: true
+      color: hot
+        ? Qt.rgba(root.gpuColor.r, root.gpuColor.g, root.gpuColor.b, 0.10)
+        : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
       border.width: 1
-      border.color: root.line
+      border.color: hot ? root.gpuColor : root.line
+
+      Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 2
+        color: root.gpuColor
+      }
 
       Column {
         id: gpuCol
@@ -541,21 +617,18 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         anchors.margins: Style.space(10)
         spacing: Style.space(2)
-        ChipTitle {
-          width: parent.width
-          mark: "\uE266"
-          label: gpuChip.hot ? root.fullName(root.temps.gpuName, "GPU") : "GPU"
-          color: root.fg
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          wrapLines: 2
-        }
         Text {
-          text: root.tempText(root.temps.gpu)
-          color: root.gpuColor
+          width: parent.width
+          text: "GPU"
+          color: root.fg
           font.family: root.fontFamily
-          font.pixelSize: Style.font.displayLarge
-          font.bold: true
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+        TempFigure {
+          mark: Marks.gpu
+          value: root.tempText(root.temps.gpu)
+          ink: root.gpuColor
         }
         Text {
           width: parent.width
@@ -566,9 +639,13 @@ Column {
             var load = NaN
             if (root.service && root.service.processGpuOk !== false)
               load = Number(root.service.processGpuTotal)
-            if (!isFinite(load)) load = Number(root.temps.gpuLoad)
+            if (!isFinite(load)) {
+              var sensor = root.num(root.temps.gpuLoad)
+              if (sensor !== null) load = sensor
+            }
             var loadText = isFinite(load) ? Math.round(load) + "%" : "—"
-            var watts = isFinite(Number(root.temps.gpuPower)) ? Math.round(Number(root.temps.gpuPower)) + " W" : "—"
+            var power = root.num(root.temps.gpuPower)
+            var watts = power === null ? "—" : Math.round(power) + " W"
             return loadText + "  ·  " + watts
           }
           color: root.muted
@@ -578,17 +655,39 @@ Column {
         }
       }
 
+      PanelToolTip {
+        visible: gpuChip.hot && gpuChip.model !== "GPU"
+        text: gpuChip.model
+        delay: 200
+        fontFamily: root.fontFamily
+        panelBackground: Commons.Color.background
+        panelForeground: Commons.Color.foreground
+        panelBorder: root.gpuColor
+      }
     }
 
     Rectangle {
       id: liquidChip
+      readonly property bool hot: visible && tempHover.hx >= x && tempHover.hx < x + width
+      readonly property string model: root.fullName(root.temps.liquidName, "Liquid")
       visible: root.liquidOn
       width: tempRow.chipLast
       height: tempRow.boxH
       radius: 0
-      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+      clip: true
+      color: hot
+        ? Qt.rgba(root.liquidColor.r, root.liquidColor.g, root.liquidColor.b, 0.10)
+        : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
       border.width: 1
-      border.color: root.line
+      border.color: hot ? root.liquidColor : root.line
+
+      Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 2
+        color: root.liquidColor
+      }
 
       Column {
         id: liquidCol
@@ -597,21 +696,18 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         anchors.margins: Style.space(10)
         spacing: Style.space(2)
-        ChipTitle {
-          width: parent.width
-          // nf-md-water_thermometer_outline U+F1A86
-          mark: "\uDB86\uDE86"
-          label: "Liquid"
-          color: root.fg
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-        }
         Text {
-          text: root.tempText(root.temps.coolant)
-          color: root.liquidColor
+          width: parent.width
+          text: "Liquid"
+          color: root.fg
           font.family: root.fontFamily
-          font.pixelSize: Style.font.displayLarge
-          font.bold: true
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+        TempFigure {
+          mark: Marks.liquid
+          value: root.tempText(root.temps.coolant)
+          ink: root.liquidColor
         }
         Text {
           width: parent.width
@@ -621,6 +717,16 @@ Column {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+      }
+
+      PanelToolTip {
+        visible: liquidChip.hot && liquidChip.model !== "Liquid"
+        text: liquidChip.model
+        delay: 200
+        fontFamily: root.fontFamily
+        panelBackground: Commons.Color.background
+        panelForeground: Commons.Color.foreground
+        panelBorder: root.liquidColor
       }
     }
 
@@ -662,7 +768,7 @@ Column {
         readonly property int fans: Math.max(1, (modelData.rows || []).length)
         readonly property int side: root.gaugeSide(width, fans)
         width: root.gaugeCardWidth(gaugeRow.width, index, root.stableGauges)
-        implicitHeight: gaugeCol.implicitHeight + Style.space(16)
+        implicitHeight: gaugeCol.implicitHeight + Style.space(20)
         height: implicitHeight
         radius: 0
         color: "transparent"
@@ -675,21 +781,28 @@ Column {
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: parent.top
-          anchors.margins: Style.space(8)
+          anchors.margins: Style.space(10)
           spacing: Style.space(6)
 
-          Text {
+          Item {
             width: parent.width
-            text: gaugeCard.modelData.kind === "shared"
-              ? gaugeCard.modelData.name
-              : String(gaugeCard.modelData.name || "Device").toUpperCase()
-            textFormat: Text.PlainText
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Math.round(Style.font.caption * root.chipScale)
-            font.bold: true
-            font.letterSpacing: gaugeCard.modelData.kind === "shared" ? 0 : 0.6
-            elide: Text.ElideRight
+            height: gaugeTitle.implicitHeight
+
+            Text {
+              id: gaugeTitle
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: gaugeCard.modelData.kind === "shared"
+                ? gaugeCard.modelData.name
+                : String(gaugeCard.modelData.name || "Device").toUpperCase()
+              textFormat: Text.PlainText
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Math.round(Style.font.caption * root.chipScale)
+              font.bold: true
+              elide: Text.ElideRight
+            }
           }
 
           Item {
@@ -713,6 +826,7 @@ Column {
                     width: parent.width
                     horizontalAlignment: Text.AlignHCenter
                     text: modelData.label || ""
+                    textFormat: Text.PlainText
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: root.chipText
@@ -765,6 +879,7 @@ Column {
     id: column
     property string side: "cpu"
     property string title: "CPU"
+    property string mark: ""
     property string emptyText: "No CPU samples yet"
     property var rows: []
     width: (parent.width - parent.spacing) / 2
@@ -778,12 +893,23 @@ Column {
         id: nameHit
         anchors.left: parent.left
         anchors.verticalCenter: parent.verticalCenter
-        width: nameWord.implicitWidth + Style.space(4) + Style.space(14)
+        width: Style.space(14) + Style.space(4) + nameWord.implicitWidth + Style.space(4) + Style.space(14)
         height: parent.height
 
         Text {
-          id: nameWord
+          id: nameMark
           anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: column.mark
+          color: root.sortOn(column.side, "name") ? root.accent : root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(14)
+        }
+
+        Text {
+          id: nameWord
+          anchors.left: nameMark.right
+          anchors.leftMargin: Style.space(4)
           anchors.verticalCenter: parent.verticalCenter
           text: column.title
           color: root.sortOn(column.side, "name") ? root.accent : root.fg
@@ -909,6 +1035,7 @@ Column {
           anchors.rightMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           text: modelData.name + (Number(modelData.count) > 1 ? "  ×" + modelData.count : "")
+          textFormat: Text.PlainText
           color: root.fg
           font.family: root.fontFamily
           font.pixelSize: Style.space(12)
@@ -951,6 +1078,7 @@ Column {
     ProcessColumn {
       side: "cpu"
       title: "CPU"
+      mark: Marks.cpu
       emptyText: "No CPU samples yet"
       rows: root.service ? root.service.processCpu : []
     }
@@ -958,6 +1086,7 @@ Column {
     ProcessColumn {
       side: "gpu"
       title: "GPU"
+      mark: Marks.gpu
       emptyText: root.service && root.service.processGpuOk === false ? "GPU processes unavailable" : "No GPU samples yet"
       rows: root.service ? root.service.processGpu : []
     }

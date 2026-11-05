@@ -45,6 +45,7 @@ Item {
       width: parent.width
       visible: root.progressText !== ""
       text: root.progressText
+      textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       color: root.accent
       font.family: root.fontFamily
@@ -55,6 +56,7 @@ Item {
       width: parent.width
       visible: root.failText !== ""
       text: root.failText
+      textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       color: Commons.Color.urgent
       font.family: root.fontFamily
@@ -65,6 +67,7 @@ Item {
       width: parent.width
       visible: root.summaryText !== ""
       text: root.summaryText
+      textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       color: root.fg
       font.family: root.fontFamily
@@ -77,6 +80,7 @@ Item {
         required property var modelData
         width: parent.width
         text: String(modelData)
+        textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: root.fg
         font.family: root.fontFamily
@@ -98,6 +102,7 @@ Item {
       width: parent.width
       visible: root.nextText !== ""
       text: root.nextText
+      textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       color: root.muted
       font.family: root.fontFamily

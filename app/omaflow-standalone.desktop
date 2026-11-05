@@ -9,4 +9,4 @@ Terminal=false
 Categories=System;Settings;
 Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
 StartupNotify=false
-StartupWMClass=omaflow
+StartupWMClass=omaflow-standalone

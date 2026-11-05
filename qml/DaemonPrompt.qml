@@ -72,6 +72,7 @@ Column {
     width: parent.width
     wrapMode: Text.WordWrap
     text: root.headline
+    textFormat: Text.PlainText
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.space(13)
@@ -128,6 +129,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.daemonNote !== ""
     text: root.service ? root.service.daemonNote : ""
+    textFormat: Text.PlainText
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

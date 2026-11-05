@@ -6,6 +6,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source "$root/scripts/qml_imports.sh"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 export QML_IMPORT_PATH="$(qml_import_path)${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+# Wayland picks the window icon from the desktop file with this id.
+export QS_APP_ID="${QS_APP_ID:-omaflow-standalone}"
 
 # Focus the live window. A process with no window makes `quickshell -n` exit
 # and leaves nothing to focus, which is what Escape used to do.

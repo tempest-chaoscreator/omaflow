@@ -3,6 +3,8 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
+import qs.Ui
+import "Marks.js" as Marks
 import "RepoPath.js" as Repo
 
 // About this window: version and the keys that move through it.
@@ -11,9 +13,11 @@ Column {
 
   property bool keyed: false
   property color fg: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
+  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
   property string fontFamily: Style.font.family
-  property string version: "0.5.0"
+  property string version: "0.6.0"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)
@@ -62,30 +66,77 @@ Column {
     onLoaded: root.readManifest(text())
   }
 
-  Text {
-    text: "Omaflow"
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(16)
-    font.bold: true
+  component InfoBox: Rectangle {
+    id: box
+    property string heading: ""
+    property string mark: ""
+    default property alias body: bodyCol.data
+    width: parent ? parent.width : 0
+    implicitHeight: layout.implicitHeight + Style.space(20)
+    color: "transparent"
+    border.width: 1
+    border.color: root.line
+
+    Column {
+      id: layout
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(10)
+      spacing: Style.space(8)
+
+      Row {
+        spacing: Style.space(8)
+
+        OpticalGlyph {
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(16)
+          height: Style.space(16)
+          text: box.mark
+          fontFamily: root.fontFamily
+          fontSize: Style.space(14)
+          color: root.accent
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: box.heading
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(13)
+          font.bold: true
+        }
+      }
+
+      Column {
+        id: bodyCol
+        width: parent.width
+        spacing: Style.space(8)
+      }
+    }
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    text: "Version " + root.version + "  ·  " + root.author
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(13)
-  }
+  InfoBox {
+    heading: "Omaflow"
+    mark: Marks.fan
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    text: root.homepage
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
+    Text {
+      width: parent.width
+      wrapMode: Text.WordWrap
+      text: "Version " + root.version + "  ·  " + root.author
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+    }
+
+    Text {
+      width: parent.width
+      wrapMode: Text.WrapAnywhere
+      text: root.homepage
+      color: root.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
   }
 
   TextMetrics {
@@ -95,29 +146,9 @@ Column {
     text: "left / right"
   }
 
-  Item {
-    width: parent.width
-    height: keysTitle.implicitHeight
-
-    Text {
-      id: keysTitle
-      anchors.left: parent.left
-      text: "Keys"
-      color: root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(13)
-      font.bold: true
-    }
-
-    Text {
-      anchors.right: parent.right
-      anchors.baseline: keysTitle.baseline
-      text: "esc closes"
-      color: root.muted
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-  }
+  InfoBox {
+    heading: "Keys"
+    mark: Marks.info
 
   Row {
     width: parent.width
@@ -161,10 +192,10 @@ Column {
               visible: !keySlot.heading
               width: root.capW
               height: root.capH
-              radius: Style.space(4)
+              radius: 0
               color: "transparent"
               border.width: 1
-              border.color: root.muted
+              border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
 
               Text {
                 anchors.fill: parent
@@ -206,12 +237,19 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
-  Text {
-    width: parent.width
-    wrapMode: Text.WordWrap
-    text: "The bar chip and this window are both clients of coolercontrold at 127.0.0.1:11987. There is no address to type. Fan writes stay on the daemon."
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
+  }
+
+  InfoBox {
+    heading: "Daemon"
+    mark: Marks.power
+
+    Text {
+      width: parent.width
+      wrapMode: Text.WordWrap
+      text: "The bar chip and this window are both clients of coolercontrold at 127.0.0.1:11987. There is no address to type. Fan writes stay on the daemon."
+      color: root.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
   }
 }

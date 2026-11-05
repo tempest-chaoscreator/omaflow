@@ -20,7 +20,8 @@ Column {
   property int navIndex: 0
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
-  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
+  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
+  property color rule: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
   property var opened: ({})
@@ -36,7 +37,7 @@ Column {
   readonly property string chevronDown: "\uDB82\uDDD6"
 
   width: parent ? parent.width : 0
-  spacing: Style.space(8)
+  spacing: Style.space(12)
 
   readonly property bool pinOn: service && service.pinGroups === true
   readonly property var groups: {
@@ -308,9 +309,11 @@ Column {
 
   function dutyText(channel) {
     var src = liveReading(channel)
-    var duty = isFinite(Number(src.duty)) ? Math.round(Number(src.duty)) + "%" : "—"
-    var rpm = isFinite(Number(src.rpm)) ? Math.round(Number(src.rpm)) + " rpm" : ""
-    return rpm ? duty + "    " + rpm : duty
+    var duty = src.duty === null || src.duty === undefined || src.duty === "" ? null : Number(src.duty)
+    var rpm = src.rpm === null || src.rpm === undefined || src.rpm === "" ? null : Number(src.rpm)
+    var dutyLabel = duty !== null && isFinite(duty) ? Math.round(duty) + "%" : "—"
+    var rpmLabel = rpm !== null && isFinite(rpm) ? Math.round(rpm) + " rpm" : ""
+    return rpmLabel ? dutyLabel + "    " + rpmLabel : dutyLabel
   }
 
   function fanTip(channel) {
@@ -382,6 +385,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError !== ""
     text: root.service ? root.service.lastError : ""
+    textFormat: Text.PlainText
     color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -392,6 +396,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError === "" && root.service.notice !== ""
     text: root.service ? root.service.notice : ""
+    textFormat: Text.PlainText
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -418,12 +423,12 @@ Column {
         width: parent.width
         visible: section.index > 0
         height: section.index > 0 ? 1 : 0
-        color: root.line
+        color: root.rule
       }
 
       Column {
         width: parent.width
-        spacing: Style.space(8)
+        spacing: Style.space(12)
         visible: section.modelData === "groups"
 
         Text {
@@ -437,28 +442,35 @@ Column {
 
         Repeater {
           model: root.stableShared
-          delegate: Item {
+          delegate: Rectangle {
             id: sharedBlock
             required property var modelData
             required property int index
             readonly property var idle: root.stoppedRows(modelData.rows)
             readonly property bool open: root.opened[modelData.id] === true
             width: root.width
-            implicitHeight: sharedCol.implicitHeight
+            implicitHeight: sharedCol.implicitHeight + Style.space(20)
             height: implicitHeight
+            color: "transparent"
+            border.width: 1
+            border.color: root.line
             opacity: root.rowsHidden(modelData.rows) ? 0.38 : 1
 
             Rectangle {
               width: Style.space(3)
               anchors.top: parent.top
               anchors.bottom: parent.bottom
-              anchors.bottomMargin: 1
+              anchors.left: parent.left
               color: root.swatchFor("g:" + sharedBlock.modelData.id)
             }
 
             Column {
               id: sharedCol
-              width: parent.width
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(10)
+              anchors.leftMargin: Style.space(14)
               spacing: Style.space(2)
 
             Item {
@@ -467,7 +479,6 @@ Column {
 
               Text {
                 anchors.left: parent.left
-                anchors.leftMargin: Style.space(12)
                 anchors.right: sharedCal.visible ? sharedCal.left : parent.right
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
@@ -475,7 +486,7 @@ Column {
                 textFormat: Text.PlainText
                 color: root.fg
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: Style.space(13)
                 font.bold: true
                 elide: Text.ElideRight
               }
@@ -501,12 +512,12 @@ Column {
                 id: sharedRow
                 required property var modelData
                 visible: Number(modelData.rpm) > 0
-                width: sharedBlock.width
+                width: sharedCol.width
                 spacing: Style.space(2)
 
                 Item {
                   width: parent.width
-                  height: Style.space(22)
+                  height: Style.space(28)
                   Text {
                     anchors.left: parent.left
                     anchors.leftMargin: Style.space(16)
@@ -514,6 +525,7 @@ Column {
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: sharedRow.modelData.label || sharedRow.modelData.name
+                    textFormat: Text.PlainText
                     color: root.fg
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(12)
@@ -590,12 +602,12 @@ Column {
               delegate: Column {
                 id: sharedIdle
                 required property var modelData
-                width: sharedBlock.width
+                width: sharedCol.width
                 spacing: Style.space(2)
 
                 Item {
                   width: parent.width
-                  height: Style.space(22)
+                  height: Style.space(28)
                   Text {
                     anchors.left: parent.left
                     anchors.leftMargin: Style.space(48)
@@ -603,6 +615,7 @@ Column {
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: sharedIdle.modelData.label || sharedIdle.modelData.name
+                    textFormat: Text.PlainText
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(12)
@@ -643,12 +656,6 @@ Column {
                 }
               }
             }
-
-            Rectangle {
-              width: parent.width
-              height: 1
-              color: root.line
-            }
             }
           }
         }
@@ -656,12 +663,12 @@ Column {
 
       Column {
         width: parent.width
-        spacing: Style.space(8)
+        spacing: Style.space(12)
         visible: section.modelData === "devices"
 
         Repeater {
           model: root.stableGroups
-          delegate: Item {
+          delegate: Rectangle {
             id: deviceBlock
             required property var modelData
             required property int index
@@ -669,21 +676,28 @@ Column {
             readonly property var idle: modelData.hidden || []
             readonly property bool open: root.opened[modelData.uid] === true
             width: root.width
-            implicitHeight: deviceCol.implicitHeight
+            implicitHeight: deviceCol.implicitHeight + Style.space(20)
             height: implicitHeight
+            color: "transparent"
+            border.width: 1
+            border.color: root.line
             opacity: concealed ? 0.38 : 1
 
             Rectangle {
               width: Style.space(3)
               anchors.top: parent.top
               anchors.bottom: parent.bottom
-              anchors.bottomMargin: 1
+              anchors.left: parent.left
               color: root.swatchFor("d:" + deviceBlock.modelData.uid)
             }
 
             Column {
               id: deviceCol
-              width: parent.width
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(10)
+              anchors.leftMargin: Style.space(14)
               spacing: Style.space(2)
 
             Item {
@@ -692,16 +706,15 @@ Column {
 
               Text {
                 anchors.left: parent.left
-                anchors.leftMargin: Style.space(12)
                 anchors.right: eyeHit.left
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 text: String(deviceBlock.modelData.name || "Device").toUpperCase()
+                textFormat: Text.PlainText
                 color: deviceBlock.concealed ? root.muted : root.fg
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: Style.space(13)
                 font.bold: true
-                font.letterSpacing: 0.6
                 elide: Text.ElideRight
               }
 
@@ -718,6 +731,10 @@ Column {
                   color: root.aimed("eye", deviceBlock.modelData.uid)
                     ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
                     : (eyeMouse.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
+                  border.width: 1
+                  border.color: root.aimed("eye", deviceBlock.modelData.uid) || eyeMouse.containsMouse
+                    ? root.accent
+                    : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
                 }
 
                 OpticalGlyph {
@@ -770,12 +787,12 @@ Column {
               delegate: Column {
                 id: shownRow
                 required property var modelData
-                width: deviceBlock.width
+                width: deviceCol.width
                 spacing: Style.space(2)
 
                 Item {
                   width: parent.width
-                  height: Style.space(22)
+                  height: Style.space(28)
 
                   Text {
                     anchors.left: parent.left
@@ -784,6 +801,7 @@ Column {
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: shownRow.modelData.label || shownRow.modelData.name
+                    textFormat: Text.PlainText
                     color: root.fanOn(shownRow.modelData) ? root.fg : root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(12)
@@ -862,12 +880,12 @@ Column {
               delegate: Column {
                 id: hiddenRow
                 required property var modelData
-                width: deviceBlock.width
+                width: deviceCol.width
                 spacing: Style.space(2)
 
                 Item {
                   width: parent.width
-                  height: Style.space(22)
+                  height: Style.space(28)
                   Text {
                     anchors.left: parent.left
                     anchors.leftMargin: Style.space(48)
@@ -875,6 +893,7 @@ Column {
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: hiddenRow.modelData.label || hiddenRow.modelData.name
+                    textFormat: Text.PlainText
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(12)
@@ -914,12 +933,6 @@ Column {
                   fontFamily: root.fontFamily
                 }
               }
-            }
-
-            Rectangle {
-              width: parent.width
-              height: 1
-              color: root.line
             }
             }
           }

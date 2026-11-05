@@ -133,6 +133,13 @@ function spreadPoints(points, minDuty) {
   return out
 }
 
+// Number(null) is 0. A missing reading stays missing, and a real 0 stays 0.
+function finiteNum(value) {
+  if (value === null || value === undefined || value === "") return null
+  var n = Number(value)
+  return isFinite(n) ? n : null
+}
+
 // 0 is a real floor. A missing value is the only case that still means 50.
 function dutyFloor(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback
@@ -180,7 +187,9 @@ function matchTemp(candidates, pattern) {
   var list = candidates || []
   var i
   for (i = 0; i < list.length; i++) {
-    if (list[i] && pattern.test(list[i].name)) return list[i].temp
+    if (!list[i] || !pattern.test(list[i].name)) continue
+    var reading = finiteNum(list[i].temp)
+    if (reading !== null) return reading
   }
   return null
 }
@@ -194,8 +203,33 @@ function pickTemp(candidates, pattern) {
   var list = candidates || []
   var j
   for (j = 0; j < list.length; j++) {
-    if (!list[j] || !isFinite(Number(list[j].temp))) continue
-    if (best === null || list[j].temp > best) best = list[j].temp
+    var reading = list[j] ? finiteNum(list[j].temp) : null
+    if (reading === null) continue
+    if (best === null || reading > best) best = reading
+  }
+  return best
+}
+
+// GPU edge. "GPU Temp" wins, then a name that says edge, then any other
+// sensor. Hotspot is last, so it cannot stand in for the edge reading.
+function gpuEdge(candidates) {
+  var list = candidates || []
+  var best = null
+  var rank = -1
+  var i
+  for (i = 0; i < list.length; i++) {
+    var row = list[i]
+    var temp = row ? finiteNum(row.temp) : null
+    if (temp === null) continue
+    var name = String(row.name || "")
+    var score = 1
+    if (/hotspot|hot spot/i.test(name)) score = 0
+    if (/edge/i.test(name)) score = 3
+    if (/gpu temp$/i.test(name)) score = 4
+    if (score > rank) {
+      rank = score
+      best = temp
+    }
   }
   return best
 }
@@ -214,6 +248,8 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
   var gpuLoad = null
   var gpuName = ""
   var cpuName = "CPU"
+  var coolerName = ""
+  var pumpDevice = ""
   var devs = devices || []
   for (var d = 0; d < devs.length; d++) {
     var dev = devs[d]
@@ -233,11 +269,14 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
     var temps = latest.temps || []
     for (var t = 0; t < temps.length; t++) {
       var sample = temps[t]
-      if (!sample || !isFinite(Number(sample.temp))) continue
+      var tempValue = sample ? finiteNum(sample.temp) : null
+      if (tempValue === null) continue
       var tempName = String(sample.name || "")
       var tempLabel = String((dev.info.temps && dev.info.temps[tempName] && dev.info.temps[tempName].label) || tempName)
-      var tempValue = Number(sample.temp)
-      if (/liquid|coolant|water/i.test(tempName) || /liquid|coolant/i.test(tempLabel)) coolant = tempValue
+      if (/liquid|coolant|water/i.test(tempName) || /liquid|coolant/i.test(tempLabel)) {
+        coolant = tempValue
+        if (dev.name) coolerName = dev.name
+      }
       if (dev.type === "CPU") cpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
       if (dev.type === "GPU") gpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
     }
@@ -266,7 +305,10 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
       if (dev.type === "GPU") {
         gpuName = dev.name || gpuName
         if (/power/i.test(name) && isFinite(wattsBy[name])) gpuPower = wattsBy[name]
-        if (/load/i.test(name) && isFinite(Number(dutyBy[name]))) gpuLoad = Number(dutyBy[name])
+        if (/load/i.test(name)) {
+          var load = finiteNum(dutyBy[name])
+          if (load !== null) gpuLoad = load
+        }
       }
       if (!info.speed_options) continue
       var pump = isPumpName(name, label)
@@ -278,8 +320,11 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
             pumpRpm = null
           }
           pumpRank = rank
-          if (isFinite(Number(dutyBy[name]))) pumpDuty = Number(dutyBy[name])
-          if (isFinite(Number(rpmBy[name]))) pumpRpm = Number(rpmBy[name])
+          if (dev.name) pumpDevice = dev.name
+          var nextDuty = finiteNum(dutyBy[name])
+          var nextRpm = finiteNum(rpmBy[name])
+          if (nextDuty !== null) pumpDuty = nextDuty
+          if (nextRpm !== null) pumpRpm = nextRpm
         }
       }
       var deviceMin = Number(info.speed_options.min_duty)
@@ -291,8 +336,8 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
         deviceType: dev.type || "",
         name: name,
         label: label,
-        duty: dutyBy[name] === undefined ? null : Number(dutyBy[name]),
-        rpm: rpmBy[name] === undefined ? null : Number(rpmBy[name]),
+        duty: finiteNum(dutyBy[name]),
+        rpm: finiteNum(rpmBy[name]),
         isPump: pump,
         controllable: info.speed_options.fixed_enabled !== false,
         minDuty: pump ? Math.max(deviceMin, dutyFloor(pumpMin, 50)) : deviceMin
@@ -304,12 +349,14 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
   var cpu = pickTemp(cpuTemps, /package|tctl|tdie/i)
   var cpuCcd1 = matchTemp(cpuTemps, /tccd1|ccd1/i)
   var cpuCcd2 = matchTemp(cpuTemps, /tccd2|ccd2/i)
-  var gpu = matchTemp(gpuTemps, /gpu temp$/i)
-  if (gpu === null) gpu = pickTemp(gpuTemps, /edge|gpu|temp/i)
+  var gpu = gpuEdge(gpuTemps)
+  // isFinite(null) is true, because null becomes 0. A missing sensor must not
+  // win a comparison against a real reading, including one below 0°.
   var hottest = null
-  if (isFinite(cpu)) hottest = cpu
-  if (isFinite(gpu) && (hottest === null || gpu > hottest)) hottest = gpu
-  if (isFinite(coolant) && (hottest === null || coolant > hottest)) hottest = coolant
+  if (cpu !== null) hottest = cpu
+  if (gpu !== null && (hottest === null || gpu > hottest)) hottest = gpu
+  if (coolant !== null && (hottest === null || coolant > hottest)) hottest = coolant
+  if (!coolerName) coolerName = pumpDevice
 
   return {
     channels: channels,
@@ -324,6 +371,7 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
       gpuLoad: gpuLoad,
       gpuName: gpuName,
       coolant: coolant,
+      liquidName: coolerName,
       pumpDuty: pumpDuty,
       pumpRpm: pumpRpm,
       hottest: hottest
@@ -336,8 +384,8 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
 // "spin" is a tach above 0. "idle" is a stopped channel with a duty of 0.
 // "held" is a duty above 0 that has not produced a tach. "none" is an unused header.
 function channelPresence(channel) {
-  var rpm = Number(channel && channel.rpm)
-  if (isFinite(rpm) && rpm > 0) return "spin"
+  var rpm = finiteNum(channel && channel.rpm)
+  if (rpm !== null && rpm > 0) return "spin"
   var duty = channel ? channel.duty : null
   if (duty === null || duty === undefined || duty === "") return "none"
   var level = Number(duty)

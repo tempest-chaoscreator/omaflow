@@ -715,9 +715,14 @@ Item {
   }
 
   function saveDaemon(next) {
-    call("PUT", "/settings", next, function(res) {
+    var body = Cc.copyMap(next)
+    // Poll interval stays with coolercontrold. A settings write keeps the
+    // rate the daemon already reported.
+    if (daemonSettings && daemonSettings.poll_rate !== undefined)
+      body.poll_rate = daemonSettings.poll_rate
+    call("PUT", "/settings", body, function(res) {
       if (!res.ok) return fail(res)
-      daemonSettings = next
+      daemonSettings = body
       notice = ""
     })
   }

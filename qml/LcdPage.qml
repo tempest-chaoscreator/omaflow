@@ -728,6 +728,7 @@ Column {
             id: modeBtn
             visible: !faceCell.picture
             text: modelData.label
+            iconSize: Style.space(13)
             bordered: true
             selected: root.face === modelData.id
             hasCursor: root.aimed("face", index)
@@ -757,14 +758,15 @@ Column {
             clip: true
 
             Behavior on implicitWidth {
-              enabled: slide
+              enabled: pictureHost.slide
               NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
             }
-            Component.onCompleted: slide = true
+            Component.onCompleted: pictureHost.slide = true
 
             Button {
               id: pictureBtn
               text: "Picture"
+              iconSize: Style.space(13)
               bordered: true
               selected: root.face === "picture"
               hasCursor: root.aimed("face", index)
@@ -911,7 +913,7 @@ Column {
       radius: 0
       color: "transparent"
       border.width: 1
-      border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.45)
+      border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.22)
 
       Text {
         id: lcdNote
@@ -1413,6 +1415,7 @@ Column {
         width: Math.min(implicitWidth, Math.max(Style.space(72), actionRow.width * 0.26))
         elide: Text.ElideRight
         text: root.screen ? String(root.screen.deviceName || "Display") : ""
+        textFormat: Text.PlainText
         color: root.muted
         opacity: 0.72
         font.family: root.fontFamily
@@ -1443,6 +1446,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError !== ""
     text: root.service ? root.service.lastError : ""
+    textFormat: Text.PlainText
     color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

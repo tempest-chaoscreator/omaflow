@@ -1,12 +1,15 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
+import "Marks.js" as Marks
 import "RepoPath.js" as Repo
 import "Model.js" as Model
 import "Nav.js" as Nav
+import "Wheel.js" as Wheel
 
 // Omaflow Plugin. Telemetry and the selected mode. Curve edits stay in
 // Omaflow. Choosing a mode does not run it. Apply does.
@@ -28,10 +31,14 @@ Panel {
   readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color accent: Commons.Color.accent
-  readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
+  readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
+  readonly property color rule: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property real hottest: {
     var sample = service && service.temps ? service.temps : null
-    return sample && isFinite(Number(sample.hottest)) ? Number(sample.hottest) : NaN
+    // Number(null) is 0. A missing sensor must stay missing, while a real 0° stays 0.
+    if (!sample || sample.hottest === null || sample.hottest === undefined || sample.hottest === "") return NaN
+    var n = Number(sample.hottest)
+    return isFinite(n) ? n : NaN
   }
   readonly property string alertLine: ready && service ? Cc.activeAlertLine(service.alerts) : ""
   readonly property string alertTip: {
@@ -40,6 +47,13 @@ Panel {
     return names.length ? (" · " + names.join(" · ")) : ""
   }
   readonly property string openPath: Repo.rootFile("scripts/open_app.sh")
+  // Same side inset as Network, Bluetooth, and Display. The temperature
+  // keeps this chip wider. The gap to the next chip stays that inset.
+  readonly property real chipPad: Math.max(0, (Style.bar.iconSlot - Style.bar.iconCanvas) / 2)
+  readonly property real chipMargin: {
+    var scale = Style.spacing.scale
+    return scale > 0 ? chipPad / scale : 0
+  }
 
   property string tab: "telemetry"
   property string modeUid: ""
@@ -53,7 +67,7 @@ Panel {
   }
   readonly property bool modeApplied: mode && mode.uid === activeModeUid
   readonly property bool calibrationBusy: !!(service && service.calibrationBusy)
-  readonly property int modeH: Style.space(28)
+  readonly property int modeH: Style.space(32)
   readonly property var navItems: {
     var out = []
     if (!ready) {
@@ -74,7 +88,9 @@ Panel {
   }
 
   function tempText(value) {
-    return isFinite(Number(value)) ? Math.round(Number(value)) + "°" : "—"
+    if (value === null || value === undefined || value === "") return "—"
+    var n = Number(value)
+    return isFinite(n) ? Math.round(n) + "°" : "—"
   }
 
   // Own process. Summoning the panel loads it inside the bar, which
@@ -153,26 +169,44 @@ Panel {
     id: face
     property string tabId: ""
     property string label: ""
+    property string mark: ""
     width: parent ? (parent.width - parent.spacing) / 2 : 0
     height: root.modeH
     radius: 0
     color: root.tab === tabId
       ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-      : "transparent"
+      : (faceHit.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
     border.width: 1
     border.color: root.aim("tab", tabId) || root.tab === tabId ? root.accent : root.line
 
-    Text {
+    Row {
       anchors.centerIn: parent
-      text: face.label
-      color: root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(12)
-      font.bold: root.tab === face.tabId
+      spacing: Style.space(6)
+
+      OpticalGlyph {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(14)
+        height: Style.space(14)
+        text: face.mark
+        fontFamily: root.fontFamily
+        fontSize: Style.space(13)
+        color: root.tab === face.tabId ? root.accent : root.fg
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: face.label
+        color: root.fg
+        font.family: root.fontFamily
+        font.pixelSize: Style.space(13)
+        font.bold: root.tab === face.tabId
+      }
     }
 
     MouseArea {
+      id: faceHit
       anchors.fill: parent
+      hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: root.tab = face.tabId
     }
@@ -181,11 +215,94 @@ Panel {
   onModesChanged: ensureMode()
   onActiveModeUidChanged: ensureMode()
   onOpenedChanged: {
+    if (opened) popoutBar.refreshTargets()
     if (!opened) return
     modePicked = false
     tab = "telemetry"
     ensureMode()
     navIndex = 0
+  }
+
+  // The plugin bar only lists this chip's button. KeyboardPanel forwards a
+  // bar click through bar.clickTargets, so a click on Network or Bluetooth
+  // closed this popup and never reached that icon. Stock panels receive
+  // every icon. This object is that list for this screen. Open and close
+  // still go through the plugin bar. A click on this chip still toggles it.
+  QtObject {
+    id: popoutBar
+
+    property string position: root.bar ? root.bar.position : "top"
+    property int barSize: root.bar ? root.bar.barSize : 0
+    property var activePopout: root.bar ? root.bar.activePopout : null
+    property var clickTargets: []
+
+    function requestPopout(owner) {
+      if (root.bar) root.bar.requestPopout(owner)
+    }
+
+    function releasePopout(owner) {
+      if (root.bar) root.bar.releasePopout(owner)
+    }
+
+    // KeyboardPanel asks the bar where the open card is, so a switch morphs
+    // from that card. The plugin facade has both calls. This stand-in has
+    // to forward them or the next card grows in on its own.
+    function notePopoutCard(card) {
+      if (root.bar && typeof root.bar.notePopoutCard === "function") root.bar.notePopoutCard(card)
+    }
+
+    function popoutCardFor(owner) {
+      if (root.bar && typeof root.bar.popoutCardFor === "function") return root.bar.popoutCardFor(owner)
+      return null
+    }
+
+    // A button on another screen is not a click on this one. A target
+    // with no window still counts, matching the shell's own filter.
+    function targetBelongsToWindow(target, window) {
+      if (!target || !window) return false
+      var attached = target.QsWindow
+      if (!attached || !attached.window) return true
+      return attached.window === window
+    }
+
+    function collect(item, out, seen) {
+      if (!item || typeof item !== "object") return
+      var n
+      for (n = 0; n < seen.length; n++) if (seen[n] === item) return
+      seen.push(item)
+      if (typeof item.triggerPress === "function" && item.registeredBar) out.push(item)
+      var kids = item.children
+      var i
+      if (kids) for (i = 0; i < kids.length; i++) collect(kids[i], out, seen)
+      var loaded = item.item
+      if (loaded && loaded !== item) collect(loaded, out, seen)
+    }
+
+    function refreshTargets() {
+      // QsWindow is an attached type from the Quickshell module. This file
+      // has to import that module or the walk below sees no window and every
+      // bar click only closes this chip.
+      var attached = button.QsWindow
+      var win = attached ? attached.window : null
+      var out = []
+      if (win && win.contentItem) collect(win.contentItem, out, [])
+      var cur = clickTargets || []
+      if (cur.length === out.length) {
+        var same = true
+        var i
+        for (i = 0; i < out.length; i++) if (cur[i] !== out[i]) { same = false; break }
+        if (same) return
+      }
+      clickTargets = out
+    }
+  }
+
+  Timer {
+    interval: 400
+    repeat: true
+    running: root.opened
+    triggeredOnStart: true
+    onTriggered: popoutBar.refreshTargets()
   }
 
   Process {
@@ -209,7 +326,12 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰈐 " + (root.ready ? root.tempText(root.hottest) : "…") + (root.alertLine ? ("  " + root.alertLine) : "")
+    // The slot is the label plus the stock icon inset on each side.
+    // horizontalMargin is scaled again, so the width is set directly.
+    fixedWidth: vertical || labelWidth <= 0 ? -1 : Math.ceil(labelWidth + root.chipPad * 2)
+    horizontalMargin: root.chipMargin
+    verticalPadding: root.chipMargin
+    text: Marks.fan + " " + (root.ready ? root.tempText(root.hottest) : "…") + (root.alertLine ? ("  " + root.alertLine) : "")
     tooltipText: root.ready
       ? ("Omaflow Plugin · " + (root.activeModeName || "no mode") + root.alertTip)
       : "Omaflow Plugin · " + root.connection
@@ -221,7 +343,7 @@ Panel {
     id: popup
     anchorItem: button
     owner: root
-    bar: root.bar
+    bar: popoutBar
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: popup.fittedContentWidth(Style.space(560))
@@ -242,12 +364,20 @@ Panel {
       }
 
       Flickable {
+        id: popupFlick
         anchors.fill: parent
         contentWidth: width
         contentHeight: column.y + column.implicitHeight + Style.space(12)
         clip: true
         boundsBehavior: Flickable.StopAtBounds
-        interactive: contentHeight > height
+        // Qt's own wheel follows a 1px delta and crawls. One notch is Wheel.NOTCH.
+        interactive: false
+
+        WheelHandler {
+          acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+          blocking: true
+          onWheel: function(event) { Wheel.roll(popupFlick, event) }
+        }
 
         Column {
           id: column
@@ -281,7 +411,7 @@ Panel {
               radius: 0
               color: "transparent"
               border.width: 1
-              border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
+              border.color: root.line
             }
 
             Text {
@@ -293,6 +423,7 @@ Panel {
                 root.mode ? root.mode.name : root.activeModeName,
                 root.hottest
               )
+              textFormat: Text.PlainText
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.space(13)
@@ -382,8 +513,8 @@ Panel {
             spacing: Style.space(6)
             visible: root.ready
 
-            TabFace { tabId: "telemetry"; label: "Telemetry" }
-            TabFace { tabId: "mode"; label: "Mode" }
+            TabFace { tabId: "telemetry"; label: "Telemetry"; mark: Marks.pulse }
+            TabFace { tabId: "mode"; label: "Mode"; mark: Marks.modes }
           }
 
           Item {
@@ -400,7 +531,7 @@ Panel {
               height: root.modeH
               opacity: root.calibrationBusy ? 0.45 : 1
               iconText: root.modeApplied ? "\uf058" : "\uf05d"
-              iconSize: Style.space(14)
+              iconSize: Style.space(15)
               bordered: true
               hasCursor: root.aim("apply", "")
               selected: false
@@ -426,7 +557,7 @@ Panel {
               width: 1
               height: parent.height
               visible: root.mode !== null
-              color: root.line
+              color: root.rule
             }
 
             Row {
@@ -436,13 +567,13 @@ Panel {
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
               height: parent.height
-              spacing: Style.space(4)
-              clip: true
+              spacing: Style.space(6)
 
               Repeater {
                 model: root.modes
                 delegate: Button {
                   required property var modelData
+                  required property int index
                   readonly property bool chosen: modelData.uid === root.modeUid
                   readonly property bool running: modelData.uid === root.activeModeUid
                   readonly property bool hell: /hell/i.test(String(modelData.name || ""))
@@ -450,13 +581,17 @@ Panel {
                     var count = root.modes.length
                     if (count < 1) return 0
                     var gaps = modeButtons.spacing * Math.max(0, count - 1)
-                    return Math.max(1, Math.floor((modeButtons.width - gaps) / count))
+                    var base = Math.floor((modeButtons.width - gaps) / count)
+                    if (index === count - 1)
+                      return Math.max(1, modeButtons.width - gaps - base * Math.max(0, count - 1))
+                    return Math.max(1, base)
                   }
                   width: slot
                   height: root.modeH
-                  clip: true
                   verticalPadding: Style.space(2)
-                  text: ""
+                  text: modelData.name
+                  iconText: Marks.modeMark(modelData.name)
+                  iconSize: Style.space(13)
                   selected: chosen
                   hasCursor: root.aim("mode", modelData.uid)
                   bordered: true
@@ -464,24 +599,9 @@ Panel {
                   accent: hell ? Commons.Color.urgent : root.accent
                   fontFamily: root.fontFamily
                   fontSize: Style.font.caption
-                  horizontalPadding: Style.space(2)
+                  horizontalPadding: Style.space(4)
                   tooltipText: running ? "Running" : "Select this mode"
                   onClicked: root.pickMode(modelData.uid)
-
-                  Text {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.leftMargin: Style.space(4)
-                    anchors.rightMargin: Style.space(4)
-                    horizontalAlignment: Text.AlignHCenter
-                    elide: Text.ElideRight
-                    text: modelData.name
-                    color: parent.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: parent.chosen
-                  }
                 }
               }
             }
@@ -492,6 +612,7 @@ Panel {
             visible: root.ready && root.service && root.service.lastError !== ""
             wrapMode: Text.WordWrap
             text: root.service ? root.service.lastError : ""
+            textFormat: Text.PlainText
             color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -528,13 +649,28 @@ Panel {
               : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12)
             border.width: 1
             border.color: root.aim("open", "") ? root.accent : root.line
-            Text {
+            Row {
               anchors.centerIn: parent
-              text: root.ready ? "OMAFLOW" : "Open Omaflow"
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(13)
-              font.bold: true
+              spacing: Style.space(8)
+
+              OpticalGlyph {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(14)
+                height: Style.space(14)
+                text: Marks.open
+                fontFamily: root.fontFamily
+                fontSize: Style.space(14)
+                color: root.fg
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.ready ? "OMAFLOW" : "Open Omaflow"
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(13)
+                font.bold: true
+              }
             }
             MouseArea {
               anchors.fill: parent
@@ -543,6 +679,14 @@ Panel {
             }
           }
         }
+      }
+
+      HoverScroll {
+        flick: popupFlick
+        ink: root.fg
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.right: parent.right
       }
     }
   }

@@ -130,6 +130,7 @@ Column {
     visible: root.mode && root.stableCurves.length === 0
     wrapMode: Text.WordWrap
     text: (root.mode ? root.mode.name : "This mode") + " has no curves yet."
+    textFormat: Text.PlainText
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -137,11 +138,23 @@ Column {
 
   Repeater {
     model: root.stableCurves
-    delegate: Column {
+    delegate: Rectangle {
       id: card
       required property var modelData
       readonly property var drawn: root.shownPoints(modelData)
       width: root.width
+      implicitHeight: cardCol.implicitHeight + Style.space(20)
+      height: implicitHeight
+      color: "transparent"
+      border.width: 1
+      border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.22)
+
+      Column {
+      id: cardCol
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(10)
       spacing: Style.space(4)
 
       Text {
@@ -159,6 +172,7 @@ Column {
       Text {
         width: parent.width
         text: (modelData.labels || []).join("  ·  ") + root.floorNote(modelData)
+        textFormat: Text.PlainText
         color: root.fg
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -185,6 +199,7 @@ Column {
         color: root.muted
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
+      }
       }
     }
   }

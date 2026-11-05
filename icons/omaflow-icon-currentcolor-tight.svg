@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="122 122 956 956" fill="none">
+<title>Omaflow</title>
+<g fill="currentColor">
+<path d="M552.0 516.9A208 208 0 0 1 936.0 406.0A640 640 0 0 0 552.0 516.9ZM683.1 552.0A208 208 0 0 1 794.0 936.0A640 640 0 0 0 683.1 552.0ZM648.0 683.1A208 208 0 0 1 264.0 794.0A640 640 0 0 0 648.0 683.1ZM516.9 648.0A208 208 0 0 1 406.0 264.0A640 640 0 0 0 516.9 648.0Z"/>
+<path fill-rule="evenodd" d="M600 522a78 78 0 1 0 .01 0ZM574 574h52v52h-52Z"/>
+</g>
+<circle cx="600" cy="600" r="446" stroke="currentColor" stroke-width="64"/>
+</svg>

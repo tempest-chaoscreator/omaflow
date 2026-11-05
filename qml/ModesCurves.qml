@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
+import "Marks.js" as Marks
 import "Nav.js" as Nav
 import "ThemePalette.js" as ThemePalette
 
@@ -21,7 +22,8 @@ Column {
   property int viewHeight: 0
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
-  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
+  property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
+  property color rule: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
 
@@ -368,7 +370,9 @@ Column {
     var map = service && service.channelLive
     var reading = map && row && row.key ? map[row.key] : null
     var live = reading || (row ? liveChannel(row.key) : null)
-    var rpm = Number(live ? live.rpm : (row && row.rpm))
+    var raw = live ? live.rpm : (row && row.rpm)
+    if (raw === null || raw === undefined || raw === "") return ""
+    var rpm = Number(raw)
     return isFinite(rpm) ? Math.round(rpm) + " rpm" : ""
   }
 
@@ -382,8 +386,11 @@ Column {
   function tempNow(row) {
     if (!service || !row || !service.temps) return -1
     var temps = service.temps
-    if (deviceKind(row) === "GPU" && isFinite(Number(temps.gpu))) return Number(temps.gpu)
-    return isFinite(Number(temps.cpu)) ? Number(temps.cpu) : -1
+    // Number(null) is 0, which would pin the curve marker and the "now" caption at 0°.
+    var gpu = temps.gpu === null || temps.gpu === undefined || temps.gpu === "" ? NaN : Number(temps.gpu)
+    var cpu = temps.cpu === null || temps.cpu === undefined || temps.cpu === "" ? NaN : Number(temps.cpu)
+    if (deviceKind(row) === "GPU" && isFinite(gpu)) return gpu
+    return isFinite(cpu) ? cpu : -1
   }
 
   function sourceFor(list) {
@@ -533,7 +540,7 @@ Column {
   }
 
   function rowFloor(row) {
-    var floor = row && row.minDuty ? Number(row.minDuty) : 0
+    var floor = row ? (Number(row.minDuty) || 0) : 0
     var shared = row ? sharedFor(row.key) : null
     if (!shared) return floor
     var list = shared.members || []
@@ -997,6 +1004,8 @@ Column {
           height: root.modeH
           verticalPadding: Style.space(2)
           text: modelData.name
+          iconText: Marks.modeMark(modelData.name)
+          iconSize: Style.space(13)
           selected: modelData.uid === root.modeUid
           hasCursor: root.aimMode(modelData.uid)
           bordered: true
@@ -1021,7 +1030,7 @@ Column {
       width: 1
       height: parent.height
       visible: root.mode !== null
-      color: root.line
+      color: root.rule
     }
 
     Button {
@@ -1150,8 +1159,8 @@ Column {
                   : (toolMouse.containsMouse && tool.on
                     ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
                     : "transparent")
-                border.width: tool.kind === "reset" ? 1 : 0
-                border.color: tool.aimed ? root.accent : root.line
+                border.width: 1
+                border.color: tool.aimed ? root.accent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
               }
 
               OpticalGlyph {
@@ -1277,6 +1286,10 @@ Column {
               anchors.fill: parent
               radius: 0
               color: hideMouse.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent"
+              border.width: 1
+              border.color: hideMouse.containsMouse
+                ? root.accent
+                : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
             }
 
             OpticalGlyph {
@@ -1320,6 +1333,10 @@ Column {
               color: root.aimLink(card.modelData.uid)
                 ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
                 : (linkMouse.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
+              border.width: 1
+              border.color: root.aimLink(card.modelData.uid) || linkMouse.containsMouse
+                ? root.accent
+                : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
             }
 
             OpticalGlyph {
@@ -1363,9 +1380,8 @@ Column {
             textFormat: Text.PlainText
             color: root.fg
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.space(13)
             font.bold: true
-            font.letterSpacing: card.modelData.kind === "shared" ? 0 : 0.6
             elide: Text.ElideRight
 
             MouseArea {
@@ -1443,6 +1459,7 @@ Column {
                 Text {
                   width: fanLabel.width
                   text: root.chipText(fanCell.modelData)
+                  textFormat: Text.PlainText
                   color: fanCell.claimed ? root.muted : (fanCell.chosen ? root.accent : root.fg)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1663,6 +1680,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.service && root.service.lastError !== ""
     text: root.service ? root.service.lastError : ""
+    textFormat: Text.PlainText
     color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -1739,6 +1757,7 @@ Column {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             text: modelData.name || "Mode"
+            textFormat: Text.PlainText
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.body

@@ -1,11 +1,15 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
 // QtQuick 6.12 exports its own Color singleton. The theme palette is Commons.Color.
 import qs.Commons as Commons
 import qs.Ui
+import "Marks.js" as Marks
 import "Nav.js" as Nav
+import "RepoPath.js" as Repo
+import "Wheel.js" as Wheel
 
 // Omaflow. Monitoring opens first.
 // Settings sits at the bottom of the rail. The info glyph is on that same row, at the right edge.
@@ -36,20 +40,22 @@ Item {
   readonly property color muted: Qt.rgba(fg.r, fg.g, fg.b, 0.55)
   readonly property string fontFamily: Style.font.family
   readonly property var mainPages: [
-    { id: "monitor", name: "Monitoring", mark: "\uf201" },
-    { id: "modes", name: "Modes", mark: "\uf1fe" },
-    { id: "devices", name: "Devices", mark: "\uf233" },
-    { id: "lcd", name: "LCD", mark: "\uf108" }
+    { id: "monitor", name: "Monitoring", mark: Marks.monitor },
+    { id: "modes", name: "Modes", mark: Marks.modes },
+    { id: "devices", name: "Devices", mark: Marks.fan },
+    { id: "lcd", name: "LCD", mark: Marks.lcd }
   ]
-  readonly property var infoPageInfo: ({ id: "info", name: "Info", mark: "\uf05a" })
-  readonly property var settingsPageInfo: ({ id: "settings", name: "Settings", mark: "\uf013" })
+  readonly property var infoPageInfo: ({ id: "info", name: "Info", mark: Marks.info })
+  readonly property var settingsPageInfo: ({ id: "settings", name: "Settings", mark: Marks.settings })
   readonly property var pages: mainPages.concat([settingsPageInfo, infoPageInfo])
   readonly property var railItems: {
     var out = []
     var i
-    for (i = 0; i < mainPages.length; i++) out.push({ id: mainPages[i].id, x: 0, y: i })
-    out.push({ id: "settings", x: 0, y: mainPages.length })
-    out.push({ id: "info", x: 1, y: mainPages.length })
+    for (i = 0; i < mainPages.length; i++)
+      out.push({ id: mainPages[i].id, x: 0, y: i })
+    var foot = mainPages.length
+    out.push({ id: "settings", x: 0, y: foot })
+    out.push({ id: "info", x: 1, y: foot })
     return out
   }
   readonly property bool pageKeyed: zone === "page"
@@ -71,6 +77,13 @@ Item {
     railIndex = pageIndex(page)
   }
 
+  onPageChanged: pageFlick.contentY = 0
+
+  Connections {
+    target: settingsPage
+    function onFollowYChanged() { root.scrollSettings(settingsPage.followY) }
+  }
+
   function close() {
     // Do not set closingFromHost. A hidden standalone process stays in
     // the background, and quickshell -n then refuses the launcher and the
@@ -85,19 +98,36 @@ Item {
   }
 
   function pageIndex(id) {
-    for (var i = 0; i < railItems.length; i++) if (railItems[i].id === id) return i
+    for (var i = 0; i < railItems.length; i++) {
+      if (railItems[i] && railItems[i].id === id) return i
+    }
     return 0
   }
 
   function showPage(index) {
-    var i = Math.max(0, Math.min(railItems.length - 1, index))
+    var items = railItems
+    if (!items.length) return
+    var i = Math.max(0, Math.min(items.length - 1, index))
+    var item = items[i]
+    if (!item) return
+    page = item.id
     railIndex = i
-    page = railItems[i].id
+  }
+
+  function scrollSettings(y) {
+    if (page !== "settings") return
+    var margin = Style.space(12)
+    var top = pageFlick.contentY
+    var view = pageFlick.height
+    if (view <= 0) return
+    if (y < top + margin)
+      pageFlick.contentY = Math.max(0, y - margin)
+    else if (y + Style.space(120) > top + view)
+      pageFlick.contentY = Math.max(0, Math.min(y - margin, Math.max(0, pageFlick.contentHeight - view)))
   }
 
   function railMove(dx, dy) {
-    var next = Nav.step(railItems, railIndex, dx, dy)
-    showPage(next)
+    showPage(Nav.step(railItems, railIndex, dx, dy))
   }
 
   function pickPage(id) {
@@ -328,7 +358,7 @@ Item {
           height: parent.height
           color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
 
-          Text {
+          Item {
             id: wordmark
             anchors.top: parent.top
             anchors.left: parent.left
@@ -336,13 +366,66 @@ Item {
             anchors.topMargin: Style.space(12)
             anchors.leftMargin: Style.space(12)
             anchors.rightMargin: Style.space(12)
-            leftPadding: Style.space(8) + Style.space(16) + Style.space(10)
-            text: "OMAFLOW"
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(11)
-            font.bold: true
-            font.letterSpacing: 1.3
+            height: brandRow.height
+            readonly property real brandGap: Style.space(8)
+
+            TextMetrics {
+              id: wordMetrics
+              text: "OMAFLOW"
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(15)
+              font.bold: true
+              font.letterSpacing: 1.3
+            }
+
+            Item {
+              id: brandRow
+              x: Math.round((parent.width - width) / 2)
+              y: 0
+              width: brandMark.width + wordmark.brandGap + wordMetrics.width
+              height: brandMark.height
+
+              Item {
+                id: brandMark
+                width: Style.space(40)
+                height: width
+
+                Image {
+                  id: brandSource
+                  anchors.fill: parent
+                  source: "file://" + Repo.rootFile("icons/omaflow-icon-currentcolor-tight.svg")
+                  fillMode: Image.PreserveAspectFit
+                  mipmap: true
+                  sourceSize.width: 256
+                  sourceSize.height: 256
+                  visible: false
+                  layer.enabled: true
+                  asynchronous: true
+                }
+
+                MultiEffect {
+                  anchors.fill: brandSource
+                  source: brandSource
+                  // currentColor paints black. Qt tints by luminance, so lift it first.
+                  brightness: 1.0
+                  colorization: 1.0
+                  colorizationColor: root.fg
+                }
+              }
+
+              Text {
+                id: brandWord
+                x: brandMark.width + wordmark.brandGap
+                y: (brandRow.height - height) / 2
+                textFormat: Text.PlainText
+                text: wordMetrics.text
+                color: root.fg
+                font.family: wordMetrics.font.family
+                font.pixelSize: wordMetrics.font.pixelSize
+                font.bold: true
+                font.letterSpacing: wordMetrics.font.letterSpacing
+              }
+            }
           }
 
           Column {
@@ -406,8 +489,8 @@ Item {
                 height: Style.space(36)
                 radius: 0
                 color: root.page === "info"
-                  ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.14)
-                  : ((root.zone === "rail" && root.railItems[root.railIndex] && root.railItems[root.railIndex].id === "info")
+                  ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, infoMouse.containsMouse ? 0.20 : 0.14)
+                  : ((infoMouse.containsMouse || (root.zone === "rail" && root.railItems[root.railIndex] && root.railItems[root.railIndex].id === "info"))
                     ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
 
                 Rectangle {
@@ -466,10 +549,10 @@ Item {
 
             Item {
               width: parent.width
-              height: Math.max(pageTitleText.implicitHeight, calibrateAll.height)
+              height: Math.max(pageHeading.implicitHeight, calibrateAll.height)
 
               Text {
-                id: pageTitleText
+                id: pageHeading
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.pageTitle
@@ -519,19 +602,32 @@ Item {
               text: "Enter the CoolerControl password once in Settings. Omaflow uses 127.0.0.1:11987. The token is saved and the password is not."
             }
 
-            Flickable {
-              id: pageFlick
+            Item {
+              id: pageView
               width: parent.width
               height: parent.height - y
-              contentWidth: width
-              contentHeight: body.implicitHeight
-              clip: true
-              boundsBehavior: Flickable.StopAtBounds
 
-              Column {
-                id: body
-                width: parent.width
-                spacing: Style.space(8)
+              Flickable {
+                id: pageFlick
+                anchors.fill: parent
+                contentWidth: width
+                contentHeight: body.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                // Qt's own wheel follows a 1px delta and crawls. One notch is Wheel.NOTCH.
+                interactive: false
+
+                WheelHandler {
+                  acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                  blocking: true
+                  onWheel: function(event) { Wheel.roll(pageFlick, event) }
+                }
+
+                Column {
+                  id: body
+                  width: parent.width - Style.space(14)
+                  spacing: Style.space(8)
                 MonitoringPage {
                   id: monitorPage
                   visible: root.page === "monitor" && root.service && root.service.connection === "ready"
@@ -601,6 +697,16 @@ Item {
                   accent: root.accent
                   fontFamily: root.fontFamily
                 }
+                }
+              }
+
+              HoverScroll {
+                id: pageScroll
+                flick: pageFlick
+                ink: root.fg
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
               }
             }
           }

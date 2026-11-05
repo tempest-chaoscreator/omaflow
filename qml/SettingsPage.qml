@@ -5,24 +5,19 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
+import "Marks.js" as Marks
 import "Nav.js" as Nav
 import "RepoPath.js" as Repo
 
-// Daemon, AIO LCD, window, curves, and alerts. One subtab is on screen at a time.
+// Daemon, AIO LCD, window, curves, and alerts. Each subject is one bordered box.
 Column {
   id: root
 
   property var service: null
   property bool keyed: false
   property int navIndex: 0
-  property string section: "daemon"
-  readonly property var sections: [
-    { id: "daemon", label: "Daemon" },
-    { id: "lcd", label: "AIO LCD" },
-    { id: "window", label: "Window" },
-    { id: "curves", label: "Curves" },
-    { id: "alerts", label: "Alerts" }
-  ]
+  property real followY: 0
+  onKeyedChanged: if (keyed) revealNav()
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
@@ -49,11 +44,11 @@ Column {
   spacing: Style.space(12)
 
   readonly property var switches: [
-    { key: "apply_on_boot", label: "Apply on boot" },
-    { key: "hide_duplicate_devices", label: "Hide duplicate devices" },
-    { key: "liquidctl_integration", label: "USB coolers through liquidctl" },
-    { key: "compress", label: "Compress API responses" },
-    { key: "sensors_conf_enabled", label: "Use sensors.conf labels" }
+    { key: "apply_on_boot", label: "Apply on boot", hint: "The saved mode is applied when the daemon starts." },
+    { key: "hide_duplicate_devices", label: "Hide duplicate devices", hint: "A device reported twice is listed once." },
+    { key: "liquidctl_integration", label: "USB coolers through liquidctl", hint: "USB coolers are read through liquidctl." },
+    { key: "compress", label: "Compress API responses", hint: "Daemon replies are compressed." },
+    { key: "sensors_conf_enabled", label: "Use sensors.conf labels", hint: "Sensor names come from sensors.conf." }
   ]
   property string barScript: Repo.rootFile("scripts/bar_plugin.py")
   property bool barOn: true
@@ -63,11 +58,11 @@ Column {
   property string barPending: ""
   property int barKickTries: 0
   property string barNote: ""
-  // U+F0210 plus the hottest CPU or GPU temperature. Same string the bar draws.
   readonly property string barPreview: {
-    var hot = service && service.temps ? Number(service.temps.hottest) : NaN
+    var raw = service && service.temps ? service.temps.hottest : null
+    var hot = (raw === null || raw === undefined || raw === "") ? NaN : Number(raw)
     var temp = isFinite(hot) ? Math.round(hot) + "°" : "…"
-    return "\uDB80\uDE10 " + temp
+    return Marks.fan + " " + temp
   }
 
   readonly property var hopFunctions: {
@@ -124,48 +119,37 @@ Column {
 
   readonly property var navItems: {
     var out = []
+    var y = 0
     var i
-    var col = 0
-    for (i = 0; i < sections.length; i++) {
-      if (sections[i].id === section) col = i
-      out.push({ kind: "section", index: i, x: i, y: 0 })
-    }
-    var row = 1
     function place(item) {
-      item.x = col
-      item.y = row
-      row = row + 1
+      item.x = 0
+      item.y = y
+      y = y + 1
       out.push(item)
     }
-    if (section === "daemon") {
-      if (bootState !== "enabled" && service && service.daemonGate !== "install" && service.daemonGate !== "unknown")
-        place({ kind: "boot", index: 0 })
-      if (service && service.connection === "ready") {
-        for (i = 0; i < switches.length; i++) place({ kind: "daemon", index: i })
-      }
-    } else if (section === "lcd") {
-      place({ kind: "lcd", index: 0 })
-      if (!service || service.lcdBackground !== false) place({ kind: "lcdSpeed", index: 0 })
-    } else if (section === "window") {
-      place({ kind: "fill", index: 0 })
-      place({ kind: "pinGroups", index: 0 })
-      place({ kind: "textFollow", index: 0 })
-      place({ kind: "textSize", index: 0 })
-      place({ kind: "bar", index: 0 })
-    } else if (section === "curves") {
-      place({ kind: "export", index: 0 })
-      place({ kind: "import", index: 0 })
-      place({ kind: "pumpFloor", index: 0 })
-      place({ kind: "silentRamp", index: 0 })
-      if (service && service.connection === "ready") {
-        var fns = hopFunctions
-        for (i = 0; i < fns.length; i++) place({ kind: "function", index: i })
-      }
-    } else if (section === "alerts") {
-      if (service && service.connection === "ready") {
-        var alerts = alertRows
-        for (i = 0; i < alerts.length; i++) place({ kind: "alert", index: i })
-      }
+    if (bootState !== "enabled" && service && service.daemonGate !== "install" && service.daemonGate !== "unknown")
+      place({ kind: "boot", index: 0 })
+    if (service && service.connection === "ready") {
+      for (i = 0; i < switches.length; i++) place({ kind: "daemon", index: i })
+    }
+    place({ kind: "lcd", index: 0 })
+    if (!service || service.lcdBackground !== false) place({ kind: "lcdSpeed", index: 0 })
+    place({ kind: "fill", index: 0 })
+    place({ kind: "pinGroups", index: 0 })
+    place({ kind: "textFollow", index: 0 })
+    place({ kind: "textSize", index: 0 })
+    place({ kind: "bar", index: 0 })
+    place({ kind: "export", index: 0 })
+    place({ kind: "import", index: 0 })
+    place({ kind: "pumpFloor", index: 0 })
+    place({ kind: "silentRamp", index: 0 })
+    if (service && service.connection === "ready") {
+      var fns = hopFunctions
+      for (i = 0; i < fns.length; i++) place({ kind: "function", index: i })
+    }
+    if (service && service.connection === "ready") {
+      var alerts = alertRows
+      for (i = 0; i < alerts.length; i++) place({ kind: "alert", index: i })
     }
     return out
   }
@@ -237,6 +221,20 @@ Column {
     return service && service.lcdFace ? String(service.lcdFace) : "liquid"
   }
 
+  // One line for the interval that is actually selected.
+  function lcdIntervalNote() {
+    var face = lcdFace()
+    if (!service || service.lcdBackground === false)
+      return "Updating is off. The cooler keeps the last picture."
+    if (face === "picture") return "Picture mode sends again only when its image changes."
+    if (face === "omarchy" && service.lcdThemeSync === true)
+      return "The Omarchy logo is sent when the theme changes."
+    if (face === "omarchy-time") return "The logo and the time update about once a minute."
+    var seconds = service.lcdSeconds
+    if (seconds === 0) return "The cooler keeps the last picture."
+    return "A new picture goes out every " + seconds + " seconds, including while this window is closed."
+  }
+
   function secondsLookSelected(seconds) {
     if (!service) return seconds === 5
     if (lcdFace() === "picture") return seconds === 0
@@ -270,11 +268,20 @@ Column {
     if (!service || lcdFace() === "omarchy-time" || lcdFace() === "picture") return
     var theme = lcdFace() === "omarchy"
     var stops = theme ? [0, 2, 5, 10, 30, 60, "theme"] : [0, 2, 5, 10, 30, 60]
-    var index = 1
+    var index = 0
     var i
     if (theme && service.lcdThemeSync === true) index = stops.length - 1
     else {
-      for (i = 0; i < stops.length; i++) if (stops[i] === service.lcdSeconds) index = i
+      var seconds = Number(service.lcdSeconds)
+      var best = 0
+      var diff = 100000
+      for (i = 0; i < stops.length; i++) {
+        if (stops[i] === "theme") continue
+        if (stops[i] === seconds) { best = i; break }
+        var apart = Math.abs(stops[i] - seconds)
+        if (apart < diff) { diff = apart; best = i }
+      }
+      index = best
     }
     index = index + dx
     if (index < 0) index = 0
@@ -369,15 +376,26 @@ Column {
       stepLcd(dx)
       return
     }
-    // Left and right change subtabs only from the tab row. A control stays put.
-    if (dx && !dy && (!item || item.kind !== "section")) return
-    var next = Nav.step(items, navIndex, dx, dy)
-    var landed = items[next]
-    if (landed && landed.kind === "section" && sections[landed.index]) {
-      var id = sections[landed.index].id
-      if (id !== section) section = id
-    }
-    navIndex = next
+    // Left and right step a slider. Up and down move to the next control.
+    if (dx && !dy) return
+    navIndex = Nav.step(items, navIndex, dx, dy)
+    revealNav()
+  }
+
+  function reveal(kind) {
+    var item = daemonBox
+    if (kind === "lcd" || kind === "lcdSpeed") item = lcdBox
+    else if (kind === "fill" || kind === "pinGroups" || kind === "textFollow" || kind === "textSize" || kind === "bar") item = windowBox
+    else if (kind === "export" || kind === "import" || kind === "pumpFloor" || kind === "silentRamp" || kind === "function") item = curvesBox
+    else if (kind === "alert") item = alertsBox
+    if (item) followY = item.y
+  }
+
+  function revealNav() {
+    var items = navItems
+    if (!items.length) return
+    var item = items[Math.max(0, Math.min(items.length - 1, navIndex))]
+    if (item) reveal(item.kind)
   }
 
   function aimed(kind, index) {
@@ -444,7 +462,7 @@ Column {
 
   function activateNav() {
     var item = navItems[navIndex]
-    if (!item || item.kind === "section") return
+    if (!item) return
     if (item.kind === "boot") {
       enableBoot()
       return
@@ -571,16 +589,55 @@ Column {
     }
   }
 
-  component SectionHead: Text {
-    property string page: ""
-    property bool pad: true
-    property bool extra: true
-    visible: root.section === page && extra
-    color: root.fg
-    font.family: root.fontFamily
-    font.pixelSize: Style.space(14)
-    font.bold: true
-    topPadding: pad ? Style.space(8) : 0
+  component SectionBox: Rectangle {
+    id: box
+    property string heading: ""
+    property string mark: ""
+    default property alias body: bodyCol.data
+    width: parent ? parent.width : 0
+    implicitHeight: layout.implicitHeight + Style.space(20)
+    color: "transparent"
+    border.width: 1
+    border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.22)
+
+    Column {
+      id: layout
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: Style.space(10)
+      spacing: Style.space(8)
+
+      Row {
+        spacing: Style.space(8)
+        visible: box.heading !== ""
+
+        OpticalGlyph {
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(16)
+          height: Style.space(16)
+          text: box.mark
+          fontFamily: root.fontFamily
+          fontSize: Style.space(14)
+          color: root.accent
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: box.heading
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(13)
+          font.bold: true
+        }
+      }
+
+      Column {
+        id: bodyCol
+        width: parent.width
+        spacing: Style.space(8)
+      }
+    }
   }
 
   component MutedNote: Text {
@@ -590,7 +647,8 @@ Column {
     property int px: Style.font.caption
     width: parent.width
     wrapMode: Text.WordWrap
-    visible: root.section === page && shown
+    visible: shown
+    textFormat: Text.PlainText
     color: ink
     font.family: root.fontFamily
     font.pixelSize: px
@@ -605,7 +663,6 @@ Column {
     property bool checked: false
     signal toggled()
     spacing: Style.space(10)
-    visible: root.section === page
     SquareSwitch {
       anchors.verticalCenter: parent.verticalCenter
       on: toggleRow.checked
@@ -619,47 +676,6 @@ Column {
       color: root.aimed(toggleRow.aimKind, toggleRow.aimIndex) ? root.accent : root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.space(13)
-    }
-  }
-
-  Row {
-    id: sectionRow
-    width: parent.width
-    spacing: Style.space(6)
-
-    Repeater {
-      model: root.sections
-      delegate: Rectangle {
-        required property var modelData
-        required property int index
-        width: Math.max(0, (sectionRow.width - sectionRow.spacing * (root.sections.length - 1)) / root.sections.length)
-        height: Style.space(32)
-        radius: 0
-        color: root.section === modelData.id
-          ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-          : "transparent"
-        border.width: 1
-        border.color: root.aimed("section", index) || root.section === modelData.id ? root.accent : root.line
-        Text {
-          anchors.centerIn: parent
-          width: parent.width - Style.space(8)
-          horizontalAlignment: Text.AlignHCenter
-          elide: Text.ElideRight
-          text: modelData.label
-          color: root.fg
-          font.family: root.fontFamily
-          font.pixelSize: Style.space(12)
-          font.bold: root.section === modelData.id
-        }
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: {
-            root.section = modelData.id
-            root.navIndex = index
-          }
-        }
-      }
     }
   }
 
@@ -699,24 +715,23 @@ Column {
     }
   }
 
-  SectionHead {
-    text: "coolercontrold"
-    page: "daemon"
-    pad: false
-  }
+  SectionBox {
+    id: daemonBox
+    heading: "Daemon"
+    mark: Marks.power
 
   MutedNote {
     page: "daemon"
     text: root.service && root.service.daemonGate === "install"
-      ? "Install coolercontrold from the button above. Start with the PC stays off until you turn it on."
+      ? "Install coolercontrold above. Start with the PC stays off until then."
       : root.bootState === "enabled"
-        ? "The daemon starts with the PC. Omaflow connects when it is up, including a window or bar chip that opened first."
-        : "The daemon is not enabled at boot. One approval turns it on now and at the next start. If the prompt does not appear, run: sudo systemctl enable --now coolercontrold"
+        ? "Starts with the PC."
+        : "Off at boot. Start with the PC turns it on now and at the next start."
   }
 
   Row {
     spacing: Style.space(10)
-    visible: root.section === "daemon" && root.bootState !== "enabled" && root.service && root.service.daemonGate !== "install" && root.service.daemonGate !== "unknown"
+    visible: root.bootState !== "enabled" && root.service && root.service.daemonGate !== "install" && root.service.daemonGate !== "unknown"
     Button {
       text: root.bootBusy ? "Waiting" : "Start with the PC"
       bordered: true
@@ -736,10 +751,43 @@ Column {
     text: root.bootNote
   }
 
-  SectionHead {
-    text: "AIO LCD"
-    page: "lcd"
+    Repeater {
+      model: root.service && root.service.connection === "ready" ? root.switches : []
+      delegate: Column {
+        required property var modelData
+        required property int index
+        width: parent.width
+        spacing: Style.space(2)
+        Row {
+          spacing: Style.space(10)
+          SquareSwitch {
+            anchors.verticalCenter: parent.verticalCenter
+            on: root.service && root.service.daemonSettings ? root.service.daemonSettings[modelData.key] === true : false
+            foreground: root.fg
+            accent: root.aimed("daemon", index) ? root.accent : root.fg
+            onClicked: root.patch(modelData.key, !(root.service.daemonSettings[modelData.key] === true))
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: modelData.label
+            color: root.aimed("daemon", index) ? root.accent : root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(13)
+          }
+        }
+        MutedNote {
+          page: "daemon"
+          text: modelData.hint
+        }
+      }
+    }
+
   }
+
+  SectionBox {
+    id: lcdBox
+    heading: "AIO LCD"
+    mark: Marks.lcd
 
   ToggleRow {
     page: "lcd"
@@ -749,15 +797,20 @@ Column {
     onToggled: if (root.service) root.service.setUi({ lcdBackground: !(root.service.lcdBackground !== false) })
   }
 
-  MutedNote {
-    page: "lcd"
-    text: "The cooler keeps the last picture it was sent. With this on, a new picture goes out on the interval below, including while this window is closed. Never leaves that picture in place. Picture mode always uses Never, and sends again only when its image changes. Omarchy waits for a theme change. Omarchy | Time updates once a minute. Only theme sync sends that logo when the theme changes and ignores the interval."
+  Text {
+    width: parent.width
+    visible: !root.service || root.service.lcdBackground !== false
+    text: "Update interval"
+    color: root.aimed("lcdSpeed", 0) ? root.accent : root.fg
+    font.family: root.fontFamily
+    font.pixelSize: Style.space(13)
+    font.bold: true
   }
 
   Flow {
     width: parent.width
     spacing: Style.space(8)
-    visible: root.section === "lcd" && (!root.service || root.service.lcdBackground !== false)
+    visible: !root.service || root.service.lcdBackground !== false
     Repeater {
       model: [0, 2, 5, 10, 30, 60]
       delegate: Button {
@@ -786,10 +839,17 @@ Column {
     }
   }
 
-  SectionHead {
-    text: "Window"
-    page: "window"
+  MutedNote {
+    page: "lcd"
+    text: root.lcdIntervalNote()
   }
+
+  }
+
+  SectionBox {
+    id: windowBox
+    heading: "Window"
+    mark: Marks.frame
 
   ToggleRow {
     page: "window"
@@ -801,7 +861,7 @@ Column {
 
   MutedNote {
     page: "window"
-    text: "The chart and the mode curve use the spare height. Speedometers and their titles grow a little. The rail, the LCD, and the text size stay as they are."
+    text: "The chart and the mode curve use the spare height. The rail and the text size stay as they are."
   }
 
   ToggleRow {
@@ -814,12 +874,32 @@ Column {
 
   MutedNote {
     page: "window"
-    text: "Custom groups stay below the hidden devices until this is on."
+    text: "Groups stay above the device list."
   }
 
   Row {
     spacing: Style.space(8)
-    visible: root.section === "window"
+    OpticalGlyph {
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(16)
+      height: Style.space(16)
+      text: "\uf031"
+      fontFamily: root.fontFamily
+      fontSize: Style.space(14)
+      color: root.fg
+    }
+    Text {
+      anchors.verticalCenter: parent.verticalCenter
+      text: "Text"
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+      font.bold: true
+    }
+  }
+
+  Row {
+    spacing: Style.space(8)
     Button {
       text: "Follow Omarchy"
       bordered: true
@@ -855,7 +935,6 @@ Column {
 
   Item {
     id: textTrack
-    visible: root.section === "window"
     width: Math.min(parent.width, Style.space(420))
     height: Style.space(52)
     readonly property real inset: Style.space(14)
@@ -907,18 +986,62 @@ Column {
     }
   }
 
-  SectionHead {
-    text: "Curves"
-    page: "curves"
+    Text {
+      width: parent.width
+      text: "Bar"
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+      font.bold: true
+    }
+
+    Row {
+      spacing: Style.space(10)
+      SquareSwitch {
+        anchors.verticalCenter: parent.verticalCenter
+        on: root.barOn
+        switchEnabled: !root.barBusy
+        foreground: root.fg
+        accent: root.aimed("bar", 0) ? root.accent : root.fg
+        onClicked: root.setBar(!root.barOn)
+      }
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.barPreview
+        textFormat: Text.PlainText
+        renderType: Text.NativeRendering
+        color: root.barOn ? root.accent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.38)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: "Show Omaflow Plugin on the bar"
+        color: root.aimed("bar", 0) ? root.accent : root.fg
+        font.family: root.fontFamily
+        font.pixelSize: Style.space(13)
+      }
+    }
+
+    MutedNote {
+      page: "window"
+      shown: root.barNote !== ""
+      text: root.barNote
+    }
+
   }
+
+  SectionBox {
+    id: curvesBox
+    heading: "Curves"
+    mark: Marks.curve
 
   MutedNote {
     page: "curves"
-    text: "Export writes every mode's curves and the shared groups. Import keeps them until you Apply a mode, so the other modes stay put. Groups that match this PC are saved immediately."
+    text: "Export writes every mode. Import waits until you Apply. Matching groups are saved immediately."
   }
 
   TextField {
-    visible: root.section === "curves"
     width: Math.min(parent.width, Style.space(520))
     text: root.curvePath
     placeholderText: "Path to a .json file"
@@ -930,7 +1053,6 @@ Column {
 
   Row {
     spacing: Style.space(8)
-    visible: root.section === "curves"
     Button {
       text: "Export"
       bordered: true
@@ -970,107 +1092,6 @@ Column {
     text: root.curveNote
   }
 
-  SectionHead {
-    text: "Bar"
-    page: "window"
-  }
-
-  Row {
-    spacing: Style.space(10)
-    visible: root.section === "window"
-    SquareSwitch {
-      anchors.verticalCenter: parent.verticalCenter
-      on: root.barOn
-      switchEnabled: !root.barBusy
-      foreground: root.fg
-      accent: root.aimed("bar", 0) ? root.accent : root.fg
-      onClicked: root.setBar(!root.barOn)
-    }
-    Text {
-      anchors.verticalCenter: parent.verticalCenter
-      text: root.barPreview
-      textFormat: Text.PlainText
-      renderType: Text.NativeRendering
-      color: root.barOn ? root.accent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.38)
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-    }
-    Text {
-      anchors.verticalCenter: parent.verticalCenter
-      text: "Show Omaflow Plugin on the bar"
-      color: root.aimed("bar", 0) ? root.accent : root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(13)
-    }
-  }
-
-  MutedNote {
-    page: "window"
-    shown: root.barNote !== ""
-    text: root.barNote
-  }
-
-  MutedNote {
-    page: "daemon"
-    shown: root.service && root.service.connection === "ready"
-    ink: root.fg
-    px: Style.space(13)
-    text: "Fan writes and sensor polls stay on coolercontrold. These are the daemon's own options."
-  }
-
-  Repeater {
-    visible: root.section === "daemon"
-    model: root.service && root.service.connection === "ready" ? root.switches : []
-    delegate: Row {
-      required property var modelData
-      required property int index
-      visible: root.section === "daemon"
-      spacing: Style.space(10)
-      SquareSwitch {
-        anchors.verticalCenter: parent.verticalCenter
-        on: root.service && root.service.daemonSettings ? root.service.daemonSettings[modelData.key] === true : false
-        foreground: root.fg
-        accent: root.aimed("daemon", index) ? root.accent : root.fg
-        onClicked: root.patch(modelData.key, !(root.service.daemonSettings[modelData.key] === true))
-      }
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        text: modelData.label
-        color: root.aimed("daemon", index) ? root.accent : root.fg
-        font.family: root.fontFamily
-        font.pixelSize: Style.space(13)
-      }
-    }
-  }
-
-  Text {
-    visible: root.section === "daemon"
-    text: "Poll interval"
-    color: root.muted
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.caption
-  }
-
-  Flow {
-    width: parent.width
-    spacing: Style.space(6)
-    visible: root.section === "daemon"
-    Repeater {
-      model: [0.5, 1, 2, 5]
-      delegate: Button {
-        required property var modelData
-        text: modelData + " s"
-        bordered: true
-        selected: root.service && Number(root.service.daemonSettings.poll_rate) === Number(modelData)
-        foreground: root.fg
-        accent: root.accent
-        fontFamily: root.fontFamily
-        fontSize: Style.font.caption
-        onClicked: root.patch("poll_rate", Number(modelData))
-      }
-    }
-  }
-
   ToggleRow {
     page: "curves"
     aimKind: "pumpFloor"
@@ -1085,7 +1106,7 @@ Column {
 
   MutedNote {
     page: "curves"
-    text: "Turning this off lets a pump stop, and a stopped pump can overheat the cooler. Turning it off asks for your password. Curves you already saved stay as they are until you edit them. Turning it back on raises any pump point below 50%."
+    text: "Off lets a pump stop. Turning it off asks for your password. On raises any pump point below 50%."
   }
 
   MutedNote {
@@ -1108,7 +1129,7 @@ Column {
 
   MutedNote {
     page: "curves"
-    text: "A short CPU spike waits about 8 seconds before Silent fans rise. They also wait about 8 seconds before they fall. Pumps are left alone. Silent, Fixed, Performance, Hell, and any custom mode each keep their own fan and group curves, even when the speeds match. Easing Silent does not slow the other modes."
+    text: "Silent fans wait about 8 seconds before they rise or fall. Other modes are left alone."
   }
 
   MutedNote {
@@ -1120,18 +1141,27 @@ Column {
       : (root.service ? root.service.silentRampNote : "")
   }
 
-  SectionHead {
-    text: "Curve response"
-    page: "curves"
-  }
+    Text {
+      width: parent.width
+      visible: root.hopFunctions.length > 0
+      text: "Curve response"
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.space(13)
+      font.bold: true
+    }
+
+    MutedNote {
+      page: "curves"
+      shown: root.hopFunctions.length > 0
+      text: "On, a fan that holds one speed for 30 seconds skips its step limit and finishes the move to the curve."
+    }
 
   Repeater {
-    visible: root.section === "curves"
     model: root.hopFunctions
     delegate: Row {
       required property var modelData
       required property int index
-      visible: root.section === "curves"
       spacing: Style.space(10)
       SquareSwitch {
         anchors.verticalCenter: parent.verticalCenter
@@ -1146,7 +1176,8 @@ Column {
       }
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        text: modelData.name + "  hop"
+        text: modelData.name
+        textFormat: Text.PlainText
         color: root.aimed("function", index) ? root.accent : root.fg
         font.family: root.fontFamily
         font.pixelSize: Style.space(13)
@@ -1154,18 +1185,18 @@ Column {
     }
   }
 
-  MutedNote {
-    page: "alerts"
-    shown: !(root.service && root.service.connection === "ready")
-    text: "Alerts show up after Omaflow is connected to coolercontrold."
   }
 
-  SectionHead {
-    text: "Alerts"
-    page: "alerts"
-    pad: false
-    extra: root.service && root.service.connection === "ready"
-  }
+  SectionBox {
+    id: alertsBox
+    heading: "Alerts"
+    mark: Marks.alerts
+
+    MutedNote {
+      page: "alerts"
+      shown: !(root.service && root.service.connection === "ready")
+      text: "Alerts show up after Omaflow is connected to coolercontrold."
+    }
 
   MutedNote {
     page: "alerts"
@@ -1175,12 +1206,10 @@ Column {
   }
 
   Repeater {
-    visible: root.section === "alerts"
     model: root.alertRows
     delegate: Row {
       required property var modelData
       required property int index
-      visible: root.section === "alerts"
       spacing: Style.space(10)
       SquareSwitch {
         anchors.verticalCenter: parent.verticalCenter
@@ -1192,6 +1221,7 @@ Column {
       Text {
         anchors.verticalCenter: parent.verticalCenter
         text: root.alertCaption(modelData)
+        textFormat: Text.PlainText
         color: root.aimed("alert", index) ? root.accent : root.fg
         font.family: root.fontFamily
         font.pixelSize: Style.space(13)
@@ -1202,6 +1232,8 @@ Column {
   MutedNote {
     page: "alerts"
     shown: root.service && root.service.connection === "ready"
-    text: "A desktop notification is sent when the temperature stays outside the range. Nothing shuts the PC down."
+    text: "A notification is sent when a temperature stays out of range. The PC stays on."
+  }
+
   }
 }

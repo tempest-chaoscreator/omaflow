@@ -19,12 +19,12 @@ Name=Omaflow
 GenericName=Cooling
 Comment=Fans, the pump, and an AIO LCD
 Exec=$launcher
-Icon=utilities-system-monitor
+Icon=$root/icons/omaflow-icon-tight.svg
 Terminal=false
 Categories=System;Settings;
 Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
 StartupNotify=false
-StartupWMClass=omaflow
+StartupWMClass=omaflow-standalone
 EOF
 chmod 644 "$desk"
 if command -v update-desktop-database >/dev/null 2>&1; then

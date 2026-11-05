@@ -14,6 +14,13 @@ Item {
   onWidthChanged: canvas.requestPaint()
   onHeightChanged: canvas.requestPaint()
 
+  // Number(null) is 0. A missing sample breaks the line instead of dipping to 0°.
+  function sampleNum(value) {
+    if (value === null || value === undefined || value === "") return NaN
+    var n = Number(value)
+    return isFinite(n) ? n : NaN
+  }
+
   function bounds() {
     var lo = 0
     var hi = 40
@@ -21,7 +28,7 @@ Item {
     for (var s = 0; s < list.length; s++) {
       var values = list[s] && list[s].values ? list[s].values : []
       for (var i = 0; i < values.length; i++) {
-        var n = Number(values[i])
+        var n = sampleNum(values[i])
         if (!isFinite(n)) continue
         if (n < lo) lo = n
         if (n > hi) hi = n
@@ -63,7 +70,7 @@ Item {
         ctx.lineWidth = 1.6
         var started = false
         for (var i = 0; i < values.length; i++) {
-          var n = Number(values[i])
+          var n = root.sampleNum(values[i])
           if (!isFinite(n)) { started = false; continue }
           var x = values.length === 1 ? 0 : (i / (values.length - 1)) * width
           var yv = height - ((n - span.lo) / (span.hi - span.lo)) * height

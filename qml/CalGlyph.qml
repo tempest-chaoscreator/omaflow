@@ -48,11 +48,16 @@ Item {
       : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
   }
 
+  // The fan stays on the right. The label grows to the left.
   Row {
-    anchors.centerIn: parent
+    anchors.right: parent.right
+    anchors.rightMargin: Style.space(3)
+    anchors.verticalCenter: parent.verticalCenter
+    layoutDirection: Qt.RightToLeft
     spacing: root.words ? Style.space(4) : 0
 
     OpticalGlyph {
+      anchors.verticalCenter: parent.verticalCenter
       width: Style.space(16)
       height: Style.space(16)
       text: root.mark
@@ -63,8 +68,10 @@ Item {
 
     Text {
       id: word
+      anchors.verticalCenter: parent.verticalCenter
       visible: root.words
       text: root.label
+      textFormat: Text.PlainText
       color: root.hot ? root.accent : root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.space(12)
