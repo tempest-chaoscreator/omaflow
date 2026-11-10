@@ -16,7 +16,14 @@ The bar chip is this repository. `omarchy plugin add` clones it to:
 omarchy plugin add https://github.com/tempest-chaoscreator/omaflow.git --enable
 ```
 
-Open the chip. If `coolercontrold` is missing, choose **Install coolercontrold**. That asks for your password and runs `omarchy pkg aur add coolercontrold`. It does not install the CoolerControl desktop package. If the package is already installed and the service is stopped, choose **Start coolercontrold**. That asks for your password and runs `systemctl start`. It does not enable the service at boot, and Omaflow does not run as root.
+The first time the chip loads, it copies the window launcher into place. `omarchy plugin update` refreshes that copy the next time the chip loads.
+
+- `~/.local/bin/omaflow` opens it.
+- `~/.local/share/omaflow/` holds the window files.
+- `~/.local/share/applications/omaflow-standalone.desktop` is the launcher entry.
+- `~/.config/omaflow/` holds the token and the other settings, written by the running program.
+
+That copy does not install `coolercontrold`. Open the chip. If `coolercontrold` is missing, choose **Install coolercontrold**. That asks for your password and runs `omarchy pkg aur add coolercontrold`. It does not install the CoolerControl desktop package. If the package is already installed and the service is stopped, choose **Start coolercontrold**. That asks for your password and runs `systemctl start`. It does not enable the service at boot, and Omaflow does not run as root.
 
 To start the daemon with the PC, open Omaflow and turn on **Start with the PC** in Settings. That stays off until you turn it on. The same two steps from a terminal:
 
@@ -33,14 +40,7 @@ omarchy plugin update tempest-chaoscreator.omaflow
 
 ### Git clone
 
-Clone the repository and install the window. `./install` copies the window out of the checkout:
-
-- `~/.local/bin/omaflow` opens it.
-- `~/.local/share/omaflow/` holds the window files.
-- `~/.local/share/applications/omaflow-standalone.desktop` is the launcher entry.
-- `~/.config/omaflow/` holds the token and the other settings, written by the running program.
-
-The bar chip stays the git checkout from `omarchy plugin add`. `./install` does not replace that checkout, does not install `coolercontrold`, does not enable the daemon, and does not touch fan settings. The window offers the same Install and Start buttons as the chip.
+Use this to publish the same launcher from a source checkout. The plugin command above already does that copy when the chip loads. `./install` does not replace the bar checkout, does not install `coolercontrold`, does not enable the daemon, and does not touch fan settings. The window offers the same Install and Start buttons as the chip.
 
 ```bash
 git clone https://github.com/tempest-chaoscreator/omaflow.git

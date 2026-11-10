@@ -43,6 +43,10 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$desk_dir" >/dev/null 2>&1 || true
 fi
 
+if head=$(git -C "$root" rev-parse HEAD 2>/dev/null); then
+  printf '%s\n' "$head" > "$share/.omaflow-source"
+fi
+
 echo "Window launcher: $bin/omaflow"
 echo "Window files:    $share"
 if [[ -d "$plugin/.git" ]]; then

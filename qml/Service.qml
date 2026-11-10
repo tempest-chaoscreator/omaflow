@@ -2488,6 +2488,19 @@ Item {
     onExited: function(code) { root.finishPumpFloorOff(code) }
   }
 
+  // plugin add never runs ./install. The enabled checkout publishes the
+  // launcher once it loads, and again when its commit changes. A source
+  // tree and the ~/.local copy exit without copying.
+  Process {
+    id: windowPublish
+    command: ["bash", Repo.rootFile("scripts/ensure_window.sh")]
+    onExited: function(code) {
+      if (code !== 0) console.warn("omaflow: window launcher was not installed")
+    }
+  }
+
+  Component.onCompleted: windowPublish.running = true
+
   Timer {
     interval: 3000
     repeat: true
