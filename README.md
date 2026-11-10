@@ -2,7 +2,7 @@
 
 Omaflow 0.7 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
 
-![Omaflow](screenshots/banner-app.jpg)
+![Omaflow](screenshots/presentation.png)
 
 ## Install
 
@@ -75,33 +75,35 @@ That removes the chip and the window launcher. `coolercontrold` stays installed.
 
 ## The window
 
-![Monitoring](screenshots/monitoring.jpg)
+![Omaflow window](screenshots/banner-app.png)
+
+![Monitoring](screenshots/monitoring.png)
 
 **Monitoring.** Temps, fan speeds, and which apps are using the CPU and GPU. The CPU percent is that app's share of the machine. The GPU percent is that app's share of the GPU's load. The chart is the last minute. Empty headers that report a duty and 0 rpm stay hidden. GPU fans stay visible at 0 rpm. The window lists four apps on each side. The chip lists two.
 
-![Modes](screenshots/modes.jpg)
+![Modes](screenshots/modes.png)
 
 **Modes.** Pick a mode, shape each fan's curve, and link channels. Silent, Performance, Fixed, Hell, or a mode you add. Each mode keeps its own curves. A link shares one curve across the fans on that card. The pump keeps its own. Drag a handle to edit. Undo, redo, and Reset sit under the graph. Apply is the check on the right. Choosing a mode does not run it. Apply waits while a fan is being calibrated.
 
-![Devices](screenshots/devices.jpg)
+![Devices](screenshots/devices.png)
 
 **Devices.** See every fan. Calibrate one, a group, or all. The eye hides a device from Monitoring and the bar. Hidden devices stay at the bottom. Custom groups sit below them until **Pin groups** is on, with a line between the two lists. Calibrate follows the daemon's own sweep, one fan at a time, and does not rewrite saved modes.
 
-![LCD](screenshots/lcd.jpg)
+![LCD](screenshots/lcd.png)
 
 **LCD.** Choose what the cooler's LCD shows, including the Omarchy logo and a picture from your home directory. The faces are Liquid, CPU, CPU | GPU, CPU | Liquid, Omarchy, Omarchy | Time, and Picture. Round or square follows the cooler. Brightness and saturation sit on the page. Omarchy | Time draws the clock in the theme accent with a 1px black edge. Picture stays centered, and it can be larger or smaller. The cooler keeps the last picture it was sent. Picture mode does not refresh on a timer. Settings can keep the other faces updating while the window is closed, as long as the bar plugin is enabled. Never leaves that picture in place. With no supported AIO LCD, the page says so and the controls under it stay dimmed.
 
-![Settings](screenshots/settings.jpg)
+![Settings](screenshots/settings.png)
 
 **Settings.** Set LCD updates, window fill, alerts, and export or import curves. **Pin groups** puts custom groups at the top of Devices. Fill gives spare height to the graphs. Text size can follow Omarchy or stay at a chosen size. Export and import write `~/Documents/omaflow-curves.json`. The pump floor and a slower Silent fan pace are switches here. CPU, GPU, and coolant alerts stay off until you turn one on. The bar switch installs this repository when the chip is missing.
 
-![Info](screenshots/info.jpg)
+![Info](screenshots/info.png)
 
 **Info.** Every key, and the version you are on. Enter runs the highlighted control. Escape closes the window.
 
 ## The bar plugin
 
-![Omaflow bar plugin](screenshots/bar.jpg)
+![Omaflow bar plugin](screenshots/bar.png)
 
 Left click opens the chip. Monitoring shows CPU, GPU, liquid when the cooler reports it, the fans, and which apps are using the CPU and GPU. Mode shows the curves for the selected mode. `1`–`9` select a mode. Apply runs it. `o` opens the window. Escape closes the popover.
 
