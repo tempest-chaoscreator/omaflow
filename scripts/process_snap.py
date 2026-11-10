@@ -208,7 +208,11 @@ def _sample_fresh(snap: dict, now: float) -> bool:
         sample_at = float(snap.get("sampleAt") or 0)
     except (TypeError, ValueError):
         return False
-    return sample_at > 0 and (now - sample_at) < _SAMPLE_HOLD
+    # A stamp in the future is not fresh. A step backward must not freeze the rows.
+    if sample_at <= 0:
+        return False
+    age = now - sample_at
+    return 0 <= age < _SAMPLE_HOLD
 
 
 def _advance_cpu(snap: dict, cur: tuple) -> tuple[list, float, dict, bool]:
@@ -287,6 +291,7 @@ def _write_snap(data: dict) -> None:
     try:
         try:
             _write_all(fd, blob)
+            os.fsync(fd)
         except OSError:
             return
     finally:
@@ -478,24 +483,62 @@ def _gpu_worker() -> None:
         _unlock(fd)
 
 
+def _gpu_due(snap: dict, now: float) -> bool:
+    try:
+        gpu_at = float(snap.get("gpuAt") or 0)
+    except (TypeError, ValueError):
+        gpu_at = 0.0
+    try:
+        gpu_running = float(snap.get("gpuRunning") or 0)
+    except (TypeError, ValueError):
+        gpu_running = 0.0
+    # A future stamp would never become due. One extra read is cheaper than a freeze.
+    if (now - gpu_at) < 0 or (now - gpu_running) < 0:
+        return True
+    return (now - gpu_at) >= 2.0 and (now - gpu_running) >= 4.0
+
+
+def _note_gpu(snap: dict, now: float) -> bool:
+    """Mark a GPU read as running when one is due. The caller starts the thread."""
+    if not _gpu_due(snap, now):
+        return False
+    snap["gpuRunning"] = now
+    return True
+
+
 def snapshot() -> dict:
-    """Latest shared process sample. Starts one GPU read when the last one is stale."""
-    cur = _capture_cpu()
+    """Latest shared process sample. Starts one GPU read when the last one is stale.
+
+    A sample still inside the hold is returned without walking /proc.
+    The walk happens only after the lock is released. If the other client
+    published during that walk, this sample is dropped.
+    """
     start_gpu = False
     fd = _lock()
     try:
         snap = _read_snap()
         now = time.time()
+        if _sample_fresh(snap, now):
+            start_gpu = _note_gpu(snap, now)
+            if start_gpu:
+                _write_snap(snap)
+            body = _public(snap)
+        else:
+            body = None
+    finally:
+        _unlock(fd)
+    if body is not None:
+        if start_gpu:
+            threading.Thread(target=_gpu_worker, name="omaflow-gpu", daemon=True).start()
+        return body
+
+    cur = _capture_cpu()
+    fd = _lock()
+    try:
+        snap = _read_snap()
+        now = time.time()
         fresh = _sample_fresh(snap, now)
-        try:
-            gpu_at = float(snap.get("gpuAt") or 0)
-        except (TypeError, ValueError):
-            gpu_at = 0.0
-        try:
-            gpu_running = float(snap.get("gpuRunning") or 0)
-        except (TypeError, ValueError):
-            gpu_running = 0.0
-        start_gpu = (now - gpu_at) >= 2.0 and (now - gpu_running) >= 4.0
+        start_gpu = _note_gpu(snap, now)
         if not fresh:
             cpu, cpu_total, baseline, measured = _advance_cpu(snap, cur)
             snap["baseline"] = baseline
@@ -503,8 +546,6 @@ def snapshot() -> dict:
             snap["cpuTotal"] = cpu_total
             if measured:
                 snap["sampleAt"] = now
-        if start_gpu:
-            snap["gpuRunning"] = now
         if not fresh or start_gpu:
             _write_snap(snap)
         body = _public(snap)

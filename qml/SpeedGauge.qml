@@ -17,7 +17,7 @@ Item {
   property real shown: 0
 
   onPercentChanged: shown = known ? Math.max(0, Math.min(100, percent)) : 0
-  Behavior on shown { NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
+  Behavior on shown { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
   onShownChanged: dial.requestPaint()
   onTextScaleChanged: dial.requestPaint()
   onWidthChanged: dial.requestPaint()

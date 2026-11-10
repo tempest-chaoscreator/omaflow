@@ -52,6 +52,7 @@ Rectangle {
     anchors.rightMargin: Style.space(8)
     anchors.verticalCenter: parent.verticalCenter
     text: root.label
+    textFormat: Text.PlainText
     color: root.on || root.armed || hit.containsMouse ? root.accent : root.foreground
     font.family: root.fontFamily
     font.pixelSize: Style.space(13)

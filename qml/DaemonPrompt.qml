@@ -10,7 +10,6 @@ Column {
   id: root
 
   property var service: null
-  property bool showOpen: false
   property bool keyed: false
   property bool aimedInstall: false
   property bool aimedStart: false
@@ -19,8 +18,6 @@ Column {
   property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
-
-  signal openRequested()
 
   width: parent ? parent.width : 0
   spacing: Style.space(8)
@@ -42,7 +39,6 @@ Column {
     var out = []
     if (gate === "install") out.push({ kind: "install", x: 0, y: 0 })
     else if (gate === "start") out.push({ kind: "start", x: 0, y: 0 })
-    if (showOpen) out.push({ kind: "open", x: 0, y: out.length })
     return out
   }
 
@@ -65,7 +61,6 @@ Column {
     if (!item || !service) return
     if (item.kind === "install") service.installDaemon()
     else if (item.kind === "start") service.startDaemon()
-    else if (item.kind === "open") openRequested()
   }
 
   Text {
@@ -100,18 +95,6 @@ Column {
     fontFamily: root.fontFamily
     fontSize: Style.font.caption
     onClicked: if (root.service) root.service.startDaemon()
-  }
-
-  Button {
-    visible: root.showOpen && (root.gate === "install" || root.gate === "start")
-    text: "Open Omaflow"
-    bordered: true
-    selected: root.aimed("open")
-    foreground: root.fg
-    accent: root.accent
-    fontFamily: root.fontFamily
-    fontSize: Style.font.caption
-    onClicked: root.openRequested()
   }
 
   Text {

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tempest-chaoscreator.omaflow",
   "name": "Omaflow",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": "Tempest",
   "license": "MIT",
   "homepage": "https://github.com/tempest-chaoscreator/omaflow",
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omaflow",
-    "description": "Telemetry and the selected mode.",
+    "description": "Monitoring and the selected mode.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",

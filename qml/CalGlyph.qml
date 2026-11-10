@@ -33,7 +33,7 @@ Item {
   clip: true
 
   Behavior on implicitWidth {
-    NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+    NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic }
   }
 
   Rectangle {

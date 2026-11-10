@@ -52,7 +52,11 @@ function rawGraphPoints(profile) {
   for (var i = 0; i < src.length; i++) {
     var pair = src[i]
     if (!pair || pair.length < 2) continue
-    out.push([Number(pair[0]), Number(pair[1])])
+    if (pair[0] === null || pair[0] === undefined || pair[1] === null || pair[1] === undefined) continue
+    var x = Number(pair[0])
+    var y = Number(pair[1])
+    if (!isFinite(x) || !isFinite(y)) continue
+    out.push([x, y])
   }
   return out
 }
@@ -444,6 +448,142 @@ function paintLive(target, fresh) {
   }
 }
 
+// One status tick. Duty and RPM for the channels already on screen, plus the
+// temperatures the chip shows. A new channel, a missing channel, or a fan
+// that starts or stops is a shape change and the caller rebuilds the lists.
+function statusPatch(devices, statusDevices, channels) {
+  var byStatus = statusByUid(statusDevices)
+  var known = {}
+  var list = channels || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var ch = list[i]
+    if (!ch || !ch.key) continue
+    known[ch.key] = channelPresence(ch)
+  }
+  var seen = {}
+  var live = {}
+  var shapeChanged = false
+  var cpuTemps = []
+  var gpuTemps = []
+  var coolant = null
+  var pumpDuty = null
+  var pumpRpm = null
+  var pumpRank = -1
+  var gpuPower = null
+  var gpuLoad = null
+  var gpuName = ""
+  var cpuName = "CPU"
+  var coolerName = ""
+  var pumpDevice = ""
+  var devs = devices || []
+  var d
+  for (d = 0; d < devs.length; d++) {
+    var dev = devs[d]
+    if (!dev || !dev.info) continue
+    var latest = byStatus[dev.uid] || {}
+    var dutyBy = {}
+    var rpmBy = {}
+    var wattsBy = {}
+    var reported = latest.channels || []
+    var c
+    for (c = 0; c < reported.length; c++) {
+      var item = reported[c]
+      if (!item) continue
+      dutyBy[item.name] = item.duty
+      rpmBy[item.name] = item.rpm
+      if (item.watts !== undefined && item.watts !== null) wattsBy[item.name] = Number(item.watts)
+    }
+    var samples = latest.temps || []
+    var t
+    for (t = 0; t < samples.length; t++) {
+      var sample = samples[t]
+      var tempValue = sample ? finiteNum(sample.temp) : null
+      if (tempValue === null) continue
+      var tempName = String(sample.name || "")
+      var tempLabel = String((dev.info.temps && dev.info.temps[tempName] && dev.info.temps[tempName].label) || tempName)
+      if (/liquid|coolant|water/i.test(tempName) || /liquid|coolant/i.test(tempLabel)) {
+        coolant = tempValue
+        if (dev.name) coolerName = dev.name
+      }
+      if (dev.type === "CPU") cpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
+      if (dev.type === "GPU") gpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
+    }
+    var infoChannels = dev.info.channels || {}
+    var name
+    for (name in infoChannels) {
+      if (!Object.prototype.hasOwnProperty.call(infoChannels, name)) continue
+      var info = infoChannels[name] || {}
+      var label = info.label || name
+      var key = dev.uid + "/" + name
+      if (dev.type === "CPU") cpuName = dev.name || cpuName
+      if (dev.type === "GPU") {
+        gpuName = dev.name || gpuName
+        if (/power/i.test(name) && isFinite(wattsBy[name])) gpuPower = wattsBy[name]
+        if (/load/i.test(name)) {
+          var load = finiteNum(dutyBy[name])
+          if (load !== null) gpuLoad = load
+        }
+      }
+      if (!info.speed_options) continue
+      var duty = finiteNum(dutyBy[name])
+      var rpm = finiteNum(rpmBy[name])
+      var pump = isPumpName(name, label)
+      if (pump) {
+        var rank = (/pump/i.test(name) ? 2 : 1) + (String(dev.type || "").toLowerCase() === "liquidctl" ? 2 : 0)
+        if (pumpRank < 0 || rank >= pumpRank) {
+          if (rank > pumpRank) {
+            pumpDuty = null
+            pumpRpm = null
+          }
+          pumpRank = rank
+          if (dev.name) pumpDevice = dev.name
+          if (duty !== null) pumpDuty = duty
+          if (rpm !== null) pumpRpm = rpm
+        }
+      }
+      var presence = channelPresence({ duty: duty, rpm: rpm })
+      if (!Object.prototype.hasOwnProperty.call(known, key) || known[key] !== presence)
+        shapeChanged = true
+      seen[key] = true
+      live[key] = { duty: duty, rpm: rpm }
+    }
+  }
+  var prev
+  for (prev in known) {
+    if (!Object.prototype.hasOwnProperty.call(known, prev)) continue
+    if (!seen[prev]) shapeChanged = true
+  }
+  var cpu = pickTemp(cpuTemps, /package|tctl|tdie/i)
+  var cpuCcd1 = matchTemp(cpuTemps, /tccd1|ccd1/i)
+  var cpuCcd2 = matchTemp(cpuTemps, /tccd2|ccd2/i)
+  var gpu = gpuEdge(gpuTemps)
+  var hottest = null
+  if (cpu !== null) hottest = cpu
+  if (gpu !== null && (hottest === null || gpu > hottest)) hottest = gpu
+  if (coolant !== null && (hottest === null || coolant > hottest)) hottest = coolant
+  if (!coolerName) coolerName = pumpDevice
+  return {
+    shapeChanged: shapeChanged,
+    live: live,
+    temps: {
+      cpu: cpu,
+      cpuCcd1: cpuCcd1,
+      cpuCcd2: cpuCcd2,
+      cpuName: cpuName,
+      gpu: gpu,
+      gpuPower: gpuPower,
+      gpuLoad: gpuLoad,
+      gpuName: gpuName,
+      coolant: coolant,
+      liquidName: coolerName,
+      pumpDuty: pumpDuty,
+      pumpRpm: pumpRpm,
+      hottest: hottest
+    }
+  }
+}
+
 function liquidName(text) {
   return /liquid|coolant|water/i.test(String(text || ""))
 }
@@ -658,6 +798,47 @@ function modeProfileChannels(mode, profileUid) {
     out.push({ deviceUid: deviceUid, name: setting.channel_name })
   })
   return out
+}
+
+function sameGraph(sent, got) {
+  var a = sent || []
+  var b = got || []
+  if (a.length !== b.length) return false
+  var i
+  for (i = 0; i < a.length; i++) {
+    if (!a[i] || a[i].length < 2 || !b[i] || b[i].length < 2) return false
+    if (Math.round(Number(a[i][0])) !== Math.round(Number(b[i][0]))) return false
+    if (Math.round(Number(a[i][1])) !== Math.round(Number(b[i][1]))) return false
+  }
+  return true
+}
+
+// True when every sent curve is the profile the daemon stored, and each
+// listed channel on this mode points at that profile.
+function appliedCurvesMatch(mode, profiles, jobs) {
+  var list = jobs || []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var job = list[i]
+    if (!job || !job.profileUid) return false
+    var profile = profileByUid(profiles, job.profileUid)
+    if (!profile || !sameGraph(job.points, profile.speed_profile)) return false
+    var chans = job.channels || []
+    var c
+    for (c = 0; c < chans.length; c++) {
+      var wantDevice = String(chans[c] && chans[c].deviceUid || "")
+      var wantName = String(chans[c] && chans[c].name || "")
+      var bound = false
+      eachModeSetting(mode, function(deviceUid, setting) {
+        if (!setting || bound) return
+        if (String(deviceUid || "") !== wantDevice) return
+        if (String(setting.channel_name || "") !== wantName) return
+        if (String(setting.profile_uid || "") === String(job.profileUid)) bound = true
+      })
+      if (!bound) return false
+    }
+  }
+  return true
 }
 
 function matchChannel(channels, deviceName, channelName) {
@@ -955,9 +1136,9 @@ function modeMembers(mode, channels, profiles) {
       minDuty: channel.minDuty,
       profileUid: profile ? profile.uid : "",
       profileName: profile ? profile.name : "",
-      pType: profile ? profile.p_type : (setting.speed_fixed !== undefined ? "Fixed" : ""),
+      pType: profile ? profile.p_type : (setting.speed_fixed !== undefined && setting.speed_fixed !== null ? "Fixed" : ""),
       points: graphPoints(profile, channel && channel.isPump ? channel.minDuty : 0),
-      fixed: setting.speed_fixed !== undefined ? Number(setting.speed_fixed) : null
+      fixed: setting.speed_fixed !== undefined && setting.speed_fixed !== null && isFinite(Number(setting.speed_fixed)) ? Number(setting.speed_fixed) : null
     })
   })
   return out
@@ -1122,31 +1303,62 @@ function activeAlertLine(alerts) {
   return names[0] + " +" + (names.length - 1)
 }
 
-// The body this daemon accepts. shutdown_on_activation is never forwarded as true.
+// Missing, null, and "" are not a duration. Number(null) is 0, so those stay out of Number.
+function alertSeconds(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return NaN
+  var n = Number(value)
+  return isFinite(n) ? n : NaN
+}
+
+function alertChannel(src) {
+  src = src || {}
+  return {
+    device_uid: String(src.device_uid || ""),
+    channel_name: String(src.channel_name || ""),
+    channel_metric: String(src.channel_metric || "Temp")
+  }
+}
+
+// The body this daemon accepts. A missing warmup is 12. A real 0 is kept.
+// Cooldown, repeat, silence, and extra sources are copied or the next save drops them.
+// shutdown_on_activation is never forwarded as true.
 function alertWriteBody(alert, enabled) {
   var src = alert && alert.channel_source
   if (!src && alert && alert.channel_sources && alert.channel_sources.length) src = alert.channel_sources[0]
-  src = src || {}
   var max = Number(alert && alert.max)
   var min = Number(alert && alert.min)
-  var warm = Number(alert && alert.warmup_duration)
-  return {
+  var warm = alertSeconds(alert && alert.warmup_duration)
+  var body = {
     uid: String(alert && alert.uid || ""),
     name: String(alert && alert.name || ""),
-    channel_source: {
-      device_uid: String(src.device_uid || ""),
-      channel_name: String(src.channel_name || ""),
-      channel_metric: String(src.channel_metric || "Temp")
-    },
+    channel_source: alertChannel(src),
     min: isFinite(min) ? min : 0,
     max: isFinite(max) ? max : 0,
-    warmup_duration: isFinite(warm) && warm > 0 ? warm : 12,
+    warmup_duration: isFinite(warm) && warm >= 0 ? warm : 12,
     desktop_notify: !alert || alert.desktop_notify !== false,
     desktop_notify_audio: !!(alert && alert.desktop_notify_audio === true),
     desktop_notify_recovery: !alert || alert.desktop_notify_recovery !== false,
     shutdown_on_activation: false,
     enabled: enabled !== false
   }
+  if (!alert) return body
+  var cool = alertSeconds(alert.cooldown_duration)
+  if (isFinite(cool) && cool >= 0) body.cooldown_duration = cool
+  var repeat = alertSeconds(alert.repeat_interval)
+  if (isFinite(repeat) && repeat >= 0) body.repeat_interval = repeat
+  var silenced = alert.silenced_until
+  if (typeof silenced === "string" && silenced !== "") body.silenced_until = silenced
+  var sources = alert.channel_sources
+  if (sources && sources.length && typeof sources !== "string") {
+    var copied = []
+    var i
+    for (i = 0; i < sources.length; i++) {
+      if (!sources[i] || typeof sources[i] !== "object") continue
+      copied.push(alertChannel(sources[i]))
+    }
+    if (copied.length) body.channel_sources = copied
+  }
+  return body
 }
 
 // Eight seconds ignores a short spike. The delay applies on the way down too,

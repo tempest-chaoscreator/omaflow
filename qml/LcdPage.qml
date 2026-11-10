@@ -26,6 +26,8 @@ Column {
   property bool lcdReady: false
   property bool touched: false
   property bool pushing: false
+  property bool pushAgain: false
+  property int lcdPullGen: 0
   property bool viewReady: false
   property int previewGen: 0
   property color fg: Commons.Color.foreground
@@ -105,8 +107,15 @@ Column {
     return Qt.hsla(base.hslHue, s, l, 1)
   }
 
-  function whole(value) {
+  // Number(null) is 0. A missing sensor stays a dash, and a real 0 stays 0.
+  function storedNum(value) {
+    if (value === null || value === undefined || value === "") return NaN
     var n = Number(value)
+    return isFinite(n) ? n : NaN
+  }
+
+  function whole(value) {
+    var n = storedNum(value)
     return isFinite(n) ? String(Math.round(n)) : "—"
   }
 
@@ -190,22 +199,47 @@ Column {
   }
 
   function readView(raw) {
-    try {
-      var obj = JSON.parse(String(raw || ""))
-      if (obj.face) face = String(obj.face)
-      if (isFinite(Number(obj.angle))) angle = ((Math.round(Number(obj.angle)) % 360) + 360) % 360
-      if (isFinite(Number(obj.brightness))) brightness = Math.max(0, Math.min(100, Math.round(Number(obj.brightness))))
-      if (isFinite(Number(obj.saturation))) saturation = Math.max(0, Math.min(100, Math.round(Number(obj.saturation))))
-      if (obj.zeroOrientation !== undefined) zeroOrientation = !!obj.zeroOrientation
-      if (obj.picture !== undefined) picturePath = String(obj.picture || "")
-      if (isFinite(Number(obj.pictureScale)))
-        pictureScale = Math.max(pictureScaleMin, Math.min(pictureScaleMax, Math.round(Number(obj.pictureScale))))
-      if (obj.live !== undefined) {
-        syncOn = obj.live === true
-        liveKnown = true
+    // A torn file is not an empty view. The first load must not save defaults
+    // over it. A later complete write still applies.
+    var text = String(raw || "").replace(/^\s+|\s+$/g, "")
+    var obj = null
+    if (text) {
+      try {
+        obj = JSON.parse(text)
+      } catch (e) {
+        obj = null
       }
-      touched = true
-    } catch (e) {}
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+        if (!viewReady) {
+          viewReady = true
+          if (screen && !lcdReady) pull()
+          if (plateFace) schedulePreview()
+        }
+        return
+      }
+    }
+    if (obj) {
+      try {
+        if (obj.face) face = String(obj.face)
+        var angleN = storedNum(obj.angle)
+        if (isFinite(angleN)) angle = ((Math.round(angleN) % 360) + 360) % 360
+        var brightN = storedNum(obj.brightness)
+        if (isFinite(brightN)) brightness = Math.max(0, Math.min(100, Math.round(brightN)))
+        var satN = storedNum(obj.saturation)
+        if (isFinite(satN)) saturation = Math.max(0, Math.min(100, Math.round(satN)))
+        if (obj.zeroOrientation !== undefined) zeroOrientation = !!obj.zeroOrientation
+        if (obj.picture !== undefined) picturePath = String(obj.picture || "")
+        var scaleN = storedNum(obj.pictureScale)
+        if (isFinite(scaleN))
+          pictureScale = Math.max(pictureScaleMin, Math.min(pictureScaleMax, Math.round(scaleN)))
+        if (obj.live !== undefined) {
+          syncOn = obj.live === true
+          liveKnown = true
+          lcdPullGen = lcdPullGen + 1
+        }
+        touched = true
+      } catch (e) {}
+    }
     finishView()
   }
 
@@ -248,33 +282,45 @@ Column {
     if (!service || !screen || !service.call) return
     var uid = screen.deviceUid
     var channel = screen.name
+    var gen = lcdPullGen
     service.call("GET", "/devices/" + encodeURIComponent(uid) + "/settings", null, function(res) {
       if (!root.screen || root.screen.deviceUid !== uid) return
+      var current = gen === root.lcdPullGen
       if (res && res.ok) {
         var rows = (res.body && res.body.settings) || []
         for (var i = 0; i < rows.length; i++) {
           if (rows[i].channel_name !== channel || !rows[i].lcd) continue
           var lcd = rows[i].lcd
-          if (!root.touched && isFinite(Number(lcd.brightness))) root.brightness = Number(lcd.brightness)
+          var brightN = root.storedNum(lcd.brightness)
+          if (!root.touched && isFinite(brightN)) root.brightness = brightN
+          if (!current) continue
           root.syncOn = String(lcd.mode || "") !== "none"
           root.liveKnown = true
           root.saveView()
         }
       }
       root.lcdReady = true
-      if (root.syncOn) root.push()
+      if (current && root.syncOn) root.push()
     })
   }
 
   function push() {
-    if (!viewReady || !service || !screen || pushing) return
+    if (!viewReady || !service || !screen || !screen.deviceUid || !screen.name) return
+    if (pushing) {
+      pushAgain = true
+      return
+    }
     pushing = true
+    pushAgain = false
     var px = pixelSize()
     service.pushLcdImage(
       screen.deviceUid, screen.name, brightness, face, angle,
       hexOf(ink), hexOf(ink2), primaryText(), secondaryText(),
       shownShape, px.w, px.h, screen.deviceName || "",
-      function() { root.pushing = false },
+      function() {
+        root.pushing = false
+        if (root.pushAgain) root.push()
+      },
       picturePath,
       pictureScale
     )
@@ -448,6 +494,7 @@ Column {
   }
 
   function turnOff() {
+    lcdPullGen = lcdPullGen + 1
     syncOn = false
     liveKnown = true
     saveView()
@@ -455,6 +502,14 @@ Column {
     service.setLcd(screen.deviceUid, screen.name, {
       brightness: brightness, orientation: 0, colors: [], mode: "none"
     })
+  }
+
+  function syncScreen() {
+    lcdPullGen = lcdPullGen + 1
+    syncOn = true
+    liveKnown = true
+    saveView()
+    push()
   }
 
   function setFace(id) {
@@ -533,12 +588,7 @@ Column {
     else if (item.id === "zero") zeroPreview()
     else if (item.id === "ccw") stepAngle(-30)
     else if (item.id === "cw") stepAngle(30)
-    else if (item.id === "sync") {
-      syncOn = true
-      liveKnown = true
-      saveView()
-      push()
-    }
+    else if (item.id === "sync") syncScreen()
     else if (item.id === "off") turnOff()
   }
 
@@ -622,9 +672,11 @@ Column {
   FileView {
     id: lcdFile
     path: Quickshell.env("HOME") + "/.config/omaflow/lcd-view.json"
-    watchChanges: false
+    // A deck command writes this file from the bar. An open window follows it.
+    watchChanges: true
     printErrors: false
     onLoaded: root.readView(text())
+    onFileChanged: reload()
     onLoadFailed: root.finishView()
   }
 
@@ -759,7 +811,7 @@ Column {
 
             Behavior on implicitWidth {
               enabled: pictureHost.slide
-              NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+              NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic }
             }
             Component.onCompleted: pictureHost.slide = true
 
@@ -1371,12 +1423,7 @@ Column {
         fontFamily: root.fontFamily
         fontSize: Style.font.caption
         tooltipText: "Keep the pump on this frame"
-        onClicked: {
-          root.syncOn = true
-          root.liveKnown = true
-          root.saveView()
-          root.push()
-        }
+        onClicked: root.syncScreen()
       }
       Button {
         text: "Off"

@@ -17,7 +17,6 @@ var monitor = g(0xF201)
 // fa-chart_area. The modes rail used this before the sine wave.
 var modes = g(0xF1FE)
 var curve = g(0xF095B)
-var pulse = g(0xF0430)
 var lcd = g(0xF0379)
 // fa-info-circle. The filled mark Ionosphere uses on its Info button.
 // U+F02FD is the outline, which reads as a thin ring at this size.

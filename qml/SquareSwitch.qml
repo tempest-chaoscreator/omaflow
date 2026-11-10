@@ -44,7 +44,7 @@ Item {
       color: root.on && root.switchEnabled
         ? Commons.Color.background
         : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
-      Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+      Behavior on x { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
     }
   }
 

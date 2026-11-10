@@ -127,6 +127,8 @@ Column {
       y = y + 1
       out.push(item)
     }
+    if (service && (service.connection === "need-token" || service.connection === "unauthorized"))
+      place({ kind: "pair", index: 0 })
     if (bootState !== "enabled" && service && service.daemonGate !== "install" && service.daemonGate !== "unknown")
       place({ kind: "boot", index: 0 })
     if (service && service.connection === "ready") {
@@ -383,6 +385,10 @@ Column {
   }
 
   function reveal(kind) {
+    if (kind === "pair") {
+      followY = 0
+      return
+    }
     var item = daemonBox
     if (kind === "lcd" || kind === "lcdSpeed") item = lcdBox
     else if (kind === "fill" || kind === "pinGroups" || kind === "textFollow" || kind === "textSize" || kind === "bar") item = windowBox
@@ -460,9 +466,19 @@ Column {
     reconcileBar()
   }
 
+  function submitPair() {
+    var password = pairField.text
+    pairField.text = ""
+    if (service) service.pair(password)
+  }
+
   function activateNav() {
     var item = navItems[navIndex]
     if (!item) return
+    if (item.kind === "pair") {
+      submitPair()
+      return
+    }
     if (item.kind === "boot") {
       enableBoot()
       return
@@ -682,6 +698,17 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
+    visible: root.service && root.service.lastError !== ""
+    text: root.service ? root.service.lastError : ""
+    textFormat: Text.PlainText
+    color: Commons.Color.urgent
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  Text {
+    width: parent.width
+    wrapMode: Text.WordWrap
     visible: root.service && (root.service.connection === "need-token" || root.service.connection === "unauthorized")
     text: "Enter the CoolerControl password once. Omaflow uses 127.0.0.1:11987 and does not ask for an address. The token is saved and the password is not."
     color: root.fg
@@ -699,19 +726,16 @@ Column {
       placeholderText: "Password"
       foreground: root.fg
       accent: root.accent
+      onAccepted: root.submitPair()
     }
     Button {
       text: "Pair"
       bordered: true
-      selected: true
+      selected: root.aimed("pair", 0)
       foreground: root.fg
       accent: root.accent
       fontFamily: root.fontFamily
-      onClicked: {
-        var password = pairField.text
-        pairField.text = ""
-        if (root.service) root.service.pair(password)
-      }
+      onClicked: root.submitPair()
     }
   }
 

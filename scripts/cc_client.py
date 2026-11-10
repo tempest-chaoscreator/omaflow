@@ -18,6 +18,7 @@ import http.client
 import io
 import json
 import os
+import queue
 import re
 import socket
 import stat
@@ -44,6 +45,7 @@ LINKS_PATH = TOKEN_PATH.with_name("links.json")
 HIDDEN_PATH = TOKEN_PATH.with_name("hidden.json")
 LCD_VIEW_PATH = TOKEN_PATH.with_name("lcd-view.json")
 LCD_LEASE_PATH = TOKEN_PATH.with_name("lcd-lease.json")
+LCD_LOCK_PATH = TOKEN_PATH.with_name("lcd-lease.lock")
 UI_PATH = TOKEN_PATH.with_name("ui.json")
 PACK_PATH = TOKEN_PATH.with_name("curve-pack.json")
 THEME_COLORS = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
@@ -61,15 +63,54 @@ _SSE_LIMIT = 1_000_000
 # Factory password shipped by coolercontrold. Tried once, only when no token
 # exists, and only against localhost. A changed password is left alone.
 FACTORY_PASSWORD = "coolAdmin"
-_OUT = threading.Lock()
 _STOP = threading.Event()
+_JOBS: queue.Queue = queue.Queue()
+_RENDER: queue.Queue = queue.Queue()
+_REPLIES: queue.Queue = queue.Queue()
+_STATUS_LOCK = threading.Lock()
+_PENDING_STATUS: dict[str, str | None] = {"line": None}
+_WRITER_WAKE = threading.Event()
+_RENDER_THREAD: threading.Thread | None = None
+_LCD_OPS = {"lcd-keep", "lcd-face", "lcd-preview", "lcd-image"}
+_BURST_CAP = 160
+
+
+def _write_stdout(line: str) -> None:
+    sys.stdout.write(line)
+    sys.stdout.flush()
 
 
 def emit(obj: dict) -> None:
-    line = json.dumps(obj, separators=(",", ":"))
-    with _OUT:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+    """Queue one line. A newer status replaces a status that is still waiting."""
+    line = json.dumps(obj, separators=(",", ":")) + "\n"
+    if obj.get("event") == "status":
+        with _STATUS_LOCK:
+            _PENDING_STATUS["line"] = line
+    else:
+        _REPLIES.put(line)
+    _WRITER_WAKE.set()
+
+
+def _status_pending() -> bool:
+    with _STATUS_LOCK:
+        return _PENDING_STATUS["line"] is not None
+
+
+def _stdout_writer() -> None:
+    while not _STOP.is_set() or not _REPLIES.empty() or _status_pending():
+        _WRITER_WAKE.wait(0.2)
+        _WRITER_WAKE.clear()
+        while True:
+            try:
+                line = _REPLIES.get_nowait()
+            except queue.Empty:
+                break
+            _write_stdout(line)
+        with _STATUS_LOCK:
+            pending = _PENDING_STATUS["line"]
+            _PENDING_STATUS["line"] = None
+        if pending:
+            _write_stdout(pending)
 
 
 def _write_all(fd: int, payload: bytes) -> None:
@@ -94,15 +135,59 @@ def _nofollow_flags(base: int, nonblock: bool = False) -> int:
 
 
 def _write_private(path: Path, payload: bytes) -> None:
-    """Create or replace a 0600 file. A symlink is left untouched."""
+    """Replace a 0600 file by rename. A crash keeps the previous file.
+
+    A symlink is left untouched. The temp file is on the same directory so
+    the rename stays on one filesystem.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    fd = os.open(path, flags, 0o600)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None and stat.S_ISLNK(info.st_mode):
+        raise OSError(errno.ELOOP, "refusing to replace a symlink", str(path))
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        raise OSError(errno.EINVAL, "refusing to replace a non-file", str(path))
+    tmp = path.with_name(".%s.%s.%s.tmp" % (path.name, os.getpid(), time.time_ns()))
+    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    fd = os.open(tmp, flags, 0o600)
     try:
         _write_all(fd, payload)
-    finally:
+        os.fsync(fd)
+    except Exception:
         os.close(fd)
-    os.chmod(path, 0o600)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    try:
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
+            current = None
+        if current is not None and not stat.S_ISREG(current.st_mode):
+            raise OSError(errno.ELOOP, "refusing to replace a symlink", str(path))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dirfd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(dirfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
 
 
 def _store_token(token: str) -> None:
@@ -351,7 +436,7 @@ def _daemon_opener(jar: CookieJar | None = None) -> urllib.request.OpenerDirecto
 _DAEMON_OPENER: urllib.request.OpenerDirector | None = None
 
 
-def _open(req: urllib.request.Request, timeout: float | None, jar: CookieJar | None = None):
+def _open_direct(req: urllib.request.Request, timeout: float | None, jar: CookieJar | None = None):
     # Pairing carries a cookie jar and stays on its own opener. Every other
     # call shares one. Each connection still identifies the listener.
     if jar is not None:
@@ -360,6 +445,18 @@ def _open(req: urllib.request.Request, timeout: float | None, jar: CookieJar | N
     if _DAEMON_OPENER is None:
         _DAEMON_OPENER = _daemon_opener(None)
     return _DAEMON_OPENER.open(req, timeout=timeout)
+
+
+def _open(req: urllib.request.Request, timeout: float | None, jar: CookieJar | None = None):
+    """Open from the HTTP worker. A plate render waits its turn instead of connecting."""
+    if _RENDER_THREAD is not None and threading.current_thread() is _RENDER_THREAD:
+        done: queue.Queue = queue.Queue(1)
+        _JOBS.put(("socket", req, timeout, jar, done))
+        result = done.get()
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return _open_direct(req, timeout, jar)
 
 
 def pair(password: str) -> dict:
@@ -438,9 +535,21 @@ def _read_json(path: Path) -> object | None:
         return None
 
 
-def read_groups() -> dict:
-    data = _read_json(GROUPS_PATH)
-    if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
+def _stored_dict(path: Path) -> tuple[dict | None, str]:
+    """Private JSON object. A torn file is unreadable, not an empty object."""
+    parsed, state = _read_private_state(path)
+    if state == "unreadable":
+        return None, state
+    if not isinstance(parsed, dict):
+        return {}, "ok"
+    return parsed, "ok"
+
+
+def read_groups() -> dict | None:
+    data, state = _stored_dict(GROUPS_PATH)
+    if state == "unreadable" or not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("groups"), list):
         return {"groups": []}
     return {"groups": _clean_groups(data.get("groups"))}
 
@@ -453,10 +562,12 @@ def write_groups(data: dict) -> None:
     _write_private(GROUPS_PATH, payload)
 
 
-def read_links() -> dict:
+def read_links() -> dict | None:
     """Per-card curve link flags. Missing keys use the app defaults."""
-    data = _read_json(LINKS_PATH)
-    raw = data.get("links") if isinstance(data, dict) else None
+    data, state = _stored_dict(LINKS_PATH)
+    if state == "unreadable" or not isinstance(data, dict):
+        return None
+    raw = data.get("links")
     if not isinstance(raw, dict):
         return {"links": {}}
     clean = {}
@@ -489,10 +600,11 @@ def _clean_hidden(raw: object) -> dict:
     return clean
 
 
-def read_hidden() -> dict:
-    data = _read_json(HIDDEN_PATH)
-    raw = data.get("devices") if isinstance(data, dict) else None
-    return {"devices": _clean_hidden(raw)}
+def read_hidden() -> dict | None:
+    data, state = _stored_dict(HIDDEN_PATH)
+    if state == "unreadable" or not isinstance(data, dict):
+        return None
+    return {"devices": _clean_hidden(data.get("devices"))}
 
 
 def write_hidden(data: dict) -> None:
@@ -576,6 +688,28 @@ def read_ui() -> dict:
     return _ui_from(raw)
 
 
+def _ui_get_body() -> dict:
+    """Settings for ui-get. A torn file is a failure, not the defaults.
+
+    A missing file still returns the defaults. ui-set writes through write_ui,
+    which refuses the same torn file instead of merging the defaults over it.
+    """
+    raw, state = _read_private_state(UI_PATH)
+    if state == "unreadable":
+        return {
+            "ok": False,
+            "status": 400,
+            "error": "Settings could not be read.",
+            "body": None,
+        }
+    return {
+        "ok": True,
+        "status": 200,
+        "error": "",
+        "body": _ui_from(raw if isinstance(raw, dict) else {}),
+    }
+
+
 def _copy_ui_flags(clean: dict, data: dict, keys: tuple[str, ...], exact_true: bool) -> None:
     """Copy flags that are present in this patch. Absent keys stay as read_ui left them.
 
@@ -587,8 +721,19 @@ def _copy_ui_flags(clean: dict, data: dict, keys: tuple[str, ...], exact_true: b
         clean[key] = data.get(key) is True if exact_true else data.get(key) is not False
 
 
-def write_ui(data: dict) -> None:
-    clean = read_ui()
+def write_ui(data: dict) -> bool:
+    """Merge one settings patch. A torn file is left untouched.
+
+    read_ui() turns a torn file into defaults. Writing those defaults would
+    drop every other switch. A missing file still starts from the defaults.
+    """
+    raw, state = _read_private_state(UI_PATH)
+    if state == "unreadable":
+        time.sleep(0.05)
+        raw, state = _read_private_state(UI_PATH)
+    if state == "unreadable":
+        return False
+    clean = _ui_from(raw if isinstance(raw, dict) else {})
     if isinstance(data, dict):
         _copy_ui_flags(clean, data, ("dynamicScale", "pinGroups", "lcdThemeSync", "silentRamp"), True)
         _copy_ui_flags(clean, data, ("textFollow", "showBar", "lcdBackground", "pumpFloor"), False)
@@ -605,7 +750,11 @@ def write_ui(data: dict) -> None:
             clean["silentRampUid"] = _ui_text(data.get("silentRampUid"), 80)
         if "silentRampBinds" in data:
             clean["silentRampBinds"] = _ui_binds(data.get("silentRampBinds"))
-    _write_private(UI_PATH, json.dumps(clean, indent=2).encode("utf-8"))
+    try:
+        _write_private(UI_PATH, json.dumps(clean, indent=2).encode("utf-8"))
+    except OSError:
+        return False
+    return True
 
 
 # Same caps as qml/CcMap.js. A JSON object with a huge length is not a list.
@@ -764,6 +913,38 @@ def read_token() -> str:
         return ""
 
 
+def _token_file_state(path: Path) -> str:
+    """missing, empty, unreadable, or ok. An empty file is not a missing file."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+        return "empty" if stat.S_ISREG(info.st_mode) and info.st_size <= 0 else "unreadable"
+    try:
+        fd = os.open(path, _nofollow_flags(os.O_RDONLY))
+    except OSError:
+        return "unreadable"
+    try:
+        text = os.read(fd, 256).decode("utf-8", "replace").strip()
+    except OSError:
+        return "unreadable"
+    finally:
+        os.close(fd)
+    if not text:
+        return "empty"
+    return "ok"
+
+
+def _token_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _parse_hex(value: str) -> tuple[int, int, int]:
     text = str(value or "").strip().lstrip("#")
     if len(text) == 3:
@@ -894,6 +1075,50 @@ def _render_square(face: str, primary: str, secondary: str, accent: str, accent2
 def _lcd_view() -> dict | None:
     view = _read_json(LCD_VIEW_PATH)
     return view if isinstance(view, dict) else None
+
+
+def _read_private_state(path: Path) -> tuple[object | None, str]:
+    """Read one private JSON file without following a symlink.
+
+    missing is a file that is not there. unreadable is a torn, empty, or
+    failed read. Callers that rewrite the file must not treat those as {}.
+    """
+    try:
+        fd = os.open(path, _nofollow_flags(os.O_RDONLY))
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError:
+        return None, "unreadable"
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _FILE_LIMIT:
+            return None, "unreadable"
+        chunks: list[bytes] = []
+        size = 0
+        while size <= _FILE_LIMIT:
+            part = os.read(fd, 65536)
+            if not part:
+                break
+            size += len(part)
+            chunks.append(part)
+        if size > _FILE_LIMIT:
+            return None, "unreadable"
+        parsed = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None, "unreadable"
+    finally:
+        os.close(fd)
+    return parsed, "ok"
+
+
+def _lcd_view_state() -> tuple[dict | None, str]:
+    """Saved LCD view. A non-object is unreadable so it is not replaced with {}."""
+    parsed, state = _read_private_state(LCD_VIEW_PATH)
+    if state != "ok":
+        return None, state
+    if not isinstance(parsed, dict):
+        return None, "unreadable"
+    return parsed, "ok"
 
 
 def _bound_int(value: object, default: int) -> int:
@@ -1180,13 +1405,13 @@ def _upload_mark(
 def _with_lcd_lease(update):
     """Exclusive access to the one-writer stamp shared by the window and the plugin.
 
-    A symlink is left untouched. Anything that is not a regular file is ignored,
-    so a replaced lease cannot block the helper or be followed.
+    The lock is a sibling file. The lease body is replaced by rename, so a
+    crash keeps the previous stamp. A symlink is left untouched.
     """
     try:
         LCD_LEASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        flags = _nofollow_flags(os.O_RDWR | os.O_CREAT, True)
-        fd = os.open(LCD_LEASE_PATH, flags, 0o600)
+        flags = _nofollow_flags(os.O_RDWR | os.O_CREAT)
+        fd = os.open(LCD_LOCK_PATH, flags, 0o600)
     except OSError:
         return {}
     try:
@@ -1198,25 +1423,11 @@ def _with_lcd_lease(update):
             os.fchmod(fd, 0o600)
         except OSError:
             pass
-        blob = b""
-        while len(blob) < 16384:
-            chunk = os.read(fd, min(4096, 16384 - len(blob)))
-            if not chunk:
-                break
-            blob += chunk
-        prev: dict = {}
-        try:
-            parsed = json.loads(blob.decode("utf-8") or "{}")
-            if isinstance(parsed, dict):
-                prev = parsed
-        except json.JSONDecodeError:
-            prev = {}
+        parsed, state = _read_private_state(LCD_LEASE_PATH)
+        prev = parsed if state == "ok" and isinstance(parsed, dict) else {}
         nxt = update(prev)
         if nxt is not None:
-            raw = json.dumps(nxt).encode("utf-8")
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.ftruncate(fd, 0)
-            _write_all(fd, raw)
+            _write_private(LCD_LEASE_PATH, json.dumps(nxt).encode("utf-8"))
         return prev
     except OSError:
         return {}
@@ -1229,12 +1440,17 @@ def _with_lcd_lease(update):
 
 
 def lcd_claim(mark: str, interval: float) -> bool:
-    """True when this picture is not already on its way from the other process."""
+    """True when this picture is not already on its way from the other process.
+
+    A lease that cannot be opened must not freeze the screen. The upload
+    proceeds, and the next good lease can share again.
+    """
     now = time.time()
     window = max(1.0, float(interval)) * 0.75
-    decision = {"go": False}
+    decision = {"go": False, "seen": False}
 
     def update(prev: dict):
+        decision["seen"] = True
         try:
             prev_at = float(prev.get("at") or 0)
         except (TypeError, ValueError):
@@ -1248,6 +1464,8 @@ def lcd_claim(mark: str, interval: float) -> bool:
         return {"mark": mark, "at": now}
 
     _with_lcd_lease(update)
+    if not decision["seen"]:
+        return True
     return bool(decision["go"])
 
 
@@ -1357,27 +1575,46 @@ def _lcd_skip(reason: str) -> dict:
     return {"ok": True, "status": 200, "error": "", "body": {"skipped": True, "reason": reason}}
 
 
-def lcd_keep(msg: dict) -> dict:
+def _write_lcd_view(view: dict) -> None:
+    payload = json.dumps(view, indent=2).encode("utf-8")
+    if len(payload) > _FILE_LIMIT:
+        raise OSError("lcd view is too large")
+    _write_private(LCD_VIEW_PATH, payload)
+
+
+def _lcd_channel_ok(device: str, channel: str) -> bool:
+    if not device or not channel or len(device) > 80 or len(channel) > 80:
+        return False
+    return not any(ch in device or ch in channel for ch in ("/", "?", "#", "\\", "\n", "\r"))
+
+
+def lcd_keep(msg: dict, shown: bool = False) -> dict:
     """Draw the saved pump face again when the numbers changed.
 
     The window and the bar plugin both call this. The lease keeps one upload.
+    shown is an explicit face command: it uploads once even when Keep updating
+    is off, the plate is already current, or the face is Picture.
     """
-    if read_ui().get("lcdBackground") is False:
-        return _lcd_skip("background-off")
+    if not shown:
+        raw, state = _read_private_state(UI_PATH)
+        if state == "unreadable":
+            return _lcd_skip("settings-unreadable")
+        settings = _ui_from(raw if isinstance(raw, dict) else {})
+        if settings.get("lcdBackground") is False:
+            return _lcd_skip("background-off")
     view = _lcd_view()
     if view is None:
         return _lcd_skip("no-view")
     device = str(msg.get("device") or "")
     channel = str(msg.get("channel") or "")
-    if not device or not channel or len(device) > 80 or len(channel) > 80:
-        return _lcd_skip("no-channel")
-    if any(ch in device or ch in channel for ch in ("/", "?", "#", "\\", "\n", "\r")):
+    if not _lcd_channel_ok(device, channel):
         return _lcd_skip("no-channel")
     live = _view_is_live(view, device, channel)
-    if live is None:
-        return _lcd_skip("unknown")
-    if not live:
-        return _lcd_skip("lcd-off")
+    if not shown:
+        if live is None:
+            return _lcd_skip("unknown")
+        if not live:
+            return _lcd_skip("lcd-off")
     face = str(view.get("face") or "liquid")
     # An unknown face is left alone. Substituting Liquid is what painted over
     # a picture this helper did not know how to draw.
@@ -1394,10 +1631,10 @@ def lcd_keep(msg: dict) -> dict:
     height = _lcd_dim(msg.get("height"))
     device_name = str(msg.get("deviceName") or "")
     shape = detect_shape(device_name, width, height)
-    if face == "picture":
+    if face == "picture" and not shown:
         return _lcd_skip("still")
     primary, secondary = _face_text(face, msg.get("cpu"), msg.get("gpu"), msg.get("coolant"))
-    if face not in _STILL_FACES:
+    if not shown and face not in _STILL_FACES:
         if primary == "—":
             return _lcd_skip("no-temp")
         if face in ("cpu-gpu", "cpu-liquid") and secondary == "—":
@@ -1410,9 +1647,12 @@ def lcd_keep(msg: dict) -> dict:
     )
     # A still plate stays up until its mark changes. Temperature faces still
     # refresh on the interval so a quiet sensor does not look frozen.
-    if face in _STILL_FACES and lcd_current_mark() == mark:
+    # An explicit show uploads anyway, including after the screen was blanked.
+    if not shown and face in _STILL_FACES and lcd_current_mark() == mark:
         return _lcd_skip("fresh")
-    if not lcd_claim(mark, _lcd_seconds(msg.get("interval"))):
+    if shown:
+        lcd_remember(mark)
+    elif not lcd_claim(mark, _lcd_seconds(msg.get("interval"))):
         return _lcd_skip("fresh")
     result = push_lcd_image(
         device, channel, brightness, face, angle, ink, ink2, primary, secondary,
@@ -1420,6 +1660,99 @@ def lcd_keep(msg: dict) -> dict:
     )
     if not result.get("ok"):
         lcd_release(mark)
+    return result
+
+
+def apply_lcd_face(msg: dict) -> dict:
+    """Save a face or blank the screen, then make the cooler match.
+
+    Other view fields stay as they are. Blanking keeps the face for the next show.
+    """
+    face = str(msg.get("face") or "")
+    device = str(msg.get("device") or "")
+    channel = str(msg.get("channel") or "")
+    if not _lcd_channel_ok(device, channel):
+        return {"ok": False, "status": 400, "error": "No AIO LCD.", "body": None}
+    loaded, view_state = _lcd_view_state()
+    if view_state == "unreadable":
+        return {"ok": False, "status": 400, "error": "The LCD view could not be read.", "body": None}
+    view = loaded if isinstance(loaded, dict) else {}
+    if face == "off":
+        had_live = "live" in view
+        previous_live = view.get("live")
+        view["live"] = False
+        try:
+            _write_lcd_view(view)
+        except OSError:
+            return {"ok": False, "status": 400, "error": "The LCD view was not saved.", "body": None}
+        _lcd_mode_cache.pop(device + "/" + channel, None)
+        brightness = _bound_int(view.get("brightness"), 80)
+        path = (
+            "/devices/"
+            + urllib.parse.quote(device, safe="")
+            + "/settings/"
+            + urllib.parse.quote(channel, safe="")
+            + "/lcd"
+        )
+        result = call("PUT", path, {
+            "brightness": brightness,
+            "orientation": 0,
+            "colors": [],
+            "mode": "none",
+        })
+        if not result.get("ok"):
+            if had_live:
+                view["live"] = previous_live
+            else:
+                view.pop("live", None)
+            try:
+                _write_lcd_view(view)
+            except OSError:
+                pass
+            return {
+                "ok": False,
+                "status": result.get("status") or 0,
+                "error": "The LCD was not changed.",
+                "body": None,
+            }
+        return {"ok": True, "status": 200, "error": "", "body": {"face": "off"}}
+    if face not in _LCD_FACES:
+        return {"ok": False, "status": 400, "error": "Unknown LCD face.", "body": None}
+    if face == "picture" and not str(view.get("picture") or ""):
+        return {"ok": False, "status": 400, "error": "No picture is saved.", "body": None}
+    had_face = "face" in view
+    previous_face = view.get("face")
+    had_live = "live" in view
+    previous_live = view.get("live")
+    view["face"] = face
+    view["live"] = True
+    try:
+        _write_lcd_view(view)
+    except OSError:
+        return {"ok": False, "status": 400, "error": "The LCD view was not saved.", "body": None}
+    _lcd_mode_cache.pop(device + "/" + channel, None)
+    result = lcd_keep(msg, shown=True)
+    body = result.get("body") if isinstance(result.get("body"), dict) else {}
+    if result.get("ok") and not body.get("skipped"):
+        return result
+
+    def restore_view() -> None:
+        if had_face:
+            view["face"] = previous_face
+        else:
+            view.pop("face", None)
+        if had_live:
+            view["live"] = previous_live
+        else:
+            view.pop("live", None)
+        try:
+            _write_lcd_view(view)
+        except OSError:
+            pass
+
+    restore_view()
+    if result.get("ok"):
+        return {"ok": False, "status": 400, "error": "The LCD was not changed.", "body": None}
     return result
 
 
@@ -1587,7 +1920,7 @@ def push_lcd_image(
                 pass
             return {"ok": True, "status": res.status, "error": "", "body": parsed}
     except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", "replace")[:400]
+        detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
         return {"ok": False, "status": err.code, "error": detail or str(err.reason), "body": None}
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
@@ -1852,6 +2185,9 @@ def restore_saved_lcd() -> None:
     status = call("GET", "/status", None)
     status_body = status.get("body") if status.get("ok") and isinstance(status.get("body"), dict) else {"devices": []}
     face = str(view.get("face") or "liquid")
+    if face not in _LCD_FACES:
+        give_up("unknown lcd face")
+        return
     primary, secondary = _screen_numbers(face, devs, status_body)
     brightness = _bound_int(view.get("brightness"), 80)
     saturation = _bound_int(view.get("saturation"), 0)
@@ -1974,6 +2310,27 @@ def _infer_active_mode() -> str:
     return winners[0][1]
 
 
+def _error_detail(raw: str) -> str:
+    """A JSON error body becomes its message. Anything else stays as read."""
+    text = str(raw or "")
+    stripped = text.lstrip()
+    if not stripped.startswith("{") and not stripped.startswith("["):
+        return text
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(parsed, dict):
+        for key in ("error", "message"):
+            inner = parsed.get(key)
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+        return text
+    if isinstance(parsed, str) and parsed.strip():
+        return parsed.strip()
+    return text
+
+
 def _request(method: str, path: str, body) -> dict:
     token = read_token()
     if not token:
@@ -2000,7 +2357,7 @@ def _request(method: str, path: str, body) -> dict:
                     parsed = {"raw": raw.decode("utf-8", "replace")[:400]}
             return {"ok": True, "status": res.status, "error": "", "body": parsed}
     except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", "replace")[:400]
+        detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
         return {"ok": False, "status": err.code, "error": detail or err.reason, "body": None}
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
@@ -2045,18 +2402,25 @@ _CATALOG = (
 )
 
 
-def _exchange(conn: http.client.HTTPConnection, path: str, token: str) -> dict:
+def _exchange(
+    conn: http.client.HTTPConnection,
+    path: str,
+    token: str,
+    method: str = "GET",
+    body: object = None,
+) -> dict:
     """One request on an already identified connection. Redirects are not followed."""
-    conn.request(
-        "GET",
-        path,
-        headers={
-            "Host": "%s:%s" % (_DAEMON_HOST, _DAEMON_PORT),
-            "Authorization": "Bearer " + token,
-            "Accept": "application/json",
-            "Connection": "keep-alive",
-        },
-    )
+    data = None
+    headers = {
+        "Host": "%s:%s" % (_DAEMON_HOST, _DAEMON_PORT),
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "Connection": "keep-alive",
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    conn.request(method, path, body=data, headers=headers)
     res = conn.getresponse()
     raw = res.read()
     if res.status in (301, 302, 303, 307, 308):
@@ -2074,6 +2438,7 @@ def _exchange(conn: http.client.HTTPConnection, path: str, token: str) -> dict:
         detail = parsed[:400]
     elif raw:
         detail = raw.decode("utf-8", "replace")[:400]
+    detail = _error_detail(detail)
     return {"ok": False, "status": res.status, "error": detail or str(res.status), "body": None}
 
 
@@ -2105,6 +2470,63 @@ def catalog() -> dict:
         conn.close()
 
 
+def _burst_steps(raw: object) -> list[tuple[str, str, object]] | None:
+    if not isinstance(raw, list) or len(raw) > _BURST_CAP:
+        return None
+    steps: list[tuple[str, str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        method = str(item.get("method") or "GET").upper()
+        path = _safe_path(str(item.get("path") or ""))
+        body = item.get("body", None)
+        if method not in _METHODS or path is None:
+            return None
+        if body is not None and not isinstance(body, (dict, list)):
+            return None
+        steps.append((method, path, body))
+    return steps
+
+
+def _run_burst(conn: http.client.HTTPConnection, steps: list[tuple[str, str, object]], token: str) -> dict:
+    """Ordered requests on one connection. The first failure stops the rest."""
+    results: list[dict] = []
+    for method, path, body in steps:
+        try:
+            result = _exchange(conn, path, token, method, body)
+        except Exception as err:  # noqa: BLE001 — one dropped socket ends the burst
+            result = {"ok": False, "status": 0, "error": str(err), "body": None}
+        results.append(result)
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "status": int(result.get("status") or 0),
+                "error": str(result.get("error") or ""),
+                "body": {"results": results},
+            }
+    return {"ok": True, "status": 200, "error": "", "body": {"results": results}}
+
+
+def burst(steps: object) -> dict:
+    """Apply's writes, then its read-back, with one listener check."""
+    parsed = _burst_steps(steps)
+    if parsed is None:
+        return {"ok": False, "status": 0, "error": "request refused", "body": None}
+    token = read_token()
+    if not token:
+        return {"ok": False, "status": 0, "error": "need-token", "body": None}
+    if not parsed:
+        return {"ok": True, "status": 200, "error": "", "body": {"results": []}}
+    conn = _DaemonConnection(_DAEMON_HOST, _DAEMON_PORT, timeout=8)
+    try:
+        conn.connect()
+        return _run_burst(conn, parsed, token)
+    except OSError as err:
+        return {"ok": False, "status": 0, "error": str(err), "body": None}
+    finally:
+        conn.close()
+
+
 def _parse_sse(block: str) -> None:
     event = "message"
     data = []
@@ -2123,28 +2545,50 @@ def _parse_sse(block: str) -> None:
     emit({"event": event, "body": body})
 
 
+def _wait_token(previous: float | None, seconds: float) -> None:
+    """Sleep until the token file changes or the wait is over."""
+    deadline = time.monotonic() + seconds
+    while not _STOP.is_set() and time.monotonic() < deadline:
+        if _token_mtime(TOKEN_PATH) != previous and _token_file_state(TOKEN_PATH) == "ok":
+            return
+        _STOP.wait(min(1.0, max(0.0, deadline - time.monotonic())))
+
+
 def watch() -> None:
+    """Status stream. A silent socket reconnects. A rejected token does not hammer login."""
     announced = False
+    auth_told: float | None = None
+    rate_wait = 30.0
     while not _STOP.is_set():
-        token = read_token()
-        if not token:
+        state = _token_file_state(TOKEN_PATH)
+        if state != "ok":
             if not announced:
                 emit({"event": "down", "error": "need-token"})
                 announced = True
             _STOP.wait(2)
             continue
+        token = read_token()
+        stamp = _token_mtime(TOKEN_PATH)
         announced = False
         req = urllib.request.Request(
             BASE + "/sse?events=status,modes,alerts",
             headers={"Authorization": "Bearer " + token, "Accept": "text/event-stream"},
             method="GET",
         )
+        stalled = False
         try:
-            with _open(req, None) as res:
+            # 8s is several missed polls at the daemon's usual 1s rate.
+            with _open(req, 8) as res:
                 emit({"event": "up"})
+                rate_wait = 30.0
+                auth_told = None
                 buf = ""
                 while not _STOP.is_set():
-                    chunk = res.read(4096)
+                    try:
+                        chunk = res.read(4096)
+                    except (TimeoutError, socket.timeout):
+                        stalled = True
+                        break
                     if not chunk:
                         break
                     buf += chunk.decode("utf-8", "replace")
@@ -2154,12 +2598,32 @@ def watch() -> None:
                         block, buf = buf.split("\n\n", 1)
                         _parse_sse(block.replace("\r\n", "\n").replace("\r", "\n"))
         except urllib.error.HTTPError as err:
+            if err.code in (401, 403):
+                if auth_told != stamp:
+                    emit({"event": "down", "error": "unauthorized", "status": err.code})
+                    auth_told = stamp
+                _wait_token(stamp, 60)
+                continue
+            if err.code == 429:
+                emit({"event": "down", "error": "rate-limited", "status": 429})
+                _STOP.wait(rate_wait)
+                rate_wait = min(120.0, rate_wait * 2)
+                continue
             emit({"event": "down", "error": "http %s" % err.code, "status": err.code})
         except urllib.error.URLError as err:
-            emit({"event": "down", "error": str(err.reason)})
+            reason = err.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                stalled = True
+            else:
+                emit({"event": "down", "error": str(reason)})
+        except (TimeoutError, socket.timeout):
+            stalled = True
         except Exception as err:  # noqa: BLE001
             emit({"event": "down", "error": str(err)})
-        _STOP.wait(2)
+        if stalled:
+            emit({"event": "down", "error": "stream stalled"})
+        if not _STOP.is_set():
+            _STOP.wait(2)
 
 
 def lcd_face_check() -> None:
@@ -2222,54 +2686,57 @@ def processes_snapshot() -> dict:
     return process_snap.snapshot()
 
 
-def main() -> None:
-    _own(LCD_VIEW_PATH)
-    if not read_token():
-        pair(FACTORY_PASSWORD)
-    token = read_token()
-    emit({"event": "hello", "token": bool(token)})
-    threading.Thread(target=watch, name="cc-sse", daemon=True).start()
-    for line in sys.stdin:
-        if _STOP.is_set():
-            break
-        text = line.strip()
-        if not text:
-            continue
-        try:
-            msg = json.loads(text)
-        except json.JSONDecodeError:
-            emit({"event": "error", "error": "bad request"})
-            continue
+def _emit_stored(msg: dict, body: dict | None, error: str) -> None:
+    if body is None:
+        emit({"id": msg.get("id"), "ok": False, "status": 400, "error": error, "body": None})
+        return
+    emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": body})
+
+
+def _emit_write(msg: dict, write, error: str) -> None:
+    """A failed private write must not take the sidecar down."""
+    try:
+        write()
+    except OSError:
+        emit({"id": msg.get("id"), "ok": False, "status": 400, "error": error, "body": None})
+        return
+    emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": None})
+
+
+def _serve_socket(item: tuple) -> None:
+    _kind, req, timeout, jar, done = item
+    try:
+        done.put(_open_direct(req, timeout, jar))
+    except Exception as err:  # noqa: BLE001 — the render thread is waiting on this
+        done.put(err)
+
+
+def _handle(msg: dict) -> None:
+    for _once in (None,):
         op = msg.get("op")
-        if op == "quit":
-            _STOP.set()
-            break
         if op == "reload":
             emit({"event": "hello", "token": bool(read_token())})
             continue
         if op == "groups-get":
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_groups()})
+            _emit_stored(msg, read_groups(), "Groups could not be read.")
             continue
         if op == "groups-set":
             body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
-            write_groups(body)
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": None})
+            _emit_write(msg, lambda: write_groups(body), "Groups could not be saved.")
             continue
         if op == "links-get":
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_links()})
+            _emit_stored(msg, read_links(), "Links could not be read.")
             continue
         if op == "links-set":
             body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
-            write_links(body)
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": None})
+            _emit_write(msg, lambda: write_links(body), "Links could not be saved.")
             continue
         if op == "hidden-get":
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_hidden()})
+            _emit_stored(msg, read_hidden(), "Hidden devices could not be read.")
             continue
         if op == "hidden-set":
             body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
-            write_hidden(body)
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": None})
+            _emit_write(msg, lambda: write_hidden(body), "Hidden devices could not be saved.")
             continue
         if op == "processes":
             try:
@@ -2280,11 +2747,21 @@ def main() -> None:
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": body})
             continue
         if op == "ui-get":
-            emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_ui()})
+            reply = _ui_get_body()
+            reply["id"] = msg.get("id")
+            emit(reply)
             continue
         if op == "ui-set":
             body = msg.get("body") if isinstance(msg.get("body"), dict) else {}
-            write_ui(body)
+            if not write_ui(body):
+                emit({
+                    "id": msg.get("id"),
+                    "ok": False,
+                    "status": 400,
+                    "error": "Settings could not be read.",
+                    "body": None,
+                })
+                continue
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_ui()})
             continue
         if op == "pack-get":
@@ -2296,6 +2773,15 @@ def main() -> None:
                 write_pack(body)
             except ValueError as err:
                 emit({"id": msg.get("id"), "ok": False, "status": 400, "error": str(err), "body": None})
+                continue
+            except OSError:
+                emit({
+                    "id": msg.get("id"),
+                    "ok": False,
+                    "status": 400,
+                    "error": "Curve pack could not be saved.",
+                    "body": None,
+                })
                 continue
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": read_pack()})
             continue
@@ -2323,6 +2809,11 @@ def main() -> None:
             continue
         if op == "lcd-keep":
             result = lcd_keep(msg if isinstance(msg, dict) else {})
+            result["id"] = msg.get("id")
+            emit(result)
+            continue
+        if op == "lcd-face":
+            result = apply_lcd_face(msg if isinstance(msg, dict) else {})
             result["id"] = msg.get("id")
             emit(result)
             continue
@@ -2357,6 +2848,11 @@ def main() -> None:
             result["id"] = msg.get("id")
             emit(result)
             continue
+        if op == "burst":
+            result = burst(msg.get("steps"))
+            result["id"] = msg.get("id")
+            emit(result)
+            continue
         if op != "call":
             continue
         method = str(msg.get("method") or "GET").upper()
@@ -2374,8 +2870,81 @@ def main() -> None:
         emit(result)
 
 
+def _http_worker() -> None:
+    while not _STOP.is_set():
+        item = _JOBS.get()
+        if item is None:
+            break
+        if isinstance(item, tuple):
+            if item and item[0] == "socket":
+                _serve_socket(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        if item.get("op") in _LCD_OPS:
+            _RENDER.put(item)
+            continue
+        try:
+            _handle(item)
+        except Exception as err:  # noqa: BLE001 — one request must not stop the worker
+            emit({"id": item.get("id"), "ok": False, "status": 0, "error": str(err), "body": None})
+
+
+def _render_worker() -> None:
+    global _RENDER_THREAD
+    _RENDER_THREAD = threading.current_thread()
+    while not _STOP.is_set():
+        msg = _RENDER.get()
+        if msg is None:
+            break
+        if not isinstance(msg, dict):
+            continue
+        try:
+            _handle(msg)
+        except Exception as err:  # noqa: BLE001
+            emit({"id": msg.get("id"), "ok": False, "status": 0, "error": str(err), "body": None})
+
+
+def _stop_workers() -> None:
+    _STOP.set()
+    _WRITER_WAKE.set()
+    _JOBS.put(None)
+    _RENDER.put(None)
+
+
+def main() -> None:
+    _own(LCD_VIEW_PATH)
+    # An empty token file is a torn write, not a first install. Do not send
+    # the factory password unless the file is absent.
+    if _token_file_state(TOKEN_PATH) == "missing":
+        pair(FACTORY_PASSWORD)
+    threading.Thread(target=_stdout_writer, name="cc-out", daemon=True).start()
+    threading.Thread(target=watch, name="cc-sse", daemon=True).start()
+    threading.Thread(target=_http_worker, name="cc-http", daemon=True).start()
+    threading.Thread(target=_render_worker, name="cc-lcd", daemon=True).start()
+    emit({"event": "hello", "token": _token_file_state(TOKEN_PATH) == "ok"})
+    for line in sys.stdin:
+        if _STOP.is_set():
+            break
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            msg = json.loads(text)
+        except json.JSONDecodeError:
+            emit({"event": "error", "error": "bad request"})
+            continue
+        if msg.get("op") == "quit":
+            break
+        _JOBS.put(msg)
+    _stop_workers()
+
+
 if __name__ == "__main__":
     try:
-        main()
+        if len(sys.argv) > 1 and sys.argv[1] == "--check-lcd":
+            lcd_face_check()
+        else:
+            main()
     except KeyboardInterrupt:
-        _STOP.set()
+        _stop_workers()

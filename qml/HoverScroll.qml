@@ -62,7 +62,7 @@ Item {
   Item {
     anchors.fill: parent
     opacity: root.shown ? 1 : 0
-    Behavior on opacity { NumberAnimation { duration: root.shown ? 0 : 180 } }
+    Behavior on opacity { NumberAnimation { duration: root.shown ? 0 : Style.duration(180) } }
 
     Rectangle {
       anchors.fill: parent

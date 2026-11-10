@@ -244,6 +244,16 @@ Item {
     anchors.left: parent.left
     anchors.bottom: parent.bottom
     anchors.bottomMargin: Style.space(14)
+    text: "0%"
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.55)
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  Text {
+    visible: root.minDuty > 0
+    anchors.left: parent.left
+    y: Math.max(0, root.yAt(root.minDuty) - height / 2)
     text: root.minDuty + "%"
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.55)
     font.family: root.fontFamily

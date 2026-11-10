@@ -13,7 +13,6 @@ Item {
 
   property var shell: null
   property var manifest: null
-  property var settings: ({})
 
   readonly property string clientPath: Repo.rootFile("scripts/cc_client.py")
   property bool pumpFloor: true
@@ -38,6 +37,11 @@ Item {
   }
 
   property string connection: "down"
+  property bool streamHold: false
+  property string heldError: ""
+  property double clientStartedMs: 0
+  property bool sawHello: false
+  property double lastStatusMs: 0
   property string notice: ""
   property string lastError: ""
   // True only for a refused or dropped connection. A later successful read
@@ -53,6 +57,8 @@ Item {
   property int lcdSeconds: 5
   property bool lcdThemeSync: false
   property string lcdFace: "liquid"
+  property bool lcdLive: true
+  property string lcdPicture: ""
   property int lcdClockWait: 60000
   property bool lcdKeepBusy: false
 
@@ -103,9 +109,9 @@ Item {
   // The process start emits hello and then the stream's first up. One catalog
   // covers both. A later up is a new stream and loads the catalog again.
   property bool skipNextUp: false
-  // Status arrives about once a second. The channel list is replaced when
-  // membership or labels change. Duty and RPM land in channelLive, so a new
-  // sample does not rebuild the device rows.
+  // Status arrives about once a second. A new channel, a missing channel, or
+  // a fan that starts or stops rebuilds the rows. A duty or RPM change replaces
+  // channelLive only, so the open lists are not rebuilt on every sample.
   property string channelsSig: ""
   property string channelLiveSig: ""
   property string lcdSig: ""
@@ -116,11 +122,6 @@ Item {
   property int restartDelayMs: 2000
   property int rpcId: 1
   property var pending: ({})
-
-  function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
-    return value === undefined || value === null ? fallback : value
-  }
 
   function send(obj) {
     if (!client.running) return false
@@ -173,7 +174,26 @@ Item {
     pending = next
   }
 
+  // A daemon body is often JSON or an HTML page. The chip shows one sentence.
+  function plainError(error, fallback) {
+    var err = String(error || "").replace(/^\s+|\s+$/g, "")
+    if (err.charAt(0) === "{") {
+      try {
+        var obj = JSON.parse(err)
+        var inner = obj && typeof obj.error === "string" ? obj.error : ""
+        inner = inner.replace(/^\s+|\s+$/g, "")
+        if (inner && inner.length <= 140 && inner.indexOf("<") < 0 && inner.indexOf("{") < 0 && inner.indexOf("\n") < 0)
+          return inner
+      } catch (e) {}
+      return fallback
+    }
+    if (!err || err.length > 140 || err.indexOf("<") >= 0 || err.indexOf("{") >= 0 || err.indexOf("\n") >= 0)
+      return fallback
+    return err
+  }
+
   function fail(res) {
+    cancelHold()
     var status = res ? Number(res.status) || 0 : 0
     var error = res && res.error ? String(res.error) : ""
     if (error === "need-token") {
@@ -188,14 +208,20 @@ Item {
       lastError = "CoolerControl rejected the access token"
       return
     }
+    if (status === 429) {
+      connection = "unauthorized"
+      transportError = false
+      lastError = "CoolerControl is rate limiting logins"
+      return
+    }
     if (status === 0) {
       connection = "down"
       transportError = true
-      lastError = error || "coolercontrold is not running"
+      lastError = plainError(error, "coolercontrold is not running")
       return
     }
     transportError = false
-    lastError = error || ("HTTP " + status)
+    lastError = plainError(error, "HTTP " + status)
     notice = lastError
   }
 
@@ -204,6 +230,7 @@ Item {
   function noteReady() {
     if (connection === "need-token" || connection === "unauthorized") return
     connection = "ready"
+    if (!lastStatusMs) lastStatusMs = Date.now()
     if (transportError) {
       transportError = false
       lastError = ""
@@ -269,6 +296,22 @@ Item {
     probeDaemon()
   }
 
+  // Shared by the keep timer and an explicit face command. The keep path
+  // does not send a face; the helper reads the saved one.
+  function fillLcd(msg, screen, interval) {
+    var sample = temps || ({})
+    msg.device = screen.deviceUid
+    msg.channel = screen.name
+    msg.deviceName = screen.deviceName || ""
+    msg.width = Math.round(Number(screen.screenWidth) || 0)
+    msg.height = Math.round(Number(screen.screenHeight) || 0)
+    msg.cpu = sample.cpu === undefined ? null : sample.cpu
+    msg.gpu = sample.gpu === undefined ? null : sample.gpu
+    msg.coolant = sample.coolant === undefined ? null : sample.coolant
+    msg.interval = interval
+    return msg
+  }
+
   function keepLcd() {
     if (stopping || !lcdBackground || connection !== "ready" || lcdKeepBusy) return
     if (lcdFace === "picture" || lcdSeconds === 0) return
@@ -280,20 +323,7 @@ Item {
       if (res && res.ok === false) console.warn("omaflow lcd: " + (res.error || "image rejected"))
     })
     lcdKeepBusy = true
-    var sample = temps || ({})
-    if (!send({
-      op: "lcd-keep",
-      id: id,
-      device: screen.deviceUid,
-      channel: screen.name,
-      deviceName: screen.deviceName || "",
-      width: Math.round(Number(screen.screenWidth) || 0),
-      height: Math.round(Number(screen.screenHeight) || 0),
-      cpu: sample.cpu === undefined ? null : sample.cpu,
-      gpu: sample.gpu === undefined ? null : sample.gpu,
-      coolant: sample.coolant === undefined ? null : sample.coolant,
-      interval: lcdFace === "omarchy-time" ? 60 : lcdSeconds
-    })) {
+    if (!send(fillLcd({ op: "lcd-keep", id: id }, screen, lcdFace === "omarchy-time" ? 60 : lcdSeconds))) {
       dropPending(id)
       lcdKeepBusy = false
     }
@@ -344,6 +374,7 @@ Item {
       }
     }
     var devicesOk = partOk(parts.devices)
+    var statusOk = partOk(parts.status)
     if (devicesOk) {
       devices = (parts.devices.body && parts.devices.body.devices) || []
       noteReady()
@@ -367,7 +398,10 @@ Item {
     if (partOk(parts.alerts))
       alerts = (parts.alerts.body && parts.alerts.body.alerts) || []
     if (partOk(parts.status)) {
-      statusDevices = (parts.status.body && parts.status.body.devices) || []
+      // An empty status body is a glitch, the same as a live tick. Keep the
+      // readings already on screen. A later tick with devices replaces them.
+      var nextStatus = parts.status.body && parts.status.body.devices
+      if (nextStatus && nextStatus.length) statusDevices = nextStatus
       noteReady()
       notice = ""
     }
@@ -376,12 +410,22 @@ Item {
     if (devicesOk) lcdKick.restart()
     if (parts.calibrations) takeCalibrationList(parts.calibrations)
     if (parts.calibrationBatch) takeCalibrationBatch(parts.calibrationBatch)
+    if (!devicesOk || !statusOk) {
+      fail((!devicesOk ? parts.devices : parts.status) || { ok: false, status: 0, error: "" })
+      return
+    }
     for (i = 0; i < order.length; i++) {
+      if (order[i] === "devices" || order[i] === "status") continue
       var missed = parts[order[i]]
-      if (missed && !missed.ok) {
+      if (!missed || missed.ok) continue
+      if (missed.error === "need-token" || Number(missed.status) === 401 || Number(missed.status) === 403) {
         fail(missed)
         return
       }
+      // A side read can fail without dropping a session that already has devices and status.
+      lastError = plainError(missed.error, "HTTP " + (Number(missed.status) || 0))
+      notice = lastError
+      return
     }
   }
 
@@ -462,35 +506,59 @@ Item {
 
   function loadGroups() {
     dispatch({ op: "groups-get" }, function(res) {
+      if (!res || res.ok === false) return
       groups = Cc.cleanGroupList(res.body && res.body.groups)
     })
   }
 
   function saveGroups(nextGroups) {
+    var prev = groups
     groups = Cc.cleanGroupList(nextGroups)
-    post({ op: "groups-set", body: { groups: groups } })
+    dispatch({ op: "groups-set", body: { groups: groups } }, function(res) {
+      if (res && res.ok === false) {
+        groups = prev
+        root.lastError = root.plainError(res.error, "Groups could not be saved.")
+      } else if (res && res.ok && root.lastError === "Groups could not be saved.")
+        root.lastError = ""
+    })
   }
 
   function loadLinks() {
     dispatch({ op: "links-get" }, function(res) {
+      if (!res || res.ok === false) return
       links = (res.body && res.body.links) || ({})
     })
   }
 
   function saveLinks(nextLinks) {
+    var prev = links
     links = nextLinks || ({})
-    post({ op: "links-set", body: { links: links } })
+    dispatch({ op: "links-set", body: { links: links } }, function(res) {
+      if (res && res.ok === false) {
+        links = prev
+        root.lastError = root.plainError(res.error, "Links could not be saved.")
+      } else if (res && res.ok && root.lastError === "Links could not be saved.")
+        root.lastError = ""
+    })
   }
 
   function loadHidden() {
     dispatch({ op: "hidden-get" }, function(res) {
+      if (!res || res.ok === false) return
       hiddenDevices = (res.body && res.body.devices) || ({})
     })
   }
 
   function saveHidden(nextHidden) {
+    var prev = hiddenDevices
     hiddenDevices = nextHidden || ({})
-    post({ op: "hidden-set", body: { devices: hiddenDevices } })
+    dispatch({ op: "hidden-set", body: { devices: hiddenDevices } }, function(res) {
+      if (res && res.ok === false) {
+        hiddenDevices = prev
+        root.lastError = root.plainError(res.error, "Hidden devices could not be saved.")
+      } else if (res && res.ok && root.lastError === "Hidden devices could not be saved.")
+        root.lastError = ""
+    })
   }
 
   function setDeviceHidden(uid, hidden) {
@@ -501,10 +569,6 @@ Item {
     if (hidden) next[uid] = true
     else delete next[uid]
     saveHidden(next)
-  }
-
-  function deviceHidden(uid) {
-    return !!(hiddenDevices && hiddenDevices[uid] === true)
   }
 
   // Only when the daemon has no modes at all. A daemon that already has
@@ -795,7 +859,6 @@ Item {
   function finishPumpFloorOff(code) {
     pumpFloorBusy = false
     if (Number(code) === 0) {
-      pumpFloorHeld = true
       setUi({ pumpFloor: false })
       pumpFloorNote = ""
       return
@@ -806,7 +869,6 @@ Item {
   function enablePumpFloor() {
     if (pumpFloorBusy) return
     pumpFloorNote = ""
-    pumpFloorHeld = true
     setUi({ pumpFloor: true })
     if (calibrationBusy) {
       pumpFloorLiftPending = true
@@ -835,18 +897,14 @@ Item {
   }
 
   function persistRamp(on, uid, binds) {
-    silentRampHeld = true
-    silentRamp = on === true
-    silentRampUid = String(uid || "")
     var next = []
     var list = binds || []
     var i
     for (i = 0; i < list.length; i++) if (list[i]) next.push(list[i])
-    silentRampBinds = next
     setUi({
-      silentRamp: silentRamp,
-      silentRampUid: silentRampUid,
-      silentRampBinds: silentRampBinds
+      silentRamp: on === true,
+      silentRampUid: String(uid || ""),
+      silentRampBinds: next
     })
   }
 
@@ -1496,7 +1554,8 @@ Item {
 
   function loadUi() {
     dispatch({ op: "ui-get" }, function(res) {
-      var body = res && res.body ? res.body : ({})
+      if (!res || res.ok === false) return
+      var body = res.body ? res.body : ({})
       dynamicScale = body.dynamicScale === true
       // A toggle that landed before this read must not be put back.
       if (!pinGroupsHeld) pinGroups = body.pinGroups === true
@@ -1506,8 +1565,13 @@ Item {
       // A toggle that landed before this read must not be put back.
       if (!showBarHeld) showBar = body.showBar !== false
       lcdBackground = body.lcdBackground !== false
-      var seconds = Number(body.lcdSeconds)
-      lcdSeconds = root.lcdSecondsOk(seconds) ? seconds : 5
+      // Number(null) is 0, and 0 is the Never stop. A missing value stays at 5.
+      var seconds = body.lcdSeconds
+      if (seconds === null || seconds === undefined || seconds === "") lcdSeconds = 5
+      else {
+        seconds = Number(seconds)
+        lcdSeconds = root.lcdSecondsOk(seconds) ? seconds : 5
+      }
       lcdThemeSync = body.lcdThemeSync === true
       if (!pumpFloorHeld) pumpFloor = body.pumpFloor !== false
       if (!silentRampHeld) {
@@ -1521,61 +1585,104 @@ Item {
   }
 
   function setUi(patch) {
-    var body = {
+    var prev = {
       dynamicScale: dynamicScale,
       pinGroups: pinGroups,
       textFollow: textFollow,
       textSize: textSize,
+      showBar: showBar,
       lcdBackground: lcdBackground,
       lcdSeconds: lcdSeconds,
-      lcdThemeSync: lcdThemeSync
-    }
-    // Leave the new keys out until the file has been read, unless this patch sets them.
-    if (uiReady) {
-      body.showBar = showBar
-      body.pumpFloor = pumpFloor
-      body.silentRamp = silentRamp
-      body.silentRampUid = silentRampUid
-      body.silentRampBinds = silentRampBinds
+      lcdThemeSync: lcdThemeSync,
+      pumpFloor: pumpFloor,
+      silentRamp: silentRamp,
+      silentRampUid: silentRampUid,
+      silentRampBinds: silentRampBinds,
+      pinGroupsHeld: pinGroupsHeld,
+      showBarHeld: showBarHeld,
+      pumpFloorHeld: pumpFloorHeld,
+      silentRampHeld: silentRampHeld
     }
     var src = patch || ({})
-    // Exact true matches Python write_ui. The other flags stay on unless the patch says false.
+    // Only the keys in this patch. A full snapshot would write defaults over a file
+    // that was torn when the window started and readable again by the time this lands.
+    var body = ({})
+    var sending = false
     var exact = ["dynamicScale", "pinGroups", "lcdThemeSync", "silentRamp"]
     var loose = ["textFollow", "showBar", "lcdBackground", "pumpFloor"]
     var i
     for (i = 0; i < exact.length; i++) {
       if (src[exact[i]] === undefined) continue
       body[exact[i]] = src[exact[i]] === true
+      sending = true
     }
     for (i = 0; i < loose.length; i++) {
       if (src[loose[i]] === undefined) continue
       body[loose[i]] = src[loose[i]] !== false
+      sending = true
     }
+    if (src.textSize !== undefined) {
+      var size = Number(src.textSize)
+      if (isFinite(size) && size > 0) {
+        body.textSize = size
+        sending = true
+      }
+    }
+    if (src.lcdSeconds !== undefined) {
+      var seconds = Number(src.lcdSeconds)
+      if (lcdSecondsOk(seconds)) {
+        body.lcdSeconds = seconds
+        sending = true
+      }
+    }
+    if (src.silentRampUid !== undefined) {
+      body.silentRampUid = String(src.silentRampUid || "")
+      sending = true
+    }
+    if (src.silentRampBinds !== undefined) {
+      body.silentRampBinds = src.silentRampBinds || []
+      sending = true
+    }
+    if (!sending) return
     if (src.pinGroups !== undefined) pinGroupsHeld = true
     if (src.showBar !== undefined) showBarHeld = true
     if (src.pumpFloor !== undefined) pumpFloorHeld = true
     if (src.silentRamp !== undefined || src.silentRampUid !== undefined || src.silentRampBinds !== undefined)
       silentRampHeld = true
-    if (src.textSize !== undefined) body.textSize = Number(src.textSize)
-    if (src.lcdSeconds !== undefined) {
-      var seconds = Number(src.lcdSeconds)
-      if (lcdSecondsOk(seconds)) body.lcdSeconds = seconds
-    }
-    if (src.silentRampUid !== undefined) body.silentRampUid = String(src.silentRampUid || "")
-    if (src.silentRampBinds !== undefined) body.silentRampBinds = src.silentRampBinds || []
-    dynamicScale = body.dynamicScale
-    pinGroups = body.pinGroups === true
-    textFollow = body.textFollow
-    textSize = body.textSize
-    lcdBackground = body.lcdBackground !== false
-    lcdSeconds = lcdSecondsOk(body.lcdSeconds) ? body.lcdSeconds : 5
-    lcdThemeSync = body.lcdThemeSync === true
+    if (body.dynamicScale !== undefined) dynamicScale = body.dynamicScale
+    if (body.pinGroups !== undefined) pinGroups = body.pinGroups === true
+    if (body.textFollow !== undefined) textFollow = body.textFollow
+    if (body.textSize !== undefined) textSize = body.textSize
+    if (body.lcdBackground !== undefined) lcdBackground = body.lcdBackground !== false
+    if (body.lcdSeconds !== undefined) lcdSeconds = body.lcdSeconds
+    if (body.lcdThemeSync !== undefined) lcdThemeSync = body.lcdThemeSync === true
     if (body.showBar !== undefined) showBar = body.showBar
     if (body.pumpFloor !== undefined) pumpFloor = body.pumpFloor !== false
     if (body.silentRamp !== undefined) silentRamp = body.silentRamp === true
     if (body.silentRampUid !== undefined) silentRampUid = String(body.silentRampUid || "")
     if (body.silentRampBinds !== undefined) silentRampBinds = body.silentRampBinds || []
-    post({ op: "ui-set", body: body })
+    dispatch({ op: "ui-set", body: body }, function(res) {
+      if (res && res.ok === false) {
+        dynamicScale = prev.dynamicScale
+        pinGroups = prev.pinGroups
+        textFollow = prev.textFollow
+        textSize = prev.textSize
+        showBar = prev.showBar
+        lcdBackground = prev.lcdBackground
+        lcdSeconds = prev.lcdSeconds
+        lcdThemeSync = prev.lcdThemeSync
+        pumpFloor = prev.pumpFloor
+        silentRamp = prev.silentRamp
+        silentRampUid = prev.silentRampUid
+        silentRampBinds = prev.silentRampBinds
+        pinGroupsHeld = prev.pinGroupsHeld
+        showBarHeld = prev.showBarHeld
+        pumpFloorHeld = prev.pumpFloorHeld
+        silentRampHeld = prev.silentRampHeld
+        root.lastError = root.plainError(res.error, "Settings could not be read.")
+      } else if (res && res.ok && root.lastError === "Settings could not be read.")
+        root.lastError = ""
+    })
   }
 
   function loadPack() {
@@ -1632,38 +1739,6 @@ Item {
     }, true)
   }
 
-  function saveGraphs(modeUid, jobs, done) {
-    var index = 0
-    var list = jobs || []
-    function step() {
-      if (index >= list.length) {
-        if (done) done()
-        return
-      }
-      var job = list[index++]
-      // A shared profile is one object. Writing it would move every mode
-      // that still points at it. The caller copies those jobs once this
-      // mode is the running one.
-      if (Cc.otherModeUsesProfile(modes, job.profileUid, modeUid)) {
-        step()
-        return
-      }
-      var profile = Cc.profileByUid(profiles, job.profileUid)
-      if (!profile) {
-        lastError = "That curve is not a saved profile"
-        notice = lastError
-        step()
-        return
-      }
-      var next = Cc.withGraphPoints(profile, job.points, job.minDuty)
-      call("PUT", "/profiles", next, function(res) {
-        if (!res.ok) return fail(res)
-        step()
-      })
-    }
-    step()
-  }
-
   // A CoolerControl profile is one object. Two modes that store the same
   // profile uid share that curve, so a write moves both. Copy the profile
   // and point only this mode at the copy.
@@ -1679,17 +1754,6 @@ Item {
       else own.push(job)
     }
     return { own: own, shared: shared }
-  }
-
-  function cloneGraph(profile, points, minDuty, name, done) {
-    var draft = JSON.parse(JSON.stringify(profile))
-    draft.uid = newUid()
-    draft.name = String(name || "Curve").slice(0, 48)
-    var shaped = Cc.withGraphPoints(draft, points, minDuty)
-    call("POST", "/profiles", shaped, function(res) {
-      if (!res.ok) return fail(res)
-      if (done) done(draft.uid)
-    })
   }
 
   function assignChannels(channels, profileUid, done) {
@@ -1713,66 +1777,56 @@ Item {
     step()
   }
 
-  // The mode is already the running one, so its live channels match what it
-  // stored. Only the cloned channels differ. The snapshot writes those back.
-  // CoolerControl has no call that retargets one stored channel on its own.
-  function retargetShared(uid, jobs, done) {
-    var index = 0
-    var list = []
-    var seen = ({})
-    var raw = jobs || []
-    var n
-    for (n = 0; n < raw.length; n++) {
-      var item = raw[n]
-      if (!item || !item.profileUid || seen[item.profileUid]) continue
-      seen[item.profileUid] = true
-      list.push(item)
-    }
-    var mode = Cc.modeByUid(modes, uid)
-    var modeName = mode && mode.name ? mode.name : "Mode"
-    var known = ({})
-    var live = channels || []
-    var c
-    for (c = 0; c < live.length; c++) if (live[c] && live[c].key) known[live[c].key] = true
-    function step() {
-      if (index >= list.length) {
-        snapshotMode(uid, done)
-        return
-      }
-      var job = list[index++]
-      var profile = Cc.profileByUid(profiles, job.profileUid)
-      if (!profile) {
-        lastError = "That curve is not a saved profile"
-        notice = lastError
-        step()
-        return
-      }
-      var stored = Cc.modeProfileChannels(mode, job.profileUid)
-      var present = []
-      for (c = 0; c < stored.length; c++) {
-        var one = stored[c]
-        if (!one || !one.deviceUid || !one.name) continue
-        if (!known[String(one.deviceUid) + "/" + String(one.name)]) continue
-        present.push(one)
-      }
-      if (!present.length) {
-        step()
-        return
-      }
-      var copyName = (modeName + " " + (profile.name || "curve") + " " + newUid().slice(0, 4)).replace(/\s+/g, " ")
-      cloneGraph(profile, job.points, job.minDuty, copyName, function(newId) {
-        assignChannels(present, newId, step)
-      })
-    }
-    step()
-  }
-
   // Writes the curves this mode is showing, then runs the mode.
   // An empty mode is refused: activating one makes the daemon reset every channel.
   // A profile another mode still uses is copied after this mode is running,
   // so the write does not move the other mode.
   // A running calibration owns the channel. The daemon rejects other writes
   // until that sweep finishes, so Apply waits.
+  function finishApplyBurst(uid, expect, res, done) {
+    if (!res || res.ok !== true) {
+      fail(res || { ok: false, status: 0, error: "not connected" })
+      refresh()
+      return
+    }
+    var results = (res.body && res.body.results) || []
+    if (results.length < 3) {
+      lastError = "The running curves do not match what was sent."
+      notice = lastError
+      refresh()
+      return
+    }
+    var profilesRes = results[results.length - 3]
+    var modesRes = results[results.length - 2]
+    var activeRes = results[results.length - 1]
+    if (!profilesRes || !profilesRes.ok || !modesRes || !modesRes.ok || !activeRes || !activeRes.ok) {
+      fail((profilesRes && !profilesRes.ok) ? profilesRes : ((modesRes && !modesRes.ok) ? modesRes : activeRes))
+      refresh()
+      return
+    }
+    var nextProfiles = (profilesRes.body && profilesRes.body.profiles) || []
+    var nextModes = (modesRes.body && modesRes.body.modes) || []
+    var mode = Cc.modeByUid(nextModes, uid)
+    var reported = activeRes.body && activeRes.body.current_mode_uid
+      ? String(activeRes.body.current_mode_uid) : ""
+    if (!mode || !Cc.appliedCurvesMatch(mode, nextProfiles, expect)) {
+      lastError = "The running curves do not match what was sent."
+      notice = lastError
+      refresh()
+      return
+    }
+    profiles = nextProfiles
+    modes = nextModes
+    modesKnown = true
+    activeModeUid = reported || String(uid)
+    rebuild()
+    notice = ""
+    lastError = ""
+    if (done) done()
+  }
+
+  // One connection: owned curves, the mode, any copied shared curves, then
+  // a read-back. A match skips the full catalog. A miss reloads the daemon.
   function applyModeCurves(uid, jobs, done) {
     if (!uid) return
     if (calibrationBusy) {
@@ -1781,20 +1835,85 @@ Item {
       return
     }
     var split = splitCurveJobs(uid, jobs)
-    saveGraphs(uid, split.own, function() {
-      call("POST", "/modes-active/" + encodeURIComponent(uid), {}, function(res) {
-        if (!res.ok) return fail(res)
-        activeModeUid = String(uid)
-        rebuild()
-        notice = ""
-        if (!split.shared.length) {
-          refresh()
-          if (done) done()
-          return
-        }
-        retargetShared(uid, split.shared, done)
-      })
-    })
+    var steps = []
+    var expect = []
+    var list = split.own || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var job = list[i]
+      if (!job || Cc.otherModeUsesProfile(modes, job.profileUid, uid)) continue
+      var profile = Cc.profileByUid(profiles, job.profileUid)
+      if (!profile) {
+        lastError = "That curve is not a saved profile"
+        notice = lastError
+        return
+      }
+      var next = Cc.withGraphPoints(profile, job.points, job.minDuty)
+      steps.push({ method: "PUT", path: "/profiles", body: next })
+      expect.push({ profileUid: String(next.uid || job.profileUid), points: next.speed_profile })
+    }
+    steps.push({ method: "POST", path: "/modes-active/" + encodeURIComponent(uid), body: {} })
+    var shared = []
+    var seen = ({})
+    var raw = split.shared || []
+    for (i = 0; i < raw.length; i++) {
+      var item = raw[i]
+      if (!item || !item.profileUid || seen[item.profileUid]) continue
+      seen[item.profileUid] = true
+      shared.push(item)
+    }
+    var mode = Cc.modeByUid(modes, uid)
+    var modeName = mode && mode.name ? mode.name : "Mode"
+    var known = ({})
+    var live = channels || []
+    for (i = 0; i < live.length; i++) if (live[i] && live[i].key) known[live[i].key] = true
+    var cloned = false
+    for (i = 0; i < shared.length; i++) {
+      var sharedJob = shared[i]
+      var sharedProfile = Cc.profileByUid(profiles, sharedJob.profileUid)
+      if (!sharedProfile) {
+        lastError = "That curve is not a saved profile"
+        notice = lastError
+        return
+      }
+      var stored = Cc.modeProfileChannels(mode, sharedJob.profileUid)
+      var present = []
+      var c
+      for (c = 0; c < stored.length; c++) {
+        var one = stored[c]
+        if (!one || !one.deviceUid || !one.name) continue
+        if (!known[String(one.deviceUid) + "/" + String(one.name)]) continue
+        present.push(one)
+      }
+      if (!present.length) continue
+      var draft = JSON.parse(JSON.stringify(sharedProfile))
+      var cloneUid = newUid()
+      draft.uid = cloneUid
+      var copyName = (modeName + " " + (sharedProfile.name || "curve") + " " + cloneUid.slice(0, 4)).replace(/\s+/g, " ")
+      draft.name = String(copyName).slice(0, 48)
+      var shaped = Cc.withGraphPoints(draft, sharedJob.points, sharedJob.minDuty)
+      shaped.uid = cloneUid
+      steps.push({ method: "POST", path: "/profiles", body: shaped })
+      expect.push({ profileUid: cloneUid, points: shaped.speed_profile, channels: present })
+      for (c = 0; c < present.length; c++) {
+        steps.push({
+          method: "PUT",
+          path: deviceSettingPath(present[c].deviceUid, present[c].name, "profile"),
+          body: { profile_uid: cloneUid }
+        })
+      }
+      cloned = true
+    }
+    if (cloned)
+      steps.push({ method: "PUT", path: "/modes/" + encodeURIComponent(uid) + "/settings", body: {} })
+    steps.push({ method: "GET", path: "/profiles", body: null })
+    steps.push({ method: "GET", path: "/modes", body: null })
+    steps.push({ method: "GET", path: "/modes-active", body: null })
+    var token = track(function(res) { root.finishApplyBurst(uid, expect, res, done) })
+    if (!send({ op: "burst", id: token, steps: steps })) {
+      dropPending(token)
+      fail({ ok: false, status: 0, error: "not connected" })
+    }
   }
 
   function takeCalibrationList(res) {
@@ -1835,40 +1954,40 @@ Item {
     }
     var was = calibrationBusy
     var next = Calib.normalizeBatch(res.body)
-      if (!next.active && calibrationAwait && !(next.entries && next.entries.length)) {
-        calibrationMiss = calibrationMiss + 1
-        if (calibrationMiss < 3) return
-        calibrationAwait = false
-        calibrationBatch = Calib.emptyBatch()
-        calibrationStatus = ({})
-        loadCalibrations()
-        return
-      }
-      calibrationMiss = 0
+    if (!next.active && calibrationAwait && !(next.entries && next.entries.length)) {
+      calibrationMiss = calibrationMiss + 1
+      if (calibrationMiss < 3) return
       calibrationAwait = false
-      calibrationBatch = next
-      if (next.active) {
-        var entries = next.entries || []
-        var i
-        for (i = 0; i < entries.length; i++) {
-          var row = entries[i]
-          if (row && String(row.phase) === "running")
-            loadCalibrationStatus(row.device_uid, row.channel_name)
-        }
-      } else if (was) {
-        calibrationStatus = ({})
-        loadCalibrations()
-        var failed = ""
-        var doneEntries = next.entries || []
-        for (i = 0; i < doneEntries.length; i++) {
-          var line = Calib.failureLine(doneEntries[i])
-          if (line) {
-            failed = line
-            break
-          }
-        }
-        notice = failed || "Calibration finished"
+      calibrationBatch = Calib.emptyBatch()
+      calibrationStatus = ({})
+      loadCalibrations()
+      return
+    }
+    calibrationMiss = 0
+    calibrationAwait = false
+    calibrationBatch = next
+    if (next.active) {
+      var entries = next.entries || []
+      var i
+      for (i = 0; i < entries.length; i++) {
+        var row = entries[i]
+        if (row && String(row.phase) === "running")
+          loadCalibrationStatus(row.device_uid, row.channel_name)
       }
+    } else if (was) {
+      calibrationStatus = ({})
+      loadCalibrations()
+      var failed = ""
+      var doneEntries = next.entries || []
+      for (i = 0; i < doneEntries.length; i++) {
+        var line = Calib.failureLine(doneEntries[i])
+        if (line) {
+          failed = line
+          break
+        }
+      }
+      notice = failed || "Calibration finished"
+    }
   }
 
   function loadCalibrationBatch() {
@@ -1944,18 +2063,74 @@ Item {
     return wait
   }
 
+  function lcdFaceKnown(face) {
+    return face === "liquid" || face === "cpu" || face === "cpu-gpu" || face === "cpu-liquid" || face === "omarchy" || face === "omarchy-time" || face === "picture"
+  }
+
+  // An empty or half-written file is the truncate window of the same inode.
+  // Keep the face already shown. A later complete write still replaces it.
   function readLcdFace(raw) {
-    var face = "liquid"
+    var text = String(raw || "").replace(/^\s+|\s+$/g, "")
+    if (!text) return
+    var obj
     try {
-      var obj = JSON.parse(String(raw || ""))
-      face = String(obj && obj.face || "liquid")
+      obj = JSON.parse(text)
     } catch (e) {
-      face = "liquid"
+      return
     }
-    if (face !== "liquid" && face !== "cpu" && face !== "cpu-gpu" && face !== "cpu-liquid" && face !== "omarchy" && face !== "omarchy-time" && face !== "picture")
-      face = "liquid"
+    if (!obj || typeof obj !== "object") return
+    var face = String(obj.face || "liquid")
+    if (!lcdFaceKnown(face)) face = "liquid"
     lcdFace = face
+    lcdPicture = obj.picture !== undefined ? String(obj.picture || "") : ""
+    if (obj.live !== undefined) lcdLive = obj.live === true
     if (face === "omarchy-time") lcdClockWait = msUntilNextMinute()
+  }
+
+  function lcdNote(res) {
+    return plainError(res && res.error, "The LCD was not changed.")
+  }
+
+  // Saves the face and shows it. "off" leaves the saved face and blanks the screen.
+  // The helper writes the view, then uploads, so a deck key does not depend on
+  // the window being open.
+  function showLcd(face) {
+    var id = String(face || "")
+    if (stopping || connection !== "ready") return "coolercontrold is not connected."
+    var screen = lcdChannels && lcdChannels.length ? lcdChannels[0] : null
+    if (!screen || !screen.deviceUid || !screen.name) return "No AIO LCD."
+    if (id === "picture") {
+      if (!screen.hasImage) return "This cooler has no picture mode."
+      if (!String(lcdPicture || "")) return "No picture is saved."
+    } else if (id !== "off" && !lcdFaceKnown(id)) return "Unknown LCD face."
+    var msg = fillLcd({
+      op: "lcd-face",
+      face: id
+    }, screen, id === "omarchy-time" ? 60 : lcdSeconds)
+    var prevFace = lcdFace
+    var prevLive = lcdLive
+    var prevPicture = lcdPicture
+    var token = track(function(res) {
+      if (res && res.ok === false) {
+        root.lastError = root.lcdNote(res)
+        root.lcdFace = prevFace
+        root.lcdLive = prevLive
+        root.lcdPicture = prevPicture
+        if (prevFace === "omarchy-time") root.lcdClockWait = root.msUntilNextMinute()
+      } else if (res && res.ok) root.lastError = ""
+    })
+    msg.id = token
+    if (!send(msg)) {
+      dropPending(token)
+      return "coolercontrold is not connected."
+    }
+    if (id === "off") lcdLive = false
+    else {
+      lcdFace = id
+      lcdLive = true
+      if (id === "omarchy-time") lcdClockWait = msUntilNextMinute()
+    }
+    return "ok"
   }
 
   function themeLcd() {
@@ -2032,6 +2207,113 @@ Item {
     })
   }
 
+  function sameReading(a, b) {
+    if (a === b) return true
+    var aEmpty = a === null || a === undefined || a === ""
+    var bEmpty = b === null || b === undefined || b === ""
+    if (aEmpty || bEmpty) return aEmpty && bEmpty
+    var na = Number(a)
+    var nb = Number(b)
+    if (isFinite(na) && isFinite(nb)) return na === nb
+    return String(a) === String(b)
+  }
+
+  function liveDiffer(next) {
+    var cur = channelLive || ({})
+    var fresh = next || ({})
+    var key
+    for (key in fresh) {
+      if (!Object.prototype.hasOwnProperty.call(fresh, key)) continue
+      var row = cur[key]
+      var got = fresh[key] || ({})
+      if (!row || !sameReading(row.duty, got.duty) || !sameReading(row.rpm, got.rpm)) return true
+    }
+    for (key in cur) {
+      if (!Object.prototype.hasOwnProperty.call(cur, key)) continue
+      if (!Object.prototype.hasOwnProperty.call(fresh, key)) return true
+    }
+    return false
+  }
+
+  function tempsDiffer(next) {
+    var keys = [
+      "cpu", "cpuCcd1", "cpuCcd2", "cpuName", "gpu", "gpuPower", "gpuLoad", "gpuName",
+      "coolant", "liquidName", "pumpDuty", "pumpRpm", "hottest"
+    ]
+    var cur = temps || ({})
+    var got = next || ({})
+    var i
+    for (i = 0; i < keys.length; i++) {
+      if (!sameReading(cur[keys[i]], got[keys[i]])) return true
+    }
+    return false
+  }
+
+  // A refused login is not a blip. Everything else keeps the last temperatures
+  // for a few seconds while the stream comes back.
+  function cancelHold() {
+    streamHold = false
+    heldError = ""
+    streamHoldTimer.stop()
+  }
+
+  function beginHold(message) {
+    var text = plainError(message, "coolercontrold is not running")
+    if (streamHold) {
+      heldError = text
+      return
+    }
+    if (connection !== "ready") {
+      connection = "down"
+      transportError = true
+      lcdKeepBusy = false
+      calibrationAwait = false
+      calibrationMiss = 0
+      lastError = text
+      return
+    }
+    heldError = text
+    streamHold = true
+    streamHoldTimer.restart()
+  }
+
+  function releaseHold() {
+    var text = heldError
+    streamHold = false
+    heldError = ""
+    connection = "down"
+    transportError = true
+    lcdKeepBusy = false
+    calibrationAwait = false
+    calibrationMiss = 0
+    lastError = plainError(text, "coolercontrold is not running")
+  }
+
+  function takeStatus(body) {
+    var next = body && body.devices
+    if (next && next.length) statusDevices = next
+    lastStatusMs = Date.now()
+    cancelHold()
+    noteReady()
+    if (!channels || !channels.length) {
+      rebuild()
+      return
+    }
+    var patch = Cc.statusPatch(devices, statusDevices, channels)
+    if (!patch || patch.shapeChanged) {
+      rebuild()
+      return
+    }
+    if (liveDiffer(patch.live)) {
+      channelLive = patch.live
+      channelLiveSig = ""
+    }
+    if (tempsDiffer(patch.temps)) {
+      temps = patch.temps
+      tempsSig = ""
+    }
+  }
+
   function handleLine(line) {
     var trimmed = String(line || "").replace(/^\s+|\s+$/g, "")
     if (!trimmed) return
@@ -2041,8 +2323,12 @@ Item {
       return
     }
     if (msg.event === "hello") {
+      sawHello = true
+      var keepView = streamHold || connection === "ready"
+      cancelHold()
       restartDelayMs = 2000
-      connection = msg.token ? "down" : "need-token"
+      if (!msg.token) connection = "need-token"
+      else if (!keepView) connection = "down"
       loadUi()
       loadPack()
       if (msg.token) {
@@ -2053,6 +2339,7 @@ Item {
     }
     if (msg.event === "up") {
       if (connection === "unauthorized" || connection === "need-token") return
+      cancelHold()
       // Status events do not carry devices, modes, or profiles.
       if (skipNextUp) {
         skipNextUp = false
@@ -2068,21 +2355,14 @@ Item {
       return
     }
     if (msg.event === "down") {
-      if (msg.error === "need-token" || msg.status === 401 || msg.status === 403) fail(msg)
-      else {
-        connection = "down"
-        transportError = true
-        lcdKeepBusy = false
-        calibrationAwait = false
-        calibrationMiss = 0
-        lastError = msg.error || "coolercontrold is not running"
-      }
+      if (msg.error === "need-token" || msg.status === 401 || msg.status === 403 || msg.status === 429)
+        fail(msg)
+      else
+        beginHold(msg.error)
       return
     }
     if (msg.event === "status") {
-      statusDevices = (msg.body && msg.body.devices) || statusDevices
-      noteReady()
-      rebuild()
+      takeStatus(msg.body)
       return
     }
     if (msg.event === "mode" || msg.event === "modes") {
@@ -2120,15 +2400,28 @@ Item {
     stderr: SplitParser {
       onRead: function(line) { console.warn("omaflow cc: " + line) }
     }
+    onRunningChanged: {
+      if (!client.running) return
+      root.clientStartedMs = Date.now()
+      root.sawHello = false
+      root.lastStatusMs = 0
+    }
     onExited: function() {
       root.pending = ({})
       root.catalogBusy = false
       root.catalogAgain = false
       root.catalogIfStale = false
       root.skipNextUp = false
-      if (root.stopping) return
-      root.connection = "down"
+      root.sawHello = false
       root.lcdKeepBusy = false
+      if (root.stopping) return
+      if (root.connection === "ready" || root.streamHold)
+        root.beginHold("coolercontrold is not running")
+      else {
+        root.connection = "down"
+        root.calibrationAwait = false
+        root.calibrationMiss = 0
+      }
       restart.interval = root.restartDelayMs
       root.restartDelayMs = Math.min(30000, root.restartDelayMs * 2)
       restart.start()
@@ -2260,8 +2553,36 @@ Item {
     id: calibTimer
     interval: 1000
     repeat: true
-    running: !root.stopping && root.connection === "ready" && root.calibrationBusy
+    running: !root.stopping && root.connection === "ready" && !root.streamHold && root.calibrationBusy
     onTriggered: root.loadCalibrationBatch()
+  }
+
+  // Hello has to show up, and a live stream has to keep sending status.
+  // Killing the helper is the recovery. onExited backs off and starts again.
+  Timer {
+    id: streamWatch
+    interval: 2000
+    repeat: true
+    running: !root.stopping && client.running
+    onTriggered: {
+      if (root.stopping || !client.running) return
+      var now = Date.now()
+      if (!root.sawHello && root.clientStartedMs && (now - root.clientStartedMs) > 8000) {
+        client.running = false
+        return
+      }
+      if (root.streamHold || !root.sawHello || root.connection !== "ready") return
+      var stamp = root.lastStatusMs || root.clientStartedMs
+      if (stamp && (now - stamp) > 8000)
+        client.running = false
+    }
+  }
+
+  Timer {
+    id: streamHoldTimer
+    interval: 3000
+    repeat: false
+    onTriggered: root.releaseHold()
   }
 
   Timer {

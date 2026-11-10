@@ -11,8 +11,10 @@ import "Model.js" as Model
 import "Nav.js" as Nav
 import "Wheel.js" as Wheel
 
-// Omaflow Plugin. Telemetry and the selected mode. Curve edits stay in
+// Omaflow Plugin. Monitoring and the selected mode. Curve edits stay in
 // Omaflow. Choosing a mode does not run it. Apply does.
+// omarchy-shell omaflow <command> reaches the handler further down.
+// Those calls are the ones a deck key can bind later.
 Panel {
   id: root
   moduleName: "tempest-chaoscreator.omaflow"
@@ -55,7 +57,7 @@ Panel {
     return scale > 0 ? chipPad / scale : 0
   }
 
-  property string tab: "telemetry"
+  property string tab: "monitor"
   property string modeUid: ""
   // A click previews a mode. Until that happens, the row follows the running one.
   property bool modePicked: false
@@ -78,7 +80,7 @@ Panel {
       return out
     }
     out = [
-      { kind: "tab", id: "telemetry", x: 0, y: 0 },
+      { kind: "tab", id: "monitor", x: 0, y: 0 },
       { kind: "tab", id: "mode", x: 1, y: 0 }
     ]
     for (var i = 0; i < modes.length; i++) out.push({ kind: "mode", uid: modes[i].uid, x: i, y: 1 })
@@ -121,10 +123,17 @@ Panel {
     navIndex = Nav.step(navItems, navIndex, dx, dy)
   }
 
+  function submitPair() {
+    var password = pairPassword.text
+    pairPassword.text = ""
+    if (service) service.pair(password)
+  }
+
   function activateNav() {
     var item = navAt()
     if (!item) return
-    if (item.kind === "tab") tab = item.id
+    if (item.kind === "pair") submitPair()
+    else if (item.kind === "tab") tab = item.id
     else if (item.kind === "mode") pickMode(item.uid)
     else if (item.kind === "apply") applySelected()
     else if (item.kind === "install" && service) service.installDaemon()
@@ -140,24 +149,124 @@ Panel {
     return true
   }
 
-  function applySelected() {
-    if (!service || !mode) return
+  // Null when the mode has no channels. An empty list still runs the mode.
+  function jobsFor(mode) {
     var members = Cc.modeMembers(mode, service.channels, service.profiles)
-    if (!members.length) {
-      service.lastError = mode.name + " has no channels. Add one in Omaflow before applying."
-      return
-    }
+    if (!members.length) return null
     var jobs = []
     var seen = ({})
-    for (var i = 0; i < members.length; i++) {
+    var i
+    for (i = 0; i < members.length; i++) {
       var row = members[i]
       if (!row.profileUid || seen[row.profileUid]) continue
       if (!row.points || row.points.length < 2) continue
       seen[row.profileUid] = true
       jobs.push({ profileUid: row.profileUid, points: row.points, minDuty: row.minDuty || 0 })
     }
+    return jobs
+  }
+
+  function applySelected() {
+    if (!service || !mode) return
+    var jobs = jobsFor(mode)
+    if (!jobs) {
+      service.lastError = mode.name + " has no channels. Add one in Omaflow before applying."
+      return
+    }
     service.lastError = ""
     service.applyModeCurves(mode.uid, jobs)
+  }
+
+  // Deck commands. Each one is zero-argument. An action prints ok, or one
+  // line when it cannot run. A status command prints one line.
+  function runMode(mode) {
+    if (!service || connection !== "ready") return "coolercontrold is not connected."
+    if (!mode) return "That mode is not on this cooler."
+    if (service.calibrationBusy) return "A fan is being calibrated. Apply waits until that sweep finishes."
+    if (String(mode.uid || "") === activeModeUid) return "ok"
+    var jobs = jobsFor(mode)
+    if (!jobs) return String(mode.name || "This mode") + " has no channels. Add one in Omaflow before applying."
+    service.lastError = ""
+    service.applyModeCurves(mode.uid, jobs)
+    return "ok"
+  }
+
+  function runNamed(label) {
+    if (!service || connection !== "ready") return "coolercontrold is not connected."
+    var mode = Cc.modeNamed(modes, label)
+    if (!mode) return label + " is not on this cooler."
+    return runMode(mode)
+  }
+
+  // The one mode besides Silent, Performance, Fixed, and Hell.
+  function runCustom() {
+    if (!service || connection !== "ready") return "coolercontrold is not connected."
+    var defaults = { silent: true, performance: true, fixed: true, hell: true }
+    var found = []
+    var list = modes || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var item = list[i]
+      if (!item) continue
+      var key = String(item.name || "").replace(/^\s+|\s+$/g, "").toLowerCase()
+      if (!key || defaults[key]) continue
+      found.push(item)
+    }
+    if (!found.length) return "No custom mode."
+    if (found.length > 1) return "More than one custom mode."
+    return runMode(found[0])
+  }
+
+  function showFace(face) {
+    if (!service || !service.showLcd) return "coolercontrold is not connected."
+    return service.showLcd(face)
+  }
+
+  function lcdLabel(face) {
+    if (face === "cpu") return "CPU"
+    if (face === "cpu-gpu") return "CPU | GPU"
+    if (face === "cpu-liquid") return "CPU | Liquid"
+    if (face === "omarchy") return "Omarchy"
+    if (face === "omarchy-time") return "Omarchy | Time"
+    if (face === "picture") return "Picture"
+    return "Liquid"
+  }
+
+  function modeLine() {
+    if (!ready) return "coolercontrold is not connected."
+    return activeModeName || "No mode"
+  }
+
+  function lcdLine() {
+    if (!ready) return "coolercontrold is not connected."
+    var screens = service && service.lcdChannels ? service.lcdChannels : []
+    if (!screens.length) return "No AIO LCD."
+    if (service.lcdLive === false) return "LCD off"
+    return lcdLabel(service.lcdFace)
+  }
+
+  function tempLine() {
+    if (!ready) return "coolercontrold is not connected."
+    if (!isFinite(hottest)) return "No temperature"
+    return Math.round(hottest) + "°"
+  }
+
+  function pumpLine() {
+    if (!ready) return "coolercontrold is not connected."
+    var sample = service && service.temps ? service.temps : ({})
+    var duty = Cc.finiteNum(sample.pumpDuty)
+    var rpm = Cc.finiteNum(sample.pumpRpm)
+    if (duty === null && rpm === null) return "No pump"
+    var dutyText = duty === null ? "—" : Math.round(duty) + "%"
+    var rpmText = rpm === null ? "— rpm" : Math.round(rpm) + " rpm"
+    return "Pump " + dutyText + " · " + rpmText
+  }
+
+  function alertsLine() {
+    if (!ready) return "coolercontrold is not connected."
+    var names = Cc.activeAlertNames(service.alerts)
+    if (!names.length) return "No alerts"
+    return names.join(" · ")
   }
 
   function selectAt(index) {
@@ -185,17 +294,18 @@ Panel {
 
       OpticalGlyph {
         anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(14)
-        height: Style.space(14)
+        width: Style.space(16)
+        height: Style.space(16)
         text: face.mark
         fontFamily: root.fontFamily
-        fontSize: Style.space(13)
+        fontSize: Style.space(14)
         color: root.tab === face.tabId ? root.accent : root.fg
       }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
         text: face.label
+        textFormat: Text.PlainText
         color: root.fg
         font.family: root.fontFamily
         font.pixelSize: Style.space(13)
@@ -218,7 +328,7 @@ Panel {
     if (opened) popoutBar.refreshTargets()
     if (!opened) return
     modePicked = false
-    tab = "telemetry"
+    tab = "monitor"
     ensureMode()
     navIndex = 0
   }
@@ -310,13 +420,37 @@ Panel {
     command: ["bash", root.openPath]
   }
 
-  IpcHandler {
-    target: "omaflow"
+  // manageIpc stays off so this is the one handler for target "omaflow".
+  // Actions run a mode or a face. Status calls only print.
+  ShellIpc {
+    target: root.ipcTarget
+
     function open(): void { root.open() }
     function close(): void { root.close() }
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
+
+    function silent(): string { return root.runNamed("Silent") }
+    function performance(): string { return root.runNamed("Performance") }
+    function fixed(): string { return root.runNamed("Fixed") }
+    function hell(): string { return root.runNamed("Hell") }
+    function custom(): string { return root.runCustom() }
+
+    function lcdLiquid(): string { return root.showFace("liquid") }
+    function lcdCpu(): string { return root.showFace("cpu") }
+    function lcdCpuGpu(): string { return root.showFace("cpu-gpu") }
+    function lcdCpuLiquid(): string { return root.showFace("cpu-liquid") }
+    function lcdOmarchy(): string { return root.showFace("omarchy") }
+    function lcdOmarchyTime(): string { return root.showFace("omarchy-time") }
+    function lcdPicture(): string { return root.showFace("picture") }
+    function lcdOff(): string { return root.showFace("off") }
+
+    function mode(): string { return root.modeLine() }
+    function lcd(): string { return root.lcdLine() }
+    function temp(): string { return root.tempLine() }
+    function pump(): string { return root.pumpLine() }
+    function alerts(): string { return root.alertsLine() }
   }
 
   implicitWidth: button.implicitWidth
@@ -352,6 +486,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: pairPassword.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) { root.moveNav(dx, dy) }
@@ -482,6 +617,7 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(13)
                 clip: true
+                onAccepted: root.submitPair()
               }
             }
             Rectangle {
@@ -499,11 +635,7 @@ Panel {
               }
               MouseArea {
                 anchors.fill: parent
-                onClicked: {
-                  var password = pairPassword.text
-                  pairPassword.text = ""
-                  if (root.service) root.service.pair(password)
-                }
+                onClicked: root.submitPair()
               }
             }
           }
@@ -513,7 +645,7 @@ Panel {
             spacing: Style.space(6)
             visible: root.ready
 
-            TabFace { tabId: "telemetry"; label: "Telemetry"; mark: Marks.pulse }
+            TabFace { tabId: "monitor"; label: "Monitoring"; mark: Marks.monitor }
             TabFace { tabId: "mode"; label: "Mode"; mark: Marks.modes }
           }
 
@@ -620,7 +752,7 @@ Panel {
 
           MonitoringPage {
             width: parent.width
-            visible: root.opened && root.ready && root.tab === "telemetry"
+            visible: root.opened && root.ready && root.tab === "monitor"
             service: root.service
             fg: root.fg
             accent: root.accent

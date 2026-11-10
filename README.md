@@ -1,6 +1,6 @@
 # Omaflow
 
-Omaflow 0.6 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
+Omaflow 0.7 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
 
 ![Omaflow](screenshots/banner-app.jpg)
 
@@ -103,7 +103,21 @@ That removes the chip and the window launcher. `coolercontrold` stays installed.
 
 ![Omaflow bar plugin](screenshots/bar.jpg)
 
-Left click opens the chip. Telemetry shows CPU, GPU, liquid when the cooler reports it, the fans, and which apps are using the CPU and GPU. Mode shows the curves for the selected mode. Right click toggles Silent and Performance when those modes exist. `1`–`9` select a mode. Apply runs it. `o` opens the window. Escape closes the popover.
+Left click opens the chip. Monitoring shows CPU, GPU, liquid when the cooler reports it, the fans, and which apps are using the CPU and GPU. Mode shows the curves for the selected mode. `1`–`9` select a mode. Apply runs it. `o` opens the window. Escape closes the popover.
+
+## Commands
+
+The bar chip answers `omarchy-shell omaflow <command>`. Each command takes no arguments. An action prints `ok`, or one line when it cannot run. A status command prints one line. A deck key can call any of these later.
+
+- `silent`, `performance`, `fixed`, and `hell` run those modes.
+- `custom` runs the one mode besides those four.
+- `lcdLiquid`, `lcdCpu`, `lcdCpuGpu`, `lcdCpuLiquid`, `lcdOmarchy`, `lcdOmarchyTime`, and `lcdPicture` show that face on the AIO LCD.
+- `lcdOff` turns the AIO LCD off and keeps the saved face.
+- `mode` prints the running mode.
+- `lcd` prints the face on the AIO LCD, or `LCD off`.
+- `temp` prints the hottest temperature.
+- `pump` prints pump duty and speed.
+- `alerts` prints the active alerts.
 
 ## Coolers
 

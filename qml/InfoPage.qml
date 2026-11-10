@@ -17,7 +17,7 @@ Column {
   property color muted: Qt.darker(fg, 1.4)
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
   property string fontFamily: Style.font.family
-  property string version: "0.6.0"
+  property string version: "0.7.0"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)
@@ -124,6 +124,7 @@ Column {
       width: parent.width
       wrapMode: Text.WordWrap
       text: "Version " + root.version + "  ·  " + root.author
+      textFormat: Text.PlainText
       color: root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.space(13)
@@ -133,6 +134,7 @@ Column {
       width: parent.width
       wrapMode: Text.WrapAnywhere
       text: root.homepage
+      textFormat: Text.PlainText
       color: root.muted
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption

@@ -573,7 +573,17 @@ Column {
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          // A chip card is narrower than "CCD1 42.5°  ·  CCD2 36.8°".
+          // HorizontalFit lays the line out to the item width first, so the
+          // fit check already sees a line that fits and elide keeps the cut.
+          // Scale toward the left only when the natural line is wider.
+          scale: {
+            var natural = implicitWidth
+            if (width <= 0 || natural <= width) return 1
+            return Math.max(0.82, width / natural)
+          }
+          transformOrigin: Item.Left
+          elide: Text.ElideNone
         }
       }
 
@@ -648,10 +658,18 @@ Column {
             var watts = power === null ? "—" : Math.round(power) + " W"
             return loadText + "  ·  " + watts
           }
+          textFormat: Text.PlainText
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          // Same card fit as the CCD line.
+          scale: {
+            var natural = implicitWidth
+            if (width <= 0 || natural <= width) return 1
+            return Math.max(0.82, width / natural)
+          }
+          transformOrigin: Item.Left
+          elide: Text.ElideNone
         }
       }
 
@@ -712,10 +730,18 @@ Column {
         Text {
           width: parent.width
           text: root.pumpDutyText() + "  ·  " + root.pumpRpmText()
+          textFormat: Text.PlainText
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          // Same card fit as the CCD line.
+          scale: {
+            var natural = implicitWidth
+            if (width <= 0 || natural <= width) return 1
+            return Math.max(0.82, width / natural)
+          }
+          transformOrigin: Item.Left
+          elide: Text.ElideNone
         }
       }
 

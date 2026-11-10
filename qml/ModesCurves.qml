@@ -338,9 +338,12 @@ Column {
   readonly property bool calibrationBusy: !!(service && service.calibrationBusy)
   readonly property int modeSlot: {
     var count = modeList.length
-    if (!count) return Style.space(72)
+    // Width is 0 before the page is laid out. A 1px slot there flashes.
+    if (!count || width < 1) return Style.space(72)
     var gaps = Style.space(6) * Math.max(0, count - 1)
-    return Math.max(Style.space(64), Math.floor((width - applyWidth - gaps) / count))
+    var room = width - applyWidth - gaps
+    if (room < count) return 1
+    return Math.floor(room / count)
   }
 
   function groupSwatch(card) {
@@ -1091,7 +1094,7 @@ Column {
         return room > base ? room : base
       }
       visible: height > 0
-      interactive: root.graphLive
+      interactive: root.graphLive && root.graphHistKey !== ""
       points: root.graphPoints
       minDuty: root.graphFloor()
       currentTemp: root.graphSubject ? root.tempNow(root.graphSubject) : -1
@@ -1601,6 +1604,10 @@ Column {
       accent: root.accent
       text: root.groupName
       onTextEdited: root.groupName = text
+      onAccepted: {
+        root.groupName = text
+        root.makeGroup()
+      }
     }
 
     Button {
