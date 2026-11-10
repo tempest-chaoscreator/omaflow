@@ -8,7 +8,7 @@ Omaflow 0.7 is the cooling window and the Omarchy bar chip. Both are clients of 
 
 ### Plugin
 
-The bar chip and the window are this repository. `omarchy plugin add` clones it to:
+The bar chip is this repository. `omarchy plugin add` clones it to:
 
 `~/.config/omarchy/plugins/tempest-chaoscreator.omaflow/`
 
@@ -33,17 +33,20 @@ omarchy plugin update tempest-chaoscreator.omaflow
 
 ### Git clone
 
-Clone the repository and write the launcher. `./setup` writes:
+Clone the repository and install the window. `./install` copies the window out of the checkout:
 
-`~/.local/share/applications/omaflow-standalone.desktop`
+- `~/.local/bin/omaflow` opens it.
+- `~/.local/share/omaflow/` holds the window files.
+- `~/.local/share/applications/omaflow-standalone.desktop` is the launcher entry.
+- `~/.config/omaflow/` holds the token and the other settings, written by the running program.
 
-Its `Exec` is `<clone>/app/omaflow-standalone`. `./setup` does not install `coolercontrold`, does not enable the daemon, and does not touch the bar. The window offers the same Install and Start buttons as the chip.
+The bar chip stays the git checkout from `omarchy plugin add`. `./install` does not replace that checkout, does not install `coolercontrold`, does not enable the daemon, and does not touch fan settings. The window offers the same Install and Start buttons as the chip.
 
 ```bash
 git clone https://github.com/tempest-chaoscreator/omaflow.git
 cd omaflow
-./setup
-./app/omaflow-standalone
+./install
+omaflow
 ```
 
 Install and start the daemon from those buttons, or from a terminal. Install runs `omarchy pkg aur add coolercontrold` and does not install the CoolerControl desktop package. Start runs `systemctl start` and does not enable the service at boot. **Start with the PC** in Settings stays off until you turn it on.
@@ -61,7 +64,8 @@ When the daemon has no modes, Omaflow creates Silent, Performance, Fixed, and He
 
 ```bash
 omarchy plugin remove tempest-chaoscreator.omaflow
-rm -f ~/.local/share/applications/omaflow-standalone.desktop
+rm -f ~/.local/bin/omaflow ~/.local/share/applications/omaflow-standalone.desktop
+rm -rf ~/.local/share/omaflow
 ```
 
 That removes the chip and the window launcher. `coolercontrold` stays installed. The token file stays until you delete `~/.config/omaflow/coolercontrol.token`.

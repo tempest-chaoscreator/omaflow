@@ -1,7 +1,8 @@
 #!/bin/bash
 # Open Omaflow as its own window. The bar chip is a separate plugin.
 set -euo pipefail
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+source_path=$(readlink -f -- "$0")
+root=$(CDPATH= cd -- "$(dirname -- "$source_path")/.." && pwd)
 # shellcheck disable=SC1091
 source "$root/scripts/qml_imports.sh"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"

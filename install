@@ -1,0 +1,55 @@
+#!/bin/bash
+# Install the window into the user prefix. The source tree stays for development.
+#   ~/.local/bin/omaflow
+#   ~/.local/share/omaflow/
+#   ~/.local/share/applications/omaflow-standalone.desktop
+# The bar chip stays at ~/.config/omarchy/plugins/tempest-chaoscreator.omaflow/.
+# A git checkout there is left alone so `omarchy plugin update` can still fast-forward it.
+# Does not install coolercontrold, does not enable it, and does not touch fan settings.
+set -euo pipefail
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+bin="${HOME}/.local/bin"
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+share="$data/omaflow"
+desk_dir="$data/applications"
+plugin="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/tempest-chaoscreator.omaflow"
+
+mkdir -p "$bin" "$share" "$desk_dir"
+
+rm -rf "$share/qml" "$share/scripts" "$share/icons" "$share/app"
+cp "$root/manifest.json" "$share/manifest.json"
+cp -a "$root/qml" "$root/scripts" "$root/icons" "$root/app" "$share/"
+rm -rf "$share/scripts/__pycache__"
+chmod +x "$share/app/omaflow-standalone" "$share/scripts/open_app.sh"
+ln -sfn "$share/app/omaflow-standalone" "$bin/omaflow"
+
+cat > "$desk_dir/omaflow-standalone.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=Omaflow
+GenericName=Cooling
+Comment=Fans, the pump, and an AIO LCD
+Exec=$bin/omaflow
+Icon=$share/icons/omaflow-icon-tight.svg
+Terminal=false
+Categories=System;Settings;
+Keywords=Fan;Pump;Cooling;Temperature;Omaflow;
+StartupNotify=false
+StartupWMClass=omaflow-standalone
+EOF
+chmod 644 "$desk_dir/omaflow-standalone.desktop"
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$desk_dir" >/dev/null 2>&1 || true
+fi
+
+echo "Window launcher: $bin/omaflow"
+echo "Window files:    $share"
+if [[ -d "$plugin/.git" ]]; then
+  echo "Bar chip left as a git checkout: $plugin"
+elif [[ -d "$plugin" ]]; then
+  echo "Bar chip already present: $plugin"
+else
+  echo "Bar chip is not installed. Add it with:"
+  echo "  omarchy plugin add https://github.com/tempest-chaoscreator/omaflow.git --enable"
+fi

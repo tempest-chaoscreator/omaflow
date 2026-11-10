@@ -3,8 +3,13 @@
 # packages, does not enable coolercontrold, and does not touch the bar.
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-launcher="$root/app/omaflow-standalone"
+launcher="${HOME}/.local/bin/omaflow"
+icon="${XDG_DATA_HOME:-$HOME/.local/share}/omaflow/icons/omaflow-icon-tight.svg"
 if [[ ! -x "$launcher" ]]; then
+  launcher="$root/app/omaflow-standalone"
+  icon="$root/icons/omaflow-icon-tight.svg"
+fi
+if [[ -f "$launcher" && ! -x "$launcher" ]]; then
   chmod +x "$launcher"
 fi
 desk_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -19,7 +24,7 @@ Name=Omaflow
 GenericName=Cooling
 Comment=Fans, the pump, and an AIO LCD
 Exec=$launcher
-Icon=$root/icons/omaflow-icon-tight.svg
+Icon=$icon
 Terminal=false
 Categories=System;Settings;
 Keywords=Fan;Pump;Cooling;Temperature;Omaflow;

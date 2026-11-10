@@ -57,6 +57,13 @@ if [[ "$status" == "focused" ]]; then
   exit 0
 fi
 
+# The installed window lives in ~/.local. The plugin checkout is only the chip.
+installed="${HOME}/.local/bin/omaflow"
+if [[ -x "$installed" ]]; then
+  setsid -f "$installed" </dev/null >/dev/null 2>&1
+  exit 0
+fi
+
 # gtk-launch waits on StartupNotify, and StartupWMClass=org.quickshell is
 # the bar. From the chip that focuses the shell and never starts Omaflow.
 desk="${XDG_DATA_HOME:-$HOME/.local/share}/applications/omaflow-standalone.desktop"
