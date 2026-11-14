@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -225,15 +226,16 @@ def _advance_cpu(snap: dict, cur: tuple) -> tuple[list, float, dict, bool]:
     if prev is None:
         return old_cpu, old_total, _baseline_dump(cur), False
     dt = cur[0] - float(prev[0])
-    # A long gap is a new baseline, not a sample. Keeping the old baseline
-    # would make every later read look too long and never settle.
+    # A long gap, or a clock step backward, is a new baseline, not a sample.
+    # Keeping a future baseline makes every later gap look too short, so the
+    # rows stay frozen until wall time catches that stamp.
+    if dt < 0 or dt > 10:
+        return old_cpu, old_total, _baseline_dump(cur), False
     if dt <= 0.2:
         base = snap.get("baseline")
         if not isinstance(base, dict):
             base = _baseline_dump(cur)
         return old_cpu, old_total, base, False
-    if dt > 10:
-        return old_cpu, old_total, _baseline_dump(cur), False
     sample = _cpu_between(prev, cur)
     if sample is None:
         return old_cpu, old_total, _baseline_dump(cur), False
@@ -243,21 +245,25 @@ def _advance_cpu(snap: dict, cur: tuple) -> tuple[list, float, dict, bool]:
 
 def _read_snap() -> dict:
     path, _lock = _paths()
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        fd = os.open(path, flags)
     except OSError:
         return {}
     try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _LIMIT:
+            return {}
         chunks = []
         size = 0
-        while size <= _LIMIT:
-            part = os.read(fd, 65536)
+        while size < info.st_size:
+            part = os.read(fd, min(65536, info.st_size - size))
             if not part:
                 break
             size += len(part)
             chunks.append(part)
-        if size > _LIMIT:
-            return {}
         data = json.loads(b"".join(chunks).decode("utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError):
         return {}
@@ -286,21 +292,37 @@ def _write_snap(data: dict) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW
     try:
         fd = os.open(tmp, flags, 0o600)
-    except OSError:
-        return
+    except OSError as err:
+        if err.errno not in (errno.EACCES, errno.EPERM, errno.ELOOP):
+            return
+        try:
+            os.unlink(tmp)
+        except OSError:
+            return
+        try:
+            fd = os.open(tmp, flags, 0o600)
+        except OSError:
+            return
     try:
         try:
+            os.fchmod(fd, 0o600)
             _write_all(fd, blob)
             os.fsync(fd)
         except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
             return
     finally:
         os.close(fd)
     try:
-        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError:
-        return
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _lock():

@@ -24,6 +24,7 @@ Column {
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.35)
   property string fontFamily: Style.font.family
   property int shellTextPx: 12
+  property real textWheel: 0
   property string curvePath: ""
   property string curveNote: ""
   property string bootState: ""
@@ -143,6 +144,8 @@ Column {
     place({ kind: "bar", index: 0 })
     place({ kind: "export", index: 0 })
     place({ kind: "import", index: 0 })
+    if (service && service.curvePack && service.curvePack.kind === "omaflow-curves")
+      place({ kind: "clearPack", index: 0 })
     place({ kind: "pumpFloor", index: 0 })
     place({ kind: "silentRamp", index: 0 })
     if (service && service.connection === "ready") {
@@ -207,6 +210,31 @@ Column {
     if (index < 0) index = 0
     if (index > textStops.length - 1) index = textStops.length - 1
     service.setUi({ textFollow: false, textSize: textStops[index] })
+  }
+
+  function textNotches(wheel) {
+    if (!wheel) return 0
+    if (wheel.phase === Qt.ScrollBegin) textWheel = 0
+    if (wheel.phase === Qt.ScrollMomentum || wheel.phase === Qt.ScrollEnd) return 0
+    var angle = wheel.angleDelta ? wheel.angleDelta.y : 0
+    if (angle) return angle > 0 ? 1 : -1
+    var pixel = wheel.pixelDelta ? wheel.pixelDelta.y : 0
+    var phase = wheel.phase
+    var gesture = phase === Qt.ScrollBegin || phase === Qt.ScrollUpdate
+    if (!(gesture && pixel)) return 0
+    var next = textWheel + pixel
+    var steps = 0
+    while (next >= 64) { steps += 1; next -= 64 }
+    while (next <= -64) { steps -= 1; next += 64 }
+    textWheel = next
+    return steps
+  }
+
+  function indexOfKind(kind) {
+    var items = navItems
+    var i
+    for (i = 0; i < items.length; i++) if (items[i].kind === kind) return i
+    return -1
   }
 
   function pickText(x) {
@@ -367,9 +395,16 @@ Column {
     })
   }
 
+  function navAt() {
+    var items = navItems
+    if (!items.length) return null
+    return items[Math.max(0, Math.min(items.length - 1, navIndex))]
+  }
+
   function moveNav(dx, dy) {
     var items = navItems
-    var item = items.length ? items[Math.max(0, Math.min(items.length - 1, navIndex))] : null
+    var index = items.length ? Math.max(0, Math.min(items.length - 1, navIndex)) : 0
+    var item = items.length ? items[index] : null
     if (item && item.kind === "textSize" && dx && !dy) {
       stepText(dx)
       return
@@ -380,7 +415,7 @@ Column {
     }
     // Left and right step a slider. Up and down move to the next control.
     if (dx && !dy) return
-    navIndex = Nav.step(items, navIndex, dx, dy)
+    navIndex = Nav.step(items, index, dx, dy)
     revealNav()
   }
 
@@ -392,21 +427,19 @@ Column {
     var item = daemonBox
     if (kind === "lcd" || kind === "lcdSpeed") item = lcdBox
     else if (kind === "fill" || kind === "pinGroups" || kind === "textFollow" || kind === "textSize" || kind === "bar") item = windowBox
-    else if (kind === "export" || kind === "import" || kind === "pumpFloor" || kind === "silentRamp" || kind === "function") item = curvesBox
+    else if (kind === "export" || kind === "import" || kind === "clearPack" || kind === "pumpFloor" || kind === "silentRamp" || kind === "function") item = curvesBox
     else if (kind === "alert") item = alertsBox
     if (item) followY = item.y
   }
 
   function revealNav() {
-    var items = navItems
-    if (!items.length) return
-    var item = items[Math.max(0, Math.min(items.length - 1, navIndex))]
+    var item = navAt()
     if (item) reveal(item.kind)
   }
 
   function aimed(kind, index) {
-    if (!keyed || !navItems.length) return false
-    var item = navItems[Math.max(0, Math.min(navItems.length - 1, navIndex))]
+    if (!keyed) return false
+    var item = navAt()
     return item && item.kind === kind && item.index === index
   }
 
@@ -473,7 +506,7 @@ Column {
   }
 
   function activateNav() {
-    var item = navItems[navIndex]
+    var item = navAt()
     if (!item) return
     if (item.kind === "pair") {
       submitPair()
@@ -511,6 +544,10 @@ Column {
     }
     if (item.kind === "import") {
       importPack()
+      return
+    }
+    if (item.kind === "clearPack") {
+      if (service) service.clearCurvePack()
       return
     }
     if (item.kind === "bar") {
@@ -1007,6 +1044,16 @@ Column {
       anchors.fill: parent
       onPressed: function(mouse) { root.pickText(mouse.x) }
       onPositionChanged: function(mouse) { if (pressed) root.pickText(mouse.x) }
+      onWheel: function(wheel) {
+        var steps = root.textNotches(wheel)
+        if (steps) {
+          var at = root.indexOfKind("textSize")
+          if (at >= 0) root.navIndex = at
+          root.stepText(steps)
+          root.revealNav()
+        }
+        wheel.accepted = true
+      }
     }
   }
 
@@ -1101,11 +1148,16 @@ Column {
       visible: root.service && root.service.curvePack && root.service.curvePack.kind === "omaflow-curves"
       text: "Clear pack"
       bordered: true
+      selected: root.aimed("clearPack", 0)
       foreground: root.fg
       accent: root.accent
       fontFamily: root.fontFamily
       fontSize: Style.font.caption
-      onClicked: if (root.service) root.service.clearCurvePack()
+      onClicked: {
+        var at = root.indexOfKind("clearPack")
+        if (at >= 0) root.navIndex = at
+        if (root.service) root.service.clearCurvePack()
+      }
     }
   }
 

@@ -102,6 +102,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.gate === "start"
     text: "This starts it for this session and asks for your password. It does not start with the PC. Turn on Start with the PC in Omaflow Settings. That switch stays off until you turn it on."
+    textFormat: Text.PlainText
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

@@ -6,6 +6,7 @@ import qs.Commons as Commons
 import qs.Ui
 import "CcMap.js" as Cc
 import "Marks.js" as Marks
+import "Nav.js" as Nav
 import "ProcessScale.js" as Scale
 import "ThemePalette.js" as ThemePalette
 
@@ -40,6 +41,15 @@ Column {
 
   property var history: ({ tctl: [], gpu: [], liquid: [] })
   property var stableGauges: []
+  readonly property var navItems: {
+    if (!service || service.connection !== "ready") return []
+    return [
+      { side: "cpu", mode: "name", x: 0, y: 0 },
+      { side: "cpu", mode: "load", x: 1, y: 0 },
+      { side: "gpu", mode: "name", x: 2, y: 0 },
+      { side: "gpu", mode: "load", x: 3, y: 0 }
+    ]
+  }
 
   width: parent ? parent.width : 0
   spacing: Style.space(10)
@@ -452,9 +462,36 @@ Column {
     return out
   }
 
-  function moveNav(dx, dy) {}
+  function navAt() {
+    return navItems.length ? navItems[Math.max(0, Math.min(navItems.length - 1, navIndex))] : null
+  }
 
-  function activateNav() {}
+  function aimedSort(side, mode) {
+    if (!keyed) return false
+    var item = navAt()
+    return !!(item && item.side === side && item.mode === mode)
+  }
+
+  function aimSort(side, mode) {
+    var items = navItems
+    var i
+    for (i = 0; i < items.length; i++) {
+      if (items[i].side === side && items[i].mode === mode) {
+        navIndex = i
+        return
+      }
+    }
+  }
+
+  function moveNav(dx, dy) {
+    navIndex = Nav.step(navItems, navIndex, dx, dy)
+  }
+
+  function activateNav() {
+    var item = navAt()
+    if (!item) return
+    toggleSort(item.side, item.mode)
+  }
 
   function takeEscape() { return false }
 
@@ -954,12 +991,21 @@ Column {
           fontSize: Style.space(14)
           color: root.sortOn(column.side, "name") ? root.accent : root.muted
         }
+        Rectangle {
+          anchors.fill: parent
+          color: "transparent"
+          border.width: root.aimedSort(column.side, "name") ? 1 : 0
+          border.color: root.accent
+        }
         MouseArea {
           id: nameMouse
           anchors.fill: parent
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
-          onClicked: root.toggleSort(column.side, "name")
+          onClicked: {
+            root.aimSort(column.side, "name")
+            root.toggleSort(column.side, "name")
+          }
         }
         PanelToolTip {
           visible: nameMouse.containsMouse
@@ -1011,6 +1057,12 @@ Column {
           fontSize: Style.space(14)
           color: root.sortOn(column.side, "load") ? root.accent : root.muted
         }
+        Rectangle {
+          anchors.fill: parent
+          color: "transparent"
+          border.width: root.aimedSort(column.side, "load") ? 1 : 0
+          border.color: root.accent
+        }
         MouseArea {
           id: loadMouse
           anchors.left: totalMeter.left
@@ -1019,7 +1071,10 @@ Column {
           anchors.bottom: parent.bottom
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
-          onClicked: root.toggleSort(column.side, "load")
+          onClicked: {
+            root.aimSort(column.side, "load")
+            root.toggleSort(column.side, "load")
+          }
         }
         PanelToolTip {
           visible: loadMouse.containsMouse

@@ -187,11 +187,19 @@ function withGraphPoints(profile, points, minDuty) {
   return copy
 }
 
+function sensorText(row) {
+  if (!row) return ""
+  var name = String(row.name || "")
+  var label = row.label === undefined || row.label === null ? "" : String(row.label)
+  if (!label || label === name) return name
+  return name + " " + label
+}
+
 function matchTemp(candidates, pattern) {
   var list = candidates || []
   var i
   for (i = 0; i < list.length; i++) {
-    if (!list[i] || !pattern.test(list[i].name)) continue
+    if (!list[i] || !pattern.test(sensorText(list[i]))) continue
     var reading = finiteNum(list[i].temp)
     if (reading !== null) return reading
   }
@@ -214,8 +222,19 @@ function pickTemp(candidates, pattern) {
   return best
 }
 
-// GPU edge. "GPU Temp" wins, then a name that says edge, then any other
+// "GPU Temp" wins, then a name or label that says edge, then any other
 // sensor. Hotspot is last, so it cannot stand in for the edge reading.
+function gpuSensorRank(name, label) {
+  var primary = String(name || "")
+  var secondary = label === undefined || label === null || label === "" ? primary : String(label)
+  var score = 1
+  if (/hotspot|hot spot/i.test(primary) || /hotspot|hot spot/i.test(secondary)) score = 0
+  if (/edge/i.test(primary) || /edge/i.test(secondary)) score = 3
+  if (/gpu temp$/i.test(primary) || /gpu temp$/i.test(secondary)) score = 4
+  return score
+}
+
+// GPU edge. Callers pass the daemon sensor name and, when they have it, the label.
 function gpuEdge(candidates) {
   var list = candidates || []
   var best = null
@@ -225,11 +244,7 @@ function gpuEdge(candidates) {
     var row = list[i]
     var temp = row ? finiteNum(row.temp) : null
     if (temp === null) continue
-    var name = String(row.name || "")
-    var score = 1
-    if (/hotspot|hot spot/i.test(name)) score = 0
-    if (/edge/i.test(name)) score = 3
-    if (/gpu temp$/i.test(name)) score = 4
+    var score = gpuSensorRank(row.name, row.label)
     if (score > rank) {
       rank = score
       best = temp
@@ -281,8 +296,8 @@ function view(devices, statusDevices, modes, activeUid, pumpMin) {
         coolant = tempValue
         if (dev.name) coolerName = dev.name
       }
-      if (dev.type === "CPU") cpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
-      if (dev.type === "GPU") gpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
+      if (dev.type === "CPU") cpuTemps.push({ name: tempName, label: tempLabel || tempName, temp: tempValue })
+      if (dev.type === "GPU") gpuTemps.push({ name: tempName, label: tempLabel || tempName, temp: tempValue })
     }
     var infoChannels = dev.info.channels || {}
     for (var name in infoChannels) {
@@ -506,8 +521,8 @@ function statusPatch(devices, statusDevices, channels) {
         coolant = tempValue
         if (dev.name) coolerName = dev.name
       }
-      if (dev.type === "CPU") cpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
-      if (dev.type === "GPU") gpuTemps.push({ name: tempLabel || tempName, temp: tempValue })
+      if (dev.type === "CPU") cpuTemps.push({ name: tempName, label: tempLabel || tempName, temp: tempValue })
+      if (dev.type === "GPU") gpuTemps.push({ name: tempName, label: tempLabel || tempName, temp: tempValue })
     }
     var infoChannels = dev.info.channels || {}
     var name
@@ -612,6 +627,7 @@ function tempSourceFor(devices, deviceType) {
   var list = devices || []
   var wantGpu = String(deviceType || "") === "GPU"
   var cpu = null
+  var cpuStandIn = false
   var gpu = null
   var gpuRank = -1
   for (var i = 0; i < list.length; i++) {
@@ -622,15 +638,20 @@ function tempSourceFor(devices, deviceType) {
       if (!Object.prototype.hasOwnProperty.call(temps, name)) continue
       var info = temps[name] || {}
       var label = info.label ? String(info.label) : String(name)
-      if (liquidName(name) || liquidName(label)) continue
+      if (liquidName(name) || /liquid|coolant/i.test(label)) continue
       var source = { temp_name: name, device_uid: dev.uid }
-      if (dev.type === "CPU" && /package|tctl|tdie|^temp1$/i.test(name + " " + label)) {
-        if (!cpu || /tctl|package|tdie/i.test(label)) cpu = source
+      var namedLabel = /package|tctl|tdie/i.test(label)
+      var namedName = /package|tctl|tdie/i.test(name)
+      // ^temp1$ against "name label" never matched. A bare temp1 is only a stand-in.
+      var generic = /^temp1$/i.test(name) || /^temp1$/i.test(label)
+      if (dev.type === "CPU" && (namedLabel || namedName || generic)) {
+        if (!cpu || namedLabel || (namedName && cpuStandIn)) {
+          cpu = source
+          cpuStandIn = !namedLabel && !namedName
+        }
       }
       if (dev.type === "GPU") {
-        var rank = 1
-        if (/hotspot/i.test(name) || /hotspot/i.test(label)) rank = 0
-        if (/^gpu temp$/i.test(String(name)) || /^gpu temp$/i.test(label)) rank = 2
+        var rank = gpuSensorRank(name, label)
         if (rank > gpuRank) {
           gpuRank = rank
           gpu = source
@@ -1238,7 +1259,7 @@ function alertSensors(devices) {
       var info = temps[name] || {}
       var label = info.label ? String(info.label) : String(name)
       var source = { device_uid: dev.uid, channel_name: name, channel_metric: "Temp" }
-      if (liquidName(name) || liquidName(label)) {
+      if (liquidName(name) || /liquid|coolant/i.test(label)) {
         coolant = source
         continue
       }
@@ -1246,9 +1267,7 @@ function alertSensors(devices) {
         if (!cpu || /tctl|package|tdie/i.test(label)) cpu = source
       }
       if (dev.type === "GPU") {
-        var rank = 1
-        if (/hotspot/i.test(name) || /hotspot/i.test(label)) rank = 0
-        if (/^gpu temp$/i.test(String(name)) || /^gpu temp$/i.test(label)) rank = 2
+        var rank = gpuSensorRank(name, label)
         if (rank > gpuRank) {
           gpuRank = rank
           gpu = source

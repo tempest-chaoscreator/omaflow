@@ -89,6 +89,10 @@ Column {
     }
     out.push({ id: "zero", x: faces.length, y: 0 })
     out.push({ id: "ccw", x: 0, y: 1 })
+    if (face === "picture" && pictureOk) {
+      out.push({ id: "smaller", x: 1, y: 1 })
+      out.push({ id: "larger", x: 1.4, y: 1 })
+    }
     out.push({ id: "cw", x: 2, y: 1 })
     out.push({ id: "sync", x: 0, y: 2 })
     out.push({ id: "off", x: 1, y: 2 })
@@ -564,6 +568,31 @@ Column {
     return delta < 15
   }
 
+  property real brightWheel: 0
+  property real satWheel: 0
+
+  function sliderNotches(wheel, which) {
+    if (!wheel) return 0
+    if (wheel.phase === Qt.ScrollBegin) {
+      if (which === "sat") satWheel = 0
+      else brightWheel = 0
+    }
+    if (wheel.phase === Qt.ScrollMomentum || wheel.phase === Qt.ScrollEnd) return 0
+    var angle = wheel.angleDelta ? wheel.angleDelta.y : 0
+    if (angle) return angle > 0 ? 1 : -1
+    var pixel = wheel.pixelDelta ? wheel.pixelDelta.y : 0
+    var phase = wheel.phase
+    var gesture = phase === Qt.ScrollBegin || phase === Qt.ScrollUpdate
+    if (!(gesture && pixel)) return 0
+    var next = (which === "sat" ? satWheel : brightWheel) + pixel
+    var steps = 0
+    while (next >= 64) { steps += 1; next -= 64 }
+    while (next <= -64) { steps -= 1; next += 64 }
+    if (which === "sat") satWheel = next
+    else brightWheel = next
+    return steps
+  }
+
   function moveNav(dx, dy) {
     var item = navAt()
     var next = Nav.step(navItems, navIndex, dx, dy)
@@ -588,6 +617,8 @@ Column {
     else if (item.id === "zero") zeroPreview()
     else if (item.id === "ccw") stepAngle(-30)
     else if (item.id === "cw") stepAngle(30)
+    else if (item.id === "smaller") setPictureScale(pictureScale - 10)
+    else if (item.id === "larger") setPictureScale(pictureScale + 10)
     else if (item.id === "sync") syncScreen()
     else if (item.id === "off") turnOff()
   }
@@ -702,6 +733,8 @@ Column {
     property string glyph: ""
     property int delta: 0
     property string tip: ""
+    property string navId: ""
+    property bool aimed: false
     readonly property bool blocked: delta < 0
       ? root.pictureScale <= root.pictureScaleMin
       : root.pictureScale >= root.pictureScaleMax
@@ -712,11 +745,11 @@ Column {
     Rectangle {
       anchors.fill: parent
       radius: 0
-      color: sizeMouse.containsMouse
+      color: sizeMouse.containsMouse || aimed
         ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
         : "transparent"
       border.width: 1
-      border.color: sizeMouse.containsMouse
+      border.color: sizeMouse.containsMouse || aimed
         ? root.accent
         : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
     }
@@ -724,7 +757,7 @@ Column {
     Text {
       anchors.centerIn: parent
       text: glyph
-      color: sizeMouse.containsMouse ? root.accent : root.fg
+      color: sizeMouse.containsMouse || aimed ? root.accent : root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.space(16)
       font.bold: true
@@ -736,7 +769,10 @@ Column {
       hoverEnabled: true
       enabled: !blocked
       cursorShape: Qt.PointingHandCursor
-      onClicked: root.setPictureScale(root.pictureScale + delta)
+      onClicked: {
+        if (navId !== "") root.navIndex = root.indexOf(navId)
+        root.setPictureScale(root.pictureScale + delta)
+      }
     }
 
     PanelToolTip {
@@ -997,7 +1033,10 @@ Column {
           accent: root.accent
           fontFamily: root.fontFamily
           tooltipText: "Turn the display 30 degrees counter-clockwise"
-          onClicked: root.stepAngle(-30)
+          onClicked: {
+            root.navIndex = root.indexOf("ccw")
+            root.stepAngle(-30)
+          }
         }
       }
 
@@ -1197,8 +1236,8 @@ Column {
           visible: root.face === "picture" && root.pictureOk
           z: 3
 
-          SizeGlyph { glyph: "\u2212"; delta: -10; tip: "Smaller" }
-          SizeGlyph { glyph: "+"; delta: 10; tip: "Larger" }
+          SizeGlyph { glyph: "\u2212"; delta: -10; tip: "Smaller"; navId: "smaller"; aimed: root.aimed("smaller") }
+          SizeGlyph { glyph: "+"; delta: 10; tip: "Larger"; navId: "larger"; aimed: root.aimed("larger") }
         }
       }
 
@@ -1217,7 +1256,10 @@ Column {
           accent: root.accent
           fontFamily: root.fontFamily
           tooltipText: "Turn the display 30 degrees clockwise"
-          onClicked: root.stepAngle(30)
+          onClicked: {
+            root.navIndex = root.indexOf("cw")
+            root.stepAngle(30)
+          }
         }
       }
     }
@@ -1229,6 +1271,7 @@ Column {
     wrapMode: Text.WordWrap
     visible: root.face === "picture" && root.pictureOk && root.pictureNote !== ""
     text: root.pictureNote
+    textFormat: Text.PlainText
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -1302,9 +1345,12 @@ Column {
             if (pressed) brightSlider.setFromX(mouse.x)
           }
           onWheel: function(wheel) {
-            var dir = wheel.angleDelta.y >= 0 ? 1 : -1
-            root.navIndex = root.indexOf("bright")
-            root.setBrightness(root.brightness + dir * 5)
+            var steps = root.sliderNotches(wheel, "bright")
+            if (steps) {
+              root.navIndex = root.indexOf("bright")
+              root.setBrightness(root.brightness + steps * 5)
+            }
+            wheel.accepted = true
           }
         }
       }
@@ -1382,9 +1428,12 @@ Column {
             if (pressed) satSlider.setFromX(mouse.x)
           }
           onWheel: function(wheel) {
-            var dir = wheel.angleDelta.y >= 0 ? 1 : -1
-            root.navIndex = root.indexOf("sat")
-            root.setSaturation(root.saturation + dir * 5)
+            var steps = root.sliderNotches(wheel, "sat")
+            if (steps) {
+              root.navIndex = root.indexOf("sat")
+              root.setSaturation(root.saturation + steps * 5)
+            }
+            wheel.accepted = true
           }
         }
       }
@@ -1423,7 +1472,10 @@ Column {
         fontFamily: root.fontFamily
         fontSize: Style.font.caption
         tooltipText: "Keep the pump on this frame"
-        onClicked: root.syncScreen()
+        onClicked: {
+          root.navIndex = root.indexOf("sync")
+          root.syncScreen()
+        }
       }
       Button {
         text: "Off"
@@ -1434,7 +1486,10 @@ Column {
         accent: root.accent
         fontFamily: root.fontFamily
         fontSize: Style.font.caption
-        onClicked: root.turnOff()
+        onClicked: {
+          root.navIndex = root.indexOf("off")
+          root.turnOff()
+        }
       }
     }
 

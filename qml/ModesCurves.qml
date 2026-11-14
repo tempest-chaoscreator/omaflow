@@ -182,7 +182,8 @@ Column {
         row.deviceUid || "",
         row.isPump ? "p" : "f",
         row.deviceType || "",
-        row.profileUid || ""
+        row.profileUid || "",
+        Number(row.rpm) > 0 ? "1" : "0"
       ].join("~"))
     }
     var hidden = service && service.hiddenDevices ? service.hiddenDevices : ({})
@@ -259,8 +260,10 @@ Column {
       })
     }
     var saved = listedGroups
-    for (var s = 0; s < saved.length; s++) out.push({ kind: "drop-group", id: saved[s].id, x: s, y: 40 })
-    for (var n = 0; n < customModes.length; n++) out.push({ kind: "drop-mode", uid: customModes[n].uid, x: n, y: 41 })
+    for (var s = 0; s < saved.length; s++)
+      out.push({ kind: "drop-group", id: saved[s].id, x: saved.length - 1 - s, y: 40 })
+    for (var n = 0; n < customModes.length; n++)
+      out.push({ kind: "drop-mode", uid: customModes[n].uid, x: customModes.length - 1 - n, y: 41 })
     if (graphLive && graphHistKey) {
       out.push({ kind: "undo", x: 0, y: 36 })
       out.push({ kind: "redo", x: 1, y: 36 })
@@ -632,6 +635,10 @@ Column {
 
   function applyMode() {
     if (!service || !mode) return
+    if (service.calibrationBusy) {
+      service.lastError = "A fan is being calibrated. Apply waits until that sweep finishes."
+      return
+    }
     if (!members.length) {
       service.lastError = mode.name + " has no channels. Add one before applying."
       return
@@ -722,6 +729,16 @@ Column {
   function aimLink(uid) {
     var item = navAt()
     return keyed && item && item.kind === "link" && item.uid === uid
+  }
+
+  function aimDropGroup(id) {
+    var item = navAt()
+    return keyed && item && item.kind === "drop-group" && item.id === id
+  }
+
+  function aimDropMode(uid) {
+    var item = navAt()
+    return keyed && item && item.kind === "drop-mode" && item.uid === uid
   }
 
   function isGpuCard(card) {
@@ -1657,9 +1674,13 @@ Column {
             width: groupField.height
             height: groupField.height
             radius: 0
-            color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
+            color: root.aimDropGroup(modelData.id)
+              ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
             border.width: 1
-            border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
+            border.color: root.aimDropGroup(modelData.id)
+              ? root.accent
+              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
 
             OpticalGlyph {
               anchors.centerIn: parent
@@ -1668,7 +1689,7 @@ Column {
               text: root.trash
               fontFamily: root.fontFamily
               fontSize: Style.font.body
-              color: root.fg
+              color: root.aimDropGroup(modelData.id) ? root.accent : root.fg
             }
 
             MouseArea {
@@ -1774,9 +1795,13 @@ Column {
             width: modeField.height
             height: modeField.height
             radius: 0
-            color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, running ? 0.03 : 0.06)
+            color: root.aimDropMode(modelData.uid)
+              ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, running ? 0.03 : 0.06)
             border.width: 1
-            border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
+            border.color: root.aimDropMode(modelData.uid)
+              ? root.accent
+              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
 
             OpticalGlyph {
               anchors.centerIn: parent
@@ -1785,7 +1810,7 @@ Column {
               text: root.trash
               fontFamily: root.fontFamily
               fontSize: Style.font.body
-              color: root.fg
+              color: root.aimDropMode(modelData.uid) ? root.accent : root.fg
             }
 
             MouseArea {

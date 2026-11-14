@@ -154,6 +154,7 @@ def _write_private(path: Path, payload: bytes) -> None:
     fd = os.open(tmp, flags, 0o600)
     try:
         _write_all(fd, payload)
+        os.fchmod(fd, 0o600)
         os.fsync(fd)
     except Exception:
         os.close(fd)
@@ -170,7 +171,6 @@ def _write_private(path: Path, payload: bytes) -> None:
             current = None
         if current is not None and not stat.S_ISREG(current.st_mode):
             raise OSError(errno.ELOOP, "refusing to replace a symlink", str(path))
-        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError:
         try:
@@ -420,6 +420,14 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
+def _close_http(res) -> None:
+    """An error response owns the socket. Dropping it leaks that file."""
+    try:
+        res.close()
+    except Exception:
+        pass
+
+
 def _daemon_opener(jar: CookieJar | None = None) -> urllib.request.OpenerDirector:
     # Passing a ProxyHandler suppresses the default one. An empty mapping
     # installs no proxy methods, so http_proxy cannot receive the token.
@@ -474,11 +482,15 @@ def pair(password: str) -> dict:
         headers={"Authorization": "Basic " + basic},
     )
     try:
-        opener.open(login, timeout=8).read()
+        with opener.open(login, timeout=8) as res:
+            res.read()
     except urllib.error.HTTPError as err:
-        if err.code in (301, 302, 303, 307, 308):
-            return {"ok": False, "status": err.code, "error": "redirect refused", "body": None}
-        return {"ok": False, "status": 401, "error": "CoolerControl rejected that password", "body": None}
+        try:
+            if err.code in (301, 302, 303, 307, 308):
+                return {"ok": False, "status": err.code, "error": "redirect refused", "body": None}
+            return {"ok": False, "status": 401, "error": "CoolerControl rejected that password", "body": None}
+        finally:
+            _close_http(err)
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
     body = json.dumps({"label": "Omaflow", "expires_at": None, "write_access": True}).encode("utf-8")
@@ -492,9 +504,12 @@ def pair(password: str) -> dict:
         with opener.open(create, timeout=8) as res:
             payload = json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as err:
-        if err.code in (301, 302, 303, 307, 308):
-            return {"ok": False, "status": err.code, "error": "redirect refused", "body": None}
-        return {"ok": False, "status": err.code, "error": "Could not create an access token", "body": None}
+        try:
+            if err.code in (301, 302, 303, 307, 308):
+                return {"ok": False, "status": err.code, "error": "redirect refused", "body": None}
+            return {"ok": False, "status": err.code, "error": "Could not create an access token", "body": None}
+        finally:
+            _close_http(err)
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
     token = str(payload.get("token") or "")
@@ -529,10 +544,28 @@ def _clean_groups(groups: object) -> list:
 
 
 def _read_json(path: Path) -> object | None:
+    """JSON from a regular file. A symlink is unreadable, not the target."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        fd = os.open(path, _nofollow_flags(os.O_RDONLY))
+    except OSError:
         return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _FILE_LIMIT:
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size < info.st_size:
+            part = os.read(fd, min(65536, info.st_size - size))
+            if not part:
+                break
+            chunks.append(part)
+            size += len(part)
+        return json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    finally:
+        os.close(fd)
 
 
 def _stored_dict(path: Path) -> tuple[dict | None, str]:
@@ -860,13 +893,32 @@ def read_user_json(path_text: str) -> dict:
     if target is None:
         return {"ok": False, "status": 400, "error": "Choose a .json file inside your home directory", "body": None}
     try:
-        if not target.is_file() or target.is_symlink():
+        fd = os.open(target, _nofollow_flags(os.O_RDONLY, True))
+    except FileNotFoundError:
+        return {"ok": False, "status": 400, "error": "That file is not there", "body": None}
+    except OSError as err:
+        if err.errno == errno.ELOOP:
             return {"ok": False, "status": 400, "error": "That file is not there", "body": None}
-        if target.stat().st_size > _FILE_LIMIT:
-            return {"ok": False, "status": 400, "error": "That file is too large", "body": None}
-        body = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
         return {"ok": False, "status": 400, "error": "That file is not readable JSON", "body": None}
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return {"ok": False, "status": 400, "error": "That file is not there", "body": None}
+        if info.st_size > _FILE_LIMIT:
+            return {"ok": False, "status": 400, "error": "That file is too large", "body": None}
+        chunks: list[bytes] = []
+        size = 0
+        while size < info.st_size:
+            part = os.read(fd, min(65536, info.st_size - size))
+            if not part:
+                break
+            chunks.append(part)
+            size += len(part)
+        body = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {"ok": False, "status": 400, "error": "That file is not readable JSON", "body": None}
+    finally:
+        os.close(fd)
     if not isinstance(body, dict):
         return {"ok": False, "status": 400, "error": "That file is not a curve pack", "body": None}
     return {"ok": True, "status": 200, "error": "", "body": body}
@@ -907,10 +959,28 @@ def write_links(data: dict) -> None:
 
 
 def read_token() -> str:
+    """Bearer token from a regular file. A symlink is not a token."""
     try:
-        return TOKEN_PATH.read_text(encoding="utf-8").strip()
+        fd = os.open(TOKEN_PATH, _nofollow_flags(os.O_RDONLY))
     except OSError:
         return ""
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _FILE_LIMIT:
+            return ""
+        chunks: list[bytes] = []
+        size = 0
+        while size < info.st_size:
+            part = os.read(fd, min(65536, info.st_size - size))
+            if not part:
+                break
+            chunks.append(part)
+            size += len(part)
+        return b"".join(chunks).decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
 
 
 def _token_file_state(path: Path) -> str:
@@ -940,7 +1010,7 @@ def _token_file_state(path: Path) -> str:
 
 def _token_mtime(path: Path) -> float | None:
     try:
-        return path.stat().st_mtime
+        return path.lstat().st_mtime
     except OSError:
         return None
 
@@ -1073,8 +1143,9 @@ def _render_square(face: str, primary: str, secondary: str, accent: str, accent2
 
 
 def _lcd_view() -> dict | None:
-    view = _read_json(LCD_VIEW_PATH)
-    return view if isinstance(view, dict) else None
+    """Saved LCD view. A symlink is unreadable, same as a torn file."""
+    view, state = _lcd_view_state()
+    return view if state == "ok" else None
 
 
 def _read_private_state(path: Path) -> tuple[object | None, str]:
@@ -1805,9 +1876,7 @@ def lcd_preview(msg: dict) -> dict:
                 0,
                 clear=True,
             )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(png)
-        os.chmod(path, 0o600)
+        _write_private(path, png)
     except OSError as err:
         return {"ok": False, "status": 0, "error": str(err), "body": None}
     return {"ok": True, "status": 200, "error": "", "body": {"path": str(path)}}
@@ -1920,7 +1989,10 @@ def push_lcd_image(
                 pass
             return {"ok": True, "status": res.status, "error": "", "body": parsed}
     except urllib.error.HTTPError as err:
-        detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
+        try:
+            detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
+        finally:
+            _close_http(err)
         return {"ok": False, "status": err.code, "error": detail or str(err.reason), "body": None}
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
@@ -1944,19 +2016,311 @@ def _safe_path(path: str) -> str | None:
 
 
 def _own(path: Path) -> None:
-    """Local preference files stay private to this user."""
+    """A regular preference file stays private. A symlink is not chmod'd."""
     try:
-        if path.is_file():
-            os.chmod(path, 0o600)
+        fd = os.open(path, _nofollow_flags(os.O_RDONLY))
+    except OSError as err:
+        # Mode 000 cannot be read. A symlink fails with ELOOP and is left alone.
+        if err.errno not in (errno.EACCES, errno.EPERM):
+            return
+        _own_locked(path)
+        return
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            os.fchmod(fd, 0o600)
     except OSError:
         pass
+    finally:
+        os.close(fd)
+
+
+def _own_locked(path: Path) -> None:
+    """chmod the inode we open. A swapped symlink or a directory is not a regular file."""
+    if not hasattr(os, "O_PATH"):
+        return
+    try:
+        fd = os.open(path, _nofollow_flags(os.O_PATH))
+    except OSError:
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return
+        # fchmod rejects an O_PATH descriptor. The proc path still names this inode.
+        os.chmod("/proc/self/fd/%d" % fd, 0o600)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _mode_activate(path: str) -> bool:
+    return bool(_activated_uid(path))
+
+
+def _activated_uid(path: str) -> str:
     if not path.startswith("/modes-active/"):
+        return ""
+    uid = urllib.parse.unquote(path[len("/modes-active/") :])
+    if not uid or "/" in uid:
+        return ""
+    return uid
+
+
+def _norm_num(value: object) -> object:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {str(key): _norm_num(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_norm_num(item) for item in value]
+    return value
+
+
+def _json_sig(value: object) -> str:
+    return json.dumps(_norm_num(value), sort_keys=True, separators=(",", ":"))
+
+
+def _is_lcd_row(setting: dict) -> bool:
+    return isinstance(setting.get("lcd"), dict) or str(setting.get("channel_name") or "") == "lcd"
+
+
+def _cooling_write(setting: dict) -> tuple[str, dict] | None:
+    """Daemon write for one fan, pump, or lighting row. LCD is not a write."""
+    if _is_lcd_row(setting):
+        return None
+    kinds: list[tuple[str, dict]] = []
+    profile = setting.get("profile_uid")
+    if profile:
+        kinds.append(("profile", {"profile_uid": str(profile)}))
+    if setting.get("speed_fixed") is not None:
+        kinds.append(("manual", {"speed_fixed": _norm_num(setting.get("speed_fixed"))}))
+    lighting = setting.get("lighting")
+    if isinstance(lighting, dict):
+        kinds.append(("lighting", lighting))
+    if setting.get("pwm_mode") is not None:
+        kinds.append(("pwm", {"pwm_mode": _norm_num(setting.get("pwm_mode"))}))
+    if len(kinds) != 1:
+        return None
+    return kinds[0]
+
+
+def _cooling_sig(setting: dict) -> str | None:
+    write = _cooling_write(setting)
+    if write is None:
+        return None
+    return write[0] + ":" + _json_sig(write[1])
+
+
+def _lcd_sig(setting: dict) -> str:
+    lcd = setting.get("lcd") if isinstance(setting.get("lcd"), dict) else {}
+    return _json_sig(lcd)
+
+
+def _setting_map(mode: dict) -> dict[tuple[str, str], dict]:
+    found: dict[tuple[str, str], dict] = {}
+    for pair in _mode_setting_rows(mode):
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        device = str(pair[0] or "")
+        rows = pair[1] if isinstance(pair[1], list) else []
+        for setting in rows:
+            if not isinstance(setting, dict):
+                continue
+            channel = str(setting.get("channel_name") or "")
+            if device and channel:
+                found[(device, channel)] = setting
+    return found
+
+
+def _cooling_only(rows: dict[tuple[str, str], dict]) -> dict[tuple[str, str], dict]:
+    return {key: row for key, row in rows.items() if not _is_lcd_row(row)}
+
+
+def _lcd_is_held(mode_map: dict[tuple[str, str], dict], live_map: dict[tuple[str, str], dict]) -> bool:
+    """True when activation will neither apply nor reset an LCD channel."""
+    mode_lcd = {key: row for key, row in mode_map.items() if _is_lcd_row(row)}
+    live_lcd = {key: row for key, row in live_map.items() if _is_lcd_row(row)}
+    if set(mode_lcd) != set(live_lcd):
         return False
-    uid = path[len("/modes-active/") :]
-    return bool(uid) and "/" not in uid
+    return all(_lcd_sig(row) == _lcd_sig(live_lcd[key]) for key, row in mode_lcd.items())
+
+
+def _cooling_preserved(original: dict[tuple[str, str], dict], saved: dict[tuple[str, str], dict]) -> bool:
+    for key, row in _cooling_only(original).items():
+        other = saved.get(key)
+        if not isinstance(other, dict) or _cooling_sig(other) != _cooling_sig(row):
+            return False
+    return True
+
+
+def _cooling_supported(mode_map: dict[tuple[str, str], dict]) -> bool:
+    for row in _cooling_only(mode_map).values():
+        if _cooling_sig(row) is None:
+            return False
+    return True
+
+
+def _device_uids() -> list[str] | None:
+    res = call("GET", "/devices", None)
+    if not res.get("ok"):
+        return None
+    body = res.get("body")
+    if isinstance(body, list):
+        devs = body
+    elif isinstance(body, dict):
+        devs = body.get("devices")
+    else:
+        devs = None
+    if not isinstance(devs, list):
+        return None
+    return [str(dev.get("uid")) for dev in devs if isinstance(dev, dict) and dev.get("uid")]
+
+
+def _live_setting_map(mode_map: dict[tuple[str, str], dict]) -> dict[tuple[str, str], dict] | None:
+    listed = _device_uids()
+    if listed is None:
+        return None
+    uids = list(dict.fromkeys(listed + [device for device, _channel in mode_map]))
+    found: dict[tuple[str, str], dict] = {}
+    for uid in uids:
+        res = call("GET", "/devices/" + urllib.parse.quote(uid, safe="") + "/settings", None)
+        if not res.get("ok"):
+            if int(res.get("status") or 0) == 404:
+                continue
+            return None
+        body = res.get("body") if isinstance(res.get("body"), dict) else {}
+        settings = body.get("settings")
+        if not isinstance(settings, list):
+            return None
+        for setting in settings:
+            if not isinstance(setting, dict):
+                continue
+            channel = str(setting.get("channel_name") or "")
+            if channel:
+                found[(uid, channel)] = setting
+    return found
+
+
+def _put_cooling(device: str, setting: dict) -> bool:
+    write = _cooling_write(setting)
+    channel = str(setting.get("channel_name") or "")
+    if write is None or not channel:
+        return False
+    tail, body = write
+    path = (
+        "/devices/"
+        + urllib.parse.quote(device, safe="")
+        + "/settings/"
+        + urllib.parse.quote(channel, safe="")
+        + "/"
+        + tail
+    )
+    result = call("PUT", path, body)
+    if result.get("ok"):
+        return True
+    sys.stderr.write(
+        "omaflow lcd: %s was not copied (%s)\n" % (channel, result.get("error") or result.get("status"))
+    )
+    return False
+
+
+def _apply_cooling_diffs(
+    mode_map: dict[tuple[str, str], dict],
+    live_map: dict[tuple[str, str], dict],
+) -> bool:
+    for (device, _channel), setting in mode_map.items():
+        if _is_lcd_row(setting):
+            continue
+        live = live_map.get((device, str(setting.get("channel_name") or "")))
+        if isinstance(live, dict) and _cooling_sig(live) == _cooling_sig(setting):
+            continue
+        if not _put_cooling(device, setting):
+            return False
+    return True
+
+
+def _snapshot_mode(uid: str) -> dict:
+    return call("PUT", "/modes/" + urllib.parse.quote(uid, safe="") + "/settings", {})
+
+
+def _keep_lcd_mode(uid: str) -> bool:
+    """Copy the live screen into this mode without replacing a fan or pump curve.
+
+    Activating a mode writes every saved channel. A stored orientation or
+    brightness turns the glass. The daemon skips a channel that already
+    matches and resets one the mode does not list, so the mode's LCD row
+    has to be the row already on the cooler. The only mode write copies
+    every current device setting, so it runs only when the fan and pump
+    rows already match. True means the activation leaves the screen alone.
+    """
+    if not uid:
+        return False
+    loaded = call("GET", "/modes/" + urllib.parse.quote(uid, safe=""), None)
+    mode = loaded.get("body") if loaded.get("ok") and isinstance(loaded.get("body"), dict) else None
+    if mode is None:
+        return False
+    mode_map = _setting_map(mode)
+    if not _cooling_supported(mode_map):
+        return False
+    live_map = _live_setting_map(mode_map)
+    if live_map is None:
+        return False
+    if _lcd_is_held(mode_map, live_map):
+        return True
+    if not _apply_cooling_diffs(mode_map, live_map):
+        return False
+    live_map = _live_setting_map(mode_map)
+    if live_map is None:
+        return False
+    if set(_cooling_only(mode_map)) != set(_cooling_only(live_map)):
+        return False
+    if not _cooling_preserved(mode_map, live_map):
+        return False
+    saved = _snapshot_mode(uid)
+    saved_mode = saved.get("body") if saved.get("ok") and isinstance(saved.get("body"), dict) else None
+    if saved_mode is None:
+        return False
+    saved_map = _setting_map(saved_mode)
+    mode_cooling = _cooling_only(mode_map)
+    if (
+        set(mode_cooling) != set(_cooling_only(saved_map))
+        or not _cooling_preserved(mode_map, saved_map)
+        or not _lcd_is_held(saved_map, live_map)
+    ):
+        sys.stderr.write("omaflow lcd: mode snapshot touched a fan curve\n")
+        # Snapshot again only when the device is back to this mode's curves.
+        if _apply_cooling_diffs(mode_map, saved_map):
+            repaired = _live_setting_map(mode_map)
+            if (
+                repaired is not None
+                and set(mode_cooling) == set(_cooling_only(repaired))
+                and _cooling_preserved(mode_map, repaired)
+            ):
+                _snapshot_mode(uid)
+        return False
+    sys.stderr.write("omaflow lcd: mode left the screen as it is\n")
+    return True
+
+
+def _keep_lcd(path: str) -> bool:
+    try:
+        return _keep_lcd_mode(_activated_uid(path))
+    except Exception as err:  # noqa: BLE001 — a failed pin must still let the mode apply
+        sys.stderr.write("omaflow lcd: %s\n" % err)
+        return False
+
+
+def _restore_lcd_after_mode(pinned: bool) -> None:
+    if pinned:
+        return
+    try:
+        restore_saved_lcd()
+    except Exception as err:  # noqa: BLE001 — the mode itself already applied
+        sys.stderr.write("omaflow lcd restore: %s\n" % err)
 
 
 def _theme_fields() -> tuple[str, str, str, str]:
@@ -2357,7 +2721,10 @@ def _request(method: str, path: str, body) -> dict:
                     parsed = {"raw": raw.decode("utf-8", "replace")[:400]}
             return {"ok": True, "status": res.status, "error": "", "body": parsed}
     except urllib.error.HTTPError as err:
-        detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
+        try:
+            detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
+        finally:
+            _close_http(err)
         return {"ok": False, "status": err.code, "error": detail or err.reason, "body": None}
     except urllib.error.URLError as err:
         return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
@@ -2488,14 +2855,36 @@ def _burst_steps(raw: object) -> list[tuple[str, str, object]] | None:
     return steps
 
 
+def _exchange_once(
+    conn: http.client.HTTPConnection,
+    token: str,
+    method: str,
+    path: str,
+    body: object,
+) -> dict:
+    try:
+        return _exchange(conn, path, token, method, body)
+    except Exception as err:  # noqa: BLE001 — the burst retries one dropped socket
+        try:
+            conn.close()
+        except OSError:
+            pass
+        try:
+            conn.connect()
+            return _exchange(conn, path, token, method, body)
+        except Exception as retry_err:  # noqa: BLE001
+            return {"ok": False, "status": 0, "error": str(retry_err or err), "body": None}
+
+
 def _run_burst(conn: http.client.HTTPConnection, steps: list[tuple[str, str, object]], token: str) -> dict:
     """Ordered requests on one connection. The first failure stops the rest."""
     results: list[dict] = []
     for method, path, body in steps:
-        try:
-            result = _exchange(conn, path, token, method, body)
-        except Exception as err:  # noqa: BLE001 — one dropped socket ends the burst
-            result = {"ok": False, "status": 0, "error": str(err), "body": None}
+        # Curve writes earlier in this burst stay in front of the screen copy.
+        pinned = method == "POST" and _keep_lcd(path)
+        result = _exchange_once(conn, token, method, path, body)
+        if result.get("ok") and method == "POST" and _mode_activate(path):
+            _restore_lcd_after_mode(pinned)
         results.append(result)
         if not result.get("ok"):
             return {
@@ -2598,18 +2987,21 @@ def watch() -> None:
                         block, buf = buf.split("\n\n", 1)
                         _parse_sse(block.replace("\r\n", "\n").replace("\r", "\n"))
         except urllib.error.HTTPError as err:
-            if err.code in (401, 403):
-                if auth_told != stamp:
-                    emit({"event": "down", "error": "unauthorized", "status": err.code})
-                    auth_told = stamp
-                _wait_token(stamp, 60)
-                continue
-            if err.code == 429:
-                emit({"event": "down", "error": "rate-limited", "status": 429})
-                _STOP.wait(rate_wait)
-                rate_wait = min(120.0, rate_wait * 2)
-                continue
-            emit({"event": "down", "error": "http %s" % err.code, "status": err.code})
+            try:
+                if err.code in (401, 403):
+                    if auth_told != stamp:
+                        emit({"event": "down", "error": "unauthorized", "status": err.code})
+                        auth_told = stamp
+                    _wait_token(stamp, 60)
+                    continue
+                if err.code == 429:
+                    emit({"event": "down", "error": "rate-limited", "status": 429})
+                    _STOP.wait(rate_wait)
+                    rate_wait = min(120.0, rate_wait * 2)
+                    continue
+                emit({"event": "down", "error": "http %s" % err.code, "status": err.code})
+            finally:
+                _close_http(err)
         except urllib.error.URLError as err:
             reason = err.reason
             if isinstance(reason, (TimeoutError, socket.timeout)):
@@ -2741,7 +3133,9 @@ def _handle(msg: dict) -> None:
         if op == "processes":
             try:
                 body = processes_snapshot()
-            except Exception:
+            except Exception as err:  # noqa: BLE001 — the client still gets a normal failure
+                sys.stderr.write("omaflow processes: %s\n" % err)
+                sys.stderr.flush()
                 emit({"id": msg.get("id"), "ok": False, "status": 0, "error": "processes failed", "body": None})
                 continue
             emit({"id": msg.get("id"), "ok": True, "status": 200, "error": "", "body": body})
@@ -2860,12 +3254,10 @@ def _handle(msg: dict) -> None:
         if method not in _METHODS or path is None:
             emit({"id": msg.get("id"), "ok": False, "status": 0, "error": "request refused", "body": None})
             continue
+        pinned = method == "POST" and _keep_lcd(path)
         result = call(method, path, msg.get("body"))
         if result.get("ok") and method == "POST" and _mode_activate(path):
-            try:
-                restore_saved_lcd()
-            except Exception as err:  # noqa: BLE001 — the mode itself already applied
-                sys.stderr.write("omaflow lcd restore: %s\n" % err)
+            _restore_lcd_after_mode(pinned)
         result["id"] = msg.get("id")
         emit(result)
 

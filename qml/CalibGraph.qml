@@ -21,11 +21,17 @@ Item {
   onWidthChanged: canvas.requestPaint()
   onHeightChanged: canvas.requestPaint()
 
+  function sampleNum(value) {
+    if (value === null || value === undefined || value === "") return NaN
+    var n = Number(value)
+    return isFinite(n) ? n : NaN
+  }
+
   readonly property real topRpm: {
     var src = samples || []
     var max = 0
     for (var i = 0; i < src.length; i++) {
-      var rpm = Number(src[i] && src[i].rpm)
+      var rpm = sampleNum(src[i] && src[i].rpm)
       if (isFinite(rpm) && rpm > max) max = rpm
     }
     return max
@@ -43,15 +49,17 @@ Item {
       var src = root.samples || []
       var pts = []
       var i
+      var count = 0
       for (i = 0; i < src.length; i++) {
         var row = src[i]
-        if (!row) continue
-        var duty = Number(row.duty)
-        var rpm = Number(row.rpm)
-        if (!isFinite(duty) || !isFinite(rpm)) continue
+        if (!row) { pts.push(null); continue }
+        var duty = root.sampleNum(row.duty)
+        var rpm = root.sampleNum(row.rpm)
+        if (!isFinite(duty) || !isFinite(rpm)) { pts.push(null); continue }
         pts.push({ duty: duty, rpm: rpm })
+        count++
       }
-      if (pts.length < 2) return
+      if (count < 2) return
 
       var padL = 2
       var padR = 2
@@ -75,14 +83,16 @@ Item {
       }
 
       ctx.beginPath()
-      for (i = 0; i < pts.length; i++) {
-        var x = padL + (Math.max(0, Math.min(100, pts[i].duty)) / 100) * plotW
-        var y = padT + (1 - (pts[i].rpm / maxRpm)) * plotH
-        if (i === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
-      }
       ctx.strokeStyle = root.stroke
       ctx.lineWidth = 1.8
+      var started = false
+      for (i = 0; i < pts.length; i++) {
+        if (!pts[i]) { started = false; continue }
+        var x = padL + (Math.max(0, Math.min(100, pts[i].duty)) / 100) * plotW
+        var y = padT + (1 - (pts[i].rpm / maxRpm)) * plotH
+        if (!started) { ctx.moveTo(x, y); started = true }
+        else ctx.lineTo(x, y)
+      }
       ctx.stroke()
     }
   }

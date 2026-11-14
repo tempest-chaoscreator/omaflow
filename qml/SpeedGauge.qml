@@ -49,13 +49,15 @@ Item {
         ctx.arc(cx, cy, radius, start, start + sweep * span, false)
         ctx.stroke()
       }
-      var ang = start + sweep * span
-      ctx.strokeStyle = root.foreground
-      ctx.lineWidth = Math.max(1, Style.space(2))
-      ctx.beginPath()
-      ctx.moveTo(cx, cy)
-      ctx.lineTo(cx + Math.cos(ang) * (radius - Style.space(2)), cy + Math.sin(ang) * (radius - Style.space(2)))
-      ctx.stroke()
+      if (root.known) {
+        var ang = start + sweep * span
+        ctx.strokeStyle = root.foreground
+        ctx.lineWidth = Math.max(1, Style.space(2))
+        ctx.beginPath()
+        ctx.moveTo(cx, cy)
+        ctx.lineTo(cx + Math.cos(ang) * (radius - Style.space(2)), cy + Math.sin(ang) * (radius - Style.space(2)))
+        ctx.stroke()
+      }
       ctx.fillStyle = root.foreground
       ctx.beginPath()
       ctx.arc(cx, cy, Math.max(2, Style.space(2)), 0, Math.PI * 2, false)

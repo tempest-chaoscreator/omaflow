@@ -93,6 +93,8 @@ Item {
   property int textSize: 12
   property bool showBar: true
   property bool watchProcesses: false
+  // Bumped only after a process poll is accepted. A failed send leaves it alone.
+  property int processEpoch: 0
   property var processCpu: []
   property var processGpu: []
   property real processCpuTotal: 0
@@ -143,9 +145,10 @@ Item {
   function dispatch(msg, done, report) {
     var id = track(done)
     msg.id = id
-    if (send(msg)) return
+    if (send(msg)) return true
     dropPending(id)
     if (report && done) done({ ok: false, status: 0, error: "not connected" })
+    return false
   }
 
   // Fire-and-forget. A failed send does not call back and does not change connection.
@@ -2078,13 +2081,18 @@ Item {
     } catch (e) {
       return
     }
-    if (!obj || typeof obj !== "object") return
-    var face = String(obj.face || "liquid")
-    if (!lcdFaceKnown(face)) face = "liquid"
-    lcdFace = face
-    lcdPicture = obj.picture !== undefined ? String(obj.picture || "") : ""
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return
+    if (obj.face) {
+      var face = String(obj.face)
+      // An unknown face stays where it is. Substituting Liquid is what
+      // painted over a face this build does not know.
+      if (lcdFaceKnown(face)) {
+        lcdFace = face
+        if (face === "omarchy-time") lcdClockWait = msUntilNextMinute()
+      }
+    }
+    if (obj.picture !== undefined) lcdPicture = String(obj.picture || "")
     if (obj.live !== undefined) lcdLive = obj.live === true
-    if (face === "omarchy-time") lcdClockWait = msUntilNextMinute()
   }
 
   function lcdNote(res) {
@@ -2194,7 +2202,9 @@ Item {
   }
 
   function loadProcesses() {
-    dispatch({ op: "processes" }, function(res) {
+    var epoch = processEpoch + 1
+    var accepted = dispatch({ op: "processes" }, function(res) {
+      if (epoch !== root.processEpoch) return
       if (!res || !res.ok) return
       var body = res.body || ({})
       var cpuTotal = Number(body.cpuTotal)
@@ -2205,6 +2215,7 @@ Item {
       processGpuOk = body.gpuOk !== false
       processGpu = body.gpu || []
     })
+    if (accepted) processEpoch = epoch
   }
 
   function sameReading(a, b) {

@@ -124,8 +124,8 @@ Column {
     function placeDevice(group) {
       var rowY = y
       var spinning = activeOf(group).length > 0
-      if (spinning) out.push({ kind: "group", uid: group.uid, x: 0, y: rowY })
-      out.push({ kind: "eye", uid: group.uid, x: spinning ? 1 : 0, y: rowY })
+      out.push({ kind: "eye", uid: group.uid, x: 0, y: rowY })
+      if (spinning) out.push({ kind: "group", uid: group.uid, x: 1, y: rowY })
       y += 1
       placeFans(group.shown)
       if ((group.hidden || []).length) place({ kind: "hidden", uid: group.uid })

@@ -168,6 +168,10 @@ Panel {
 
   function applySelected() {
     if (!service || !mode) return
+    if (service.calibrationBusy) {
+      service.lastError = "A fan is being calibrated. Apply waits until that sweep finishes."
+      return
+    }
     var jobs = jobsFor(mode)
     if (!jobs) {
       service.lastError = mode.name + " has no channels. Add one in Omaflow before applying."

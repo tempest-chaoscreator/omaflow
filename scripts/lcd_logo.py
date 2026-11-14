@@ -16,6 +16,7 @@ import hashlib
 import math
 import os
 import re
+import stat
 import time
 from pathlib import Path
 
@@ -40,6 +41,9 @@ _BLUR_PX = 3.5
 _CLOCK_SCALE = 88 / 320
 
 _CACHE = Path.home() / ".cache" / "omaflow" / "lcd"
+# Plates are at most the 1280 preview. A larger file is not one of ours.
+_PLATE_SIDE = 4096
+_PLATE_LIMIT = 16_000_000
 _FONT_CANDIDATES = (
     "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Bold.ttf",
     "/usr/share/fonts/TTF/JetBrainsMono-Bold.ttf",
@@ -260,6 +264,122 @@ def _cache_path(
     return _CACHE / (digest + ".png")
 
 
+def _store_plate(path: Path, image) -> None:
+    """Replace one cached plate. A crash keeps the previous file.
+
+    The temp file is created with O_NOFOLLOW, and rename replaces a symlink
+    instead of writing through it.
+    """
+    import io
+
+    buf = io.BytesIO()
+    image.save(buf, "PNG")
+    payload = buf.getvalue()
+    tmp = path.with_name(".%s.%s.%s.tmp" % (path.name, os.getpid(), time.time_ns()))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            wrote = os.write(fd, view)
+            if wrote <= 0:
+                raise OSError("short write")
+            view = view[wrote:]
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+    except Exception:
+        os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _load_cached(path: Path, clear: bool):
+    """Loaded plate, or None. A symlink is a miss, and so is a torn PNG."""
+    from PIL import Image
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_size <= 0
+        or info.st_size > _PLATE_LIMIT
+    ):
+        os.close(fd)
+        return None
+    opened_dev, opened_ino = info.st_dev, info.st_ino
+    try:
+        handle = os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        return None
+    opened = None
+    cached = None
+    try:
+        opened = Image.open(handle)
+        if opened.width > _PLATE_SIDE or opened.height > _PLATE_SIDE:
+            return None
+        cached = opened.convert("RGBA" if clear else "RGB")
+        cached.load()
+        if cached is opened:
+            ready = opened.copy()
+        else:
+            ready = cached
+            cached = None
+        return ready
+    except (OSError, ValueError) as err:
+        if cached is not None and cached is not opened:
+            cached.close()
+        # A decode error has no errno. Permission and disk errors do, and
+        # that file is left for the next open. A symlink or a replaced
+        # inode is not unlinked.
+        if not isinstance(err, OSError) or err.errno is None:
+            try:
+                current = path.lstat()
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and current.st_dev == opened_dev
+                    and current.st_ino == opened_ino
+                ):
+                    path.unlink()
+            except OSError:
+                pass
+        return None
+    finally:
+        if opened is not None:
+            opened.close()
+        handle.close()
+
+
 def _cached_plate(kind: str, width: int, height: int, shape: str, accent: str, clear: bool = False):
     """Upright plate. The clock and the rotation are not part of it.
 
@@ -270,12 +390,10 @@ def _cached_plate(kind: str, width: int, height: int, shape: str, accent: str, c
 
     radius = _blur_radius(width, height) if kind == "blur" else 0.0
     path = _cache_path(kind, width, height, shape, accent, radius, clear)
-    if path.is_file():
-        opened = Image.open(path)
-        try:
-            return opened.convert("RGBA" if clear else "RGB")
-        finally:
-            opened.close()
+    # A symlink or a torn PNG is a miss. The plate is rebuilt.
+    cached = _load_cached(path, clear)
+    if cached is not None:
+        return cached
     bands = band_colors(accent)
     side = _logo_side(width, height, shape)
     mask = _raster_mask(side)
@@ -306,9 +424,12 @@ def _cached_plate(kind: str, width: int, height: int, shape: str, accent: str, c
     origin = ((width - sprite.width) // 2, (height - sprite.height) // 2)
     canvas.paste(sprite, origin, sprite)
     sprite.close()
-    _CACHE.mkdir(parents=True, exist_ok=True)
-    canvas.save(path, "PNG")
-    os.chmod(path, 0o600)
+    try:
+        _CACHE.mkdir(parents=True, exist_ok=True)
+        _store_plate(path, canvas)
+    except Exception:
+        canvas.close()
+        raise
     return canvas
 
 
@@ -355,28 +476,33 @@ def bake_png(image, angle: int, fill, optimize: bool = False) -> bytes:
     """Turn clockwise by `angle`, encode PNG, and close every image involved.
 
     Angle 0 leaves the pixels alone. `optimize` is only for the custom picture.
+    A failed encode still closes the image.
     """
     import io
 
-    turned = int(angle) % 360
-    if turned:
-        from PIL import Image
+    current = image
+    try:
+        turned = int(angle) % 360
+        if turned:
+            from PIL import Image
 
-        spun = image.rotate(
-            -turned,
-            resample=Image.Resampling.BICUBIC,
-            expand=False,
-            fillcolor=fill,
-        )
-        image.close()
-        image = spun
-    buf = io.BytesIO()
-    if optimize:
-        image.save(buf, "PNG", optimize=True)
-    else:
-        image.save(buf, "PNG")
-    image.close()
-    return buf.getvalue()
+            spun = current.rotate(
+                -turned,
+                resample=Image.Resampling.BICUBIC,
+                expand=False,
+                fillcolor=fill,
+            )
+            previous = current
+            current = spun
+            previous.close()
+        buf = io.BytesIO()
+        if optimize:
+            current.save(buf, "PNG", optimize=True)
+        else:
+            current.save(buf, "PNG")
+        return buf.getvalue()
+    finally:
+        current.close()
 
 
 def render_logo_png(
