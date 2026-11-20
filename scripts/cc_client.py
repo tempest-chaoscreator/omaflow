@@ -66,12 +66,15 @@ FACTORY_PASSWORD = "coolAdmin"
 _STOP = threading.Event()
 _JOBS: queue.Queue = queue.Queue()
 _RENDER: queue.Queue = queue.Queue()
+_PREVIEW: queue.Queue = queue.Queue()
 _REPLIES: queue.Queue = queue.Queue()
 _STATUS_LOCK = threading.Lock()
 _PENDING_STATUS: dict[str, str | None] = {"line": None}
 _WRITER_WAKE = threading.Event()
 _RENDER_THREAD: threading.Thread | None = None
-_LCD_OPS = {"lcd-keep", "lcd-face", "lcd-preview", "lcd-image"}
+# The cooler upload stays on one thread. The window preview has its own queue
+# so a face, a crop, or a turn is not stuck behind that USB write.
+_LCD_OPS = {"lcd-keep", "lcd-face", "lcd-image"}
 _BURST_CAP = 160
 
 
@@ -1379,7 +1382,9 @@ def _render_picture_png(
             canvas.close()
             mask.close()
             canvas = masked
-    return lcd_logo.bake_png(canvas, angle, fill, optimize=True)
+    # The cooler file is compressed once. The window preview is thrown away on
+    # the next click, and optimize is most of the wait on a large plate.
+    return lcd_logo.bake_png(canvas, angle, fill, optimize=not clear)
 
 
 def render_picture_png(
@@ -1818,6 +1823,7 @@ def lcd_keep(msg: dict, shown: bool = False) -> dict:
         result = push_lcd_image(
             device, channel, brightness, face, angle, ink, ink2, primary, secondary,
             shape, width, height, device_name, picture_path, picture_scale,
+            mark,
         )
     except Exception as err:
         if shown:
@@ -1905,6 +1911,19 @@ def apply_lcd_face(msg: dict) -> dict:
     body = result.get("body") if isinstance(result.get("body"), dict) else {}
     if result.get("ok") and not body.get("skipped"):
         return result
+    # Off landed while this face was drawing. The upload already blanked the
+    # glass. Writing the old live flag back would turn it on again.
+    if body.get("reason") == "lcd-off":
+        return {
+            "ok": False,
+            "status": 409,
+            "error": "",
+            "body": {"skipped": True, "reason": "lcd-off"},
+        }
+    # A newer plate claimed the lease while this one was drawing. Putting the
+    # old face back would overwrite that plate in the shared view.
+    if body.get("reason") == "replaced":
+        return result
 
     def restore_view() -> None:
         if had_face:
@@ -1927,8 +1946,12 @@ def apply_lcd_face(msg: dict) -> dict:
 
 
 def _preview_pixels(width: int, height: int) -> tuple[int, int]:
-    """Largest plate the dial can show. The cooler still receives its own size."""
-    long_side = 1280
+    """Dial plate. The cooler still receives its own size.
+
+    640 is twice a round 320 glass. The old 1280 plate was larger than the dial
+    and the window waited on its decode.
+    """
+    long_side = 640
     w = max(1, int(width or 320))
     h = max(1, int(height or 320))
     scale = long_side / max(w, h)
@@ -1982,6 +2005,91 @@ def lcd_preview(msg: dict) -> dict:
     return {"ok": True, "status": 200, "error": "", "body": {"path": str(path)}}
 
 
+def _blank_lcd(device: str, channel: str, brightness: int) -> dict:
+    """Turn the glass off. The saved face stays in the view for the next show."""
+    path = (
+        "/devices/"
+        + urllib.parse.quote(device, safe="")
+        + "/settings/"
+        + urllib.parse.quote(channel, safe="")
+        + "/lcd"
+    )
+    return call("PUT", path, {
+        "brightness": max(0, min(100, int(brightness))),
+        "orientation": 0,
+        "colors": [],
+        "mode": "none",
+    })
+
+
+def _lcd_locked_send(
+    expect_mark: str | None,
+    mark: str,
+    device: str,
+    channel: str,
+    brightness: int,
+    send,
+) -> dict:
+    """One image write at a time for the window and the chip.
+
+    A keep that lost the lease while it was drawing does not touch the glass.
+    An image that finishes after Off blanks the glass again. The lease file is
+    updated while the lock is held, so this does not call lcd_remember.
+    """
+    try:
+        LCD_LEASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(LCD_LOCK_PATH, _nofollow_flags(os.O_RDWR | os.O_CREAT), 0o600)
+    except OSError:
+        return send()
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return send()
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        parsed, state = _read_private_state(LCD_LEASE_PATH)
+        current = ""
+        if state == "ok" and isinstance(parsed, dict):
+            current = str(parsed.get("mark") or "")
+        if expect_mark and current and current != expect_mark:
+            return {
+                "ok": True,
+                "status": 200,
+                "error": "",
+                "body": {"skipped": True, "reason": "replaced"},
+            }
+        result = send()
+        if not result.get("ok"):
+            return result
+        view = _lcd_view()
+        if isinstance(view, dict) and view.get("live") is False:
+            blanked = _blank_lcd(device, channel, brightness)
+            if not blanked.get("ok"):
+                return blanked
+            _write_private(LCD_LEASE_PATH, b'{"mark":"","at":0}')
+            return {
+                "ok": True,
+                "status": 200,
+                "error": "",
+                "body": {"skipped": True, "reason": "lcd-off"},
+            }
+        if mark:
+            _write_private(
+                LCD_LEASE_PATH,
+                json.dumps({"mark": mark, "at": time.time()}).encode("utf-8"),
+            )
+        return result
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
 def push_lcd_image(
     device: str,
     channel: str,
@@ -1998,6 +2106,7 @@ def push_lcd_image(
     device_name: str = "",
     picture: str = "",
     scale: object = None,
+    expect_mark: str | None = None,
 ) -> dict:
     token = read_token()
     if not token:
@@ -2013,6 +2122,30 @@ def push_lcd_image(
         used_scale = _picture_scale(
             scale if scale is not None else (_lcd_view() or {}).get("pictureScale")
         )
+        picture_id = _picture_ident(picture or _picture_path_from_view())
+        if not picture_id:
+            return {"ok": False, "status": 0, "error": "picture unreadable", "body": None}
+    # Claim before the slow draw. A show already passed its mark. A page push
+    # has not, and writing the mark after the upload lets an older plate win.
+    mark = _upload_mark(
+        painted,
+        int(width or 0),
+        int(height or 0),
+        str(face or "liquid"),
+        str(accent or ""),
+        str(accent2 or ""),
+        str(temp_text or "—"),
+        str(temp2 or ""),
+        level,
+        int(angle or 0) % 360,
+        picture_id,
+        used_scale,
+    )
+    claimed_here = not expect_mark
+    if claimed_here:
+        lcd_remember(mark)
+        expect_mark = mark
+    if str(face or "") == "picture":
         rendered = render_picture_png(
             picture or _picture_path_from_view(),
             int(width or 0) or 320,
@@ -2022,8 +2155,10 @@ def push_lcd_image(
             used_scale,
         )
         if not rendered:
+            if claimed_here:
+                lcd_release(mark)
             return {"ok": False, "status": 0, "error": "picture unreadable", "body": None}
-        png, picture_id = rendered
+        png = rendered[0]
     else:
         png = render_lcd_png(
             face or "liquid",
@@ -2059,45 +2194,30 @@ def push_lcd_image(
         },
         method="PUT",
     )
-    try:
-        with _open(req, 30) as res:
-            raw = res.read()
-            parsed = None
-            if raw:
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except json.JSONDecodeError:
-                    parsed = {"raw": raw.decode("utf-8", "replace")[:400]}
-            try:
-                lcd_remember(
-                    _upload_mark(
-                        painted,
-                        int(width or 0),
-                        int(height or 0),
-                        str(face or "liquid"),
-                        str(accent or ""),
-                        str(accent2 or ""),
-                        str(temp_text or "—"),
-                        str(temp2 or ""),
-                        level,
-                        int(angle or 0) % 360,
-                        picture_id,
-                        used_scale,
-                    )
-                )
-            except OSError:
-                pass
-            return {"ok": True, "status": res.status, "error": "", "body": parsed}
-    except urllib.error.HTTPError as err:
+
+    def send() -> dict:
         try:
-            detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
-        finally:
-            _close_http(err)
-        return {"ok": False, "status": err.code, "error": detail or str(err.reason), "body": None}
-    except urllib.error.URLError as err:
-        return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
-    except Exception as err:  # noqa: BLE001
-        return {"ok": False, "status": 0, "error": str(err), "body": None}
+            with _open(req, 30) as res:
+                raw = res.read()
+                parsed = None
+                if raw:
+                    try:
+                        parsed = json.loads(raw.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        parsed = {"raw": raw.decode("utf-8", "replace")[:400]}
+                return {"ok": True, "status": res.status, "error": "", "body": parsed}
+        except urllib.error.HTTPError as err:
+            try:
+                detail = _error_detail(err.read().decode("utf-8", "replace")[:400])
+            finally:
+                _close_http(err)
+            return {"ok": False, "status": err.code, "error": detail or str(err.reason), "body": None}
+        except urllib.error.URLError as err:
+            return {"ok": False, "status": 0, "error": str(err.reason), "body": None}
+        except Exception as err:  # noqa: BLE001
+            return {"ok": False, "status": 0, "error": str(err), "body": None}
+
+    return _lcd_locked_send(expect_mark, mark, device, channel, level, send)
 
 
 def _safe_path(path: str) -> str | None:
@@ -2646,6 +2766,8 @@ def restore_saved_lcd() -> None:
     if view is None:
         give_up("saved lcd view is unreadable")
         return
+    if view.get("live") is False:
+        return
     devices = call("GET", "/devices", None)
     if not devices.get("ok"):
         give_up(devices.get("error") or "device list rejected")
@@ -3167,10 +3289,10 @@ def lcd_face_check() -> None:
             image.save(out / ("temp-%s-%sx%s.png" % (face, width, height)))
             image.close()
     preview = _preview_pixels(320, 320)
-    if preview != (1280, 1280):
+    if preview != (640, 640):
         raise SystemExit("round preview is %s" % (preview,))
     tall = _preview_pixels(240, 320)
-    if tall != (960, 1280):
+    if tall != (480, 640):
         raise SystemExit("portrait preview is %s" % (tall,))
     quiet = _upload_mark("round", 320, 320, "omarchy", "#7fbbb3", "", "10", "20", 50, 0)
     hot = _upload_mark("round", 320, 320, "omarchy", "#7fbbb3", "", "99", "88", 50, 0)
@@ -3388,6 +3510,9 @@ def _http_worker() -> None:
             continue
         if not isinstance(item, dict):
             continue
+        if item.get("op") == "lcd-preview":
+            _PREVIEW.put(item)
+            continue
         if item.get("op") in _LCD_OPS:
             _RENDER.put(item)
             continue
@@ -3412,11 +3537,52 @@ def _render_worker() -> None:
             emit({"id": msg.get("id"), "ok": False, "status": 0, "error": str(err), "body": None})
 
 
+def _emit_stale(msg: object) -> None:
+    if not isinstance(msg, dict):
+        return
+    emit({
+        "id": msg.get("id"),
+        "ok": True,
+        "status": 200,
+        "error": "",
+        "body": {"stale": True},
+    })
+
+
+def _preview_worker() -> None:
+    """Draw the latest dial plate. Older clicks are answered and not drawn."""
+    while not _STOP.is_set():
+        msg = _PREVIEW.get()
+        if msg is None:
+            break
+        batch = [msg]
+        while True:
+            try:
+                nxt = _PREVIEW.get_nowait()
+            except queue.Empty:
+                break
+            if nxt is None:
+                for old in batch:
+                    _emit_stale(old)
+                return
+            batch.append(nxt)
+        for old in batch[:-1]:
+            _emit_stale(old)
+        latest = batch[-1]
+        if not isinstance(latest, dict):
+            continue
+        try:
+            _handle(latest)
+        except Exception as err:  # noqa: BLE001
+            emit({"id": latest.get("id"), "ok": False, "status": 0, "error": str(err), "body": None})
+
+
 def _stop_workers() -> None:
     _STOP.set()
     _WRITER_WAKE.set()
     _JOBS.put(None)
     _RENDER.put(None)
+    _PREVIEW.put(None)
 
 
 def main() -> None:
@@ -3429,6 +3595,7 @@ def main() -> None:
     threading.Thread(target=watch, name="cc-sse", daemon=True).start()
     threading.Thread(target=_http_worker, name="cc-http", daemon=True).start()
     threading.Thread(target=_render_worker, name="cc-lcd", daemon=True).start()
+    threading.Thread(target=_preview_worker, name="cc-lcd-preview", daemon=True).start()
     emit({"event": "hello", "token": _token_file_state(TOKEN_PATH) == "ok"})
     for line in sys.stdin:
         if _STOP.is_set():

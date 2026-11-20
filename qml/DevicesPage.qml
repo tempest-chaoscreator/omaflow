@@ -148,14 +148,20 @@ Column {
       y += 1
       out.push(item)
     }
-    function placeFans(rows) {
+    function placeFans(rows, eyeOnRight) {
       var list = rows || []
       var n
       for (n = 0; n < list.length; n++) {
         if (!list[n] || !list[n].key) continue
         var rowY = y
-        out.push({ kind: "channelEye", key: list[n].key, x: 0, y: rowY })
-        out.push({ kind: "fan", key: list[n].key, x: 1, y: rowY })
+        // A quiet device draws the eye on the right and calibrate on its left.
+        if (eyeOnRight) {
+          out.push({ kind: "fan", key: list[n].key, x: 0, y: rowY })
+          out.push({ kind: "channelEye", key: list[n].key, x: 1, y: rowY })
+        } else {
+          out.push({ kind: "channelEye", key: list[n].key, x: 0, y: rowY })
+          out.push({ kind: "fan", key: list[n].key, x: 1, y: rowY })
+        }
         y += 1
       }
     }
@@ -168,16 +174,20 @@ Column {
       var openRows = shownOpen(group.shown)
       var tuckedRows = deviceTucked(group)
       var idleRows = deviceIdle(group)
-      placeFans(openRows)
+      placeFans(openRows, !spinning)
       if (tuckedRows.length) {
         place({ kind: "blockFold", key: "d:" + group.uid })
-        if (openedBlocks["d:" + group.uid] === true) placeFans(tuckedRows)
+        if (openedBlocks["d:" + group.uid] === true) placeFans(tuckedRows, !spinning)
       }
       if (idleRows.length) place({ kind: "hidden", uid: group.uid })
-      if (opened[group.uid] === true) placeFans(idleRows)
+      if (opened[group.uid] === true) placeFans(idleRows, !spinning)
     }
     function placeShared(card) {
-      if (jobsFor(card.rows).length) place({ kind: "shared", id: card.id })
+      // Calibrate Group is on the right edge, above the channel calibrate.
+      if (jobsFor(card.rows).length) {
+        out.push({ kind: "shared", id: card.id, x: 1, y: y })
+        y += 1
+      }
       var moving = sharedOpen(card.rows)
       var tucked = sharedTucked(card.rows)
       var still = sharedIdle(card.rows)
@@ -189,7 +199,11 @@ Column {
       if (still.length) place({ kind: "groupFold", id: card.id })
       if (opened[card.id] === true) placeFans(still)
     }
-    if (jobsFor(everyActive()).length) place({ kind: "all" })
+    // Calibrate All sits on the right of the page title.
+    if (jobsFor(everyActive()).length) {
+      out.push({ kind: "all", x: 1, y: y })
+      y += 1
+    }
     var order = sections
     var s
     var i

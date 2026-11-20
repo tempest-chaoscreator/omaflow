@@ -148,6 +148,32 @@ Panel {
     return true
   }
 
+  // The curve editor raises the floor across a shared group only. Two
+  // channels that merely store the same profile keep the first row's floor,
+  // so Apply does not rewrite a curve that was not edited.
+  function groupFor(key) {
+    var groups = service && service.groups ? service.groups : []
+    var i
+    var m
+    for (i = 0; i < groups.length; i++) {
+      var list = groups[i] && groups[i].members ? groups[i].members : []
+      for (m = 0; m < list.length; m++) if (list[m] === key) return groups[i]
+    }
+    return null
+  }
+
+  function floorFor(row, members) {
+    var floor = row ? (Number(row.minDuty) || 0) : 0
+    var shared = row ? groupFor(row.key) : null
+    if (!shared) return floor
+    var list = shared.members || []
+    var i
+    for (i = 0; i < members.length; i++) {
+      if (list.indexOf(members[i].key) >= 0) floor = Math.max(floor, Number(members[i].minDuty) || 0)
+    }
+    return floor
+  }
+
   // Null when the mode has no channels. An empty list still runs the mode.
   function jobsFor(mode) {
     var members = Cc.modeMembers(mode, service.channels, service.profiles)
@@ -172,7 +198,11 @@ Panel {
       }
       if (!points || points.length < 2) continue
       seen[row.profileUid] = true
-      jobs.push({ profileUid: row.profileUid, points: points, minDuty: row.minDuty || 0 })
+      jobs.push({
+        profileUid: row.profileUid,
+        points: points,
+        minDuty: floorFor(row, members)
+      })
     }
     return jobs
   }

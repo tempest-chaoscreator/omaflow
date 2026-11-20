@@ -357,6 +357,9 @@ def _public(snap: dict) -> dict:
         "gpu": gpu,
         "gpuTotal": gpu_total,
         "gpuOk": snap.get("gpuOk") is not False,
+        # The worker writes gpuTotal only after nvidia-smi returns a number.
+        # A missing key is not a measured 0.
+        "gpuKnown": "gpuTotal" in snap,
     }
 
 

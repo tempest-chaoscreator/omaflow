@@ -672,11 +672,11 @@ Column {
         Text {
           width: parent.width
           text: {
-            // The process header is nvidia-smi utilization. The daemon's
-            // "GPU Load" channel is a different sensor and was drawing 0%
-            // beside a 43% header.
+            // The process header is nvidia-smi utilization, after a sample
+            // has reported it. Until then the daemon "GPU Load" sensor stays.
+            // That sensor was drawing 0% beside a 43% header once a sample existed.
             var load = NaN
-            if (root.service && root.service.processGpuOk !== false)
+            if (root.service && root.service.processGpuKnown && root.service.processGpuOk !== false)
               load = Number(root.service.processGpuTotal)
             if (!isFinite(load)) {
               var sensor = root.num(root.temps.gpuLoad)

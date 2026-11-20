@@ -8,6 +8,7 @@ import "CcMap.js" as Cc
 import "Marks.js" as Marks
 import "Nav.js" as Nav
 import "RepoPath.js" as Repo
+import "Wheel.js" as Wheel
 
 // Daemon, AIO LCD, window, curves, and alerts. Each subject is one bordered box.
 Column {
@@ -216,13 +217,7 @@ Column {
     if (!wheel) return 0
     if (wheel.phase === Qt.ScrollBegin) textWheel = 0
     if (wheel.phase === Qt.ScrollMomentum || wheel.phase === Qt.ScrollEnd) return 0
-    var angle = wheel.angleDelta ? wheel.angleDelta.y : 0
-    if (angle) return angle > 0 ? 1 : -1
-    var pixel = wheel.pixelDelta ? wheel.pixelDelta.y : 0
-    var phase = wheel.phase
-    var gesture = phase === Qt.ScrollBegin || phase === Qt.ScrollUpdate
-    if (!(gesture && pixel)) return 0
-    var next = textWheel + pixel
+    var next = textWheel + Wheel.deltaY(wheel)
     var steps = 0
     while (next >= 64) { steps += 1; next -= 64 }
     while (next <= -64) { steps -= 1; next += 64 }
@@ -976,7 +971,7 @@ Column {
       bordered: true
       selected: root.service && root.service.textFollow === false
       foreground: root.fg
-      accent: root.accent
+      accent: root.aimed("textFollow", 0) ? root.accent : root.fg
       fontFamily: root.fontFamily
       fontSize: Style.font.caption
       onClicked: {

@@ -88,6 +88,25 @@ Column {
     return keys
   }
   readonly property var spinning: service ? Cc.spinningChannels(service.channels, memberKeys) : []
+  readonly property var parked: service ? Cc.parkedChannels(service.channels, memberKeys) : []
+  function outsideRow(ch) {
+    return {
+      key: ch.key,
+      deviceUid: ch.deviceUid,
+      name: ch.name,
+      label: ch.label,
+      deviceName: ch.deviceName,
+      rpm: ch.rpm,
+      isPump: ch.isPump,
+      deviceType: ch.deviceType || "",
+      minDuty: ch.minDuty,
+      profileUid: "",
+      profileName: "",
+      points: [],
+      fixed: null,
+      inMode: false
+    }
+  }
   readonly property var rows: {
     var out = []
     var i
@@ -96,25 +115,8 @@ Column {
       row.inMode = true
       out.push(row)
     }
-    for (i = 0; i < spinning.length; i++) {
-      var ch = spinning[i]
-      out.push({
-        key: ch.key,
-        deviceUid: ch.deviceUid,
-        name: ch.name,
-        label: ch.label,
-        deviceName: ch.deviceName,
-        rpm: ch.rpm,
-        isPump: ch.isPump,
-        deviceType: ch.deviceType || "",
-        minDuty: ch.minDuty,
-        profileUid: "",
-        profileName: "",
-        points: [],
-        fixed: null,
-        inMode: false
-      })
-    }
+    for (i = 0; i < spinning.length; i++) out.push(outsideRow(spinning[i]))
+    for (i = 0; i < parked.length; i++) out.push(outsideRow(parked[i]))
     return out
   }
   readonly property var modeGroups: {
@@ -286,11 +288,21 @@ Column {
         var list = card.rows || []
         var folded = cardFolded(card)
         var baseY = 1 + cardRow * 6 + c * 3
+        // Folded title row, left to right: show-again, link, chevron.
+        // The chevron sits on the right edge, so its x stays above the link.
+        if (cardConcealed(card)) {
+          out.push({
+            kind: "reveal",
+            key: shelfKey(card),
+            x: cardCol * 2 + (folded ? -0.75 : 1.25),
+            y: baseY
+          })
+        }
         if (cardShelved(card)) {
           out.push({
             kind: "shelf",
             key: shelfKey(card),
-            x: cardCol * 2 + (folded ? 0 : 0.25),
+            x: cardCol * 2 + (folded ? 1.5 : 0.25),
             y: folded ? baseY : baseY - 0.4
           })
         }
@@ -310,7 +322,7 @@ Column {
           out.push({
             kind: "link",
             uid: card.uid,
-            x: cardCol * 2 + 1.5,
+            x: cardCol * 2 + (folded ? 0 : 1.5),
             y: baseY
           })
         }
@@ -902,6 +914,8 @@ Column {
       selectRow(item.key)
     } else if (item.kind === "link") {
       toggleLink(item.uid)
+    } else if (item.kind === "reveal") {
+      revealCard(cardByShelf(item.key))
     } else if (item.kind === "shelf") {
       toggleShelf(item.key)
     } else if (item.kind === "apply") {
@@ -946,6 +960,24 @@ Column {
   function aimShelf(key) {
     var item = navAt()
     return keyed && item && item.kind === "shelf" && item.key === key
+  }
+
+  function aimReveal(key) {
+    var item = navAt()
+    return keyed && item && item.kind === "reveal" && item.key === key
+  }
+
+  function cardByShelf(key) {
+    var slots = boardSlots || []
+    var s
+    var c
+    for (s = 0; s < slots.length; s++) {
+      var pile = slots[s].cards || []
+      for (c = 0; c < pile.length; c++) {
+        if (shelfKey(pile[c]) === key) return pile[c]
+      }
+    }
+    return null
   }
 
   function aimDropGroup(id) {
@@ -1018,12 +1050,26 @@ Column {
     return seen
   }
 
-  // Hidden cards fold. A device card also folds when every fan is in another
-  // group and at most one channel, usually the pump, is still its own.
+  // Hidden cards fold. A device card also folds when nothing on it is in this
+  // mode and nothing is spinning, which is how a switched-off GPU stays one
+  // chevron away. It folds too when every fan is in another group and at most
+  // one channel, usually the pump, is still its own.
   function cardShelved(card) {
     if (cardConcealed(card)) return true
     if (!card || card.kind !== "device") return false
     var rows = card.rows || []
+    if (!rows.length) return false
+    var alive = false
+    var q
+    for (q = 0; q < rows.length; q++) {
+      var probe = rows[q]
+      if (!probe) continue
+      if (probe.inMode === true || Number(probe.rpm) > 0) {
+        alive = true
+        break
+      }
+    }
+    if (!alive) return true
     var fans = 0
     var local = 0
     for (var i = 0; i < rows.length; i++) {
@@ -1602,9 +1648,11 @@ Column {
             Rectangle {
               anchors.fill: parent
               radius: 0
-              color: hideMouse.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent"
+              color: root.aimReveal(card.shelfId)
+                ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                : (hideMouse.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
               border.width: 1
-              border.color: hideMouse.containsMouse
+              border.color: root.aimReveal(card.shelfId) || hideMouse.containsMouse
                 ? root.accent
                 : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
             }
@@ -1616,7 +1664,7 @@ Column {
               text: root.eyeOff
               fontFamily: root.fontFamily
               fontSize: Style.space(16)
-              color: hideMouse.containsMouse ? root.accent : root.fg
+              color: root.aimReveal(card.shelfId) || hideMouse.containsMouse ? root.accent : root.fg
             }
 
             MouseArea {

@@ -9,6 +9,6 @@ function flavorText(mode, temp) {
   if (name === "static" || name === "fixed") return "Camping A"
   if (name === "performance") return "Rocket jump"
   if (name === "hell") return "Quad damage"
-  if (name === "custom" || name) return "sv_cheats 1"
+  if (name) return "sv_cheats 1"
   return "Frag limit"
 }

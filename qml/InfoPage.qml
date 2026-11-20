@@ -16,7 +16,7 @@ Column {
   property color muted: Qt.darker(fg, 1.4)
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
   property string fontFamily: Style.font.family
-  property string version: "0.8.0"
+  property string version: "0.8.1"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)
@@ -278,7 +278,7 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
-    text: "Enter runs the highlighted control. An eye on a device hides that device from Monitoring and the bar. An eye on a channel hides only that channel. A group hides when each of its channels is hidden, and a group can be a single channel. A hidden block folds until you open it. A Modes block whose fans all sit in another group folds to the end of the list. The link beside a Modes name shares one curve. The pump keeps its own. The axis lock on LCD zeroes the preview and saves it. Left and right change a slider when the arrow has nowhere else to go, and the wheel does the same. Saturation deepens the theme colors and keeps their hue."
+    text: "Enter runs the highlighted control. An eye on a device hides that device from Monitoring and the bar. An eye on a channel hides only that channel. A group hides when each of its channels is hidden, and a group can be a single channel. A hidden block folds until you open it. A Modes block whose fans are all switched off, or whose fans all sit in another group, folds to the end of the list. The link beside a Modes name shares one curve. The pump keeps its own. The axis lock on LCD zeroes the preview and saves it. Left and right change a slider when the arrow has nowhere else to go, and the wheel does the same. Saturation deepens the theme colors and keeps their hue."
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

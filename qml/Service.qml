@@ -102,9 +102,17 @@ Item {
   property real processCpuTotal: 0
   property real processGpuTotal: 0
   property bool processGpuOk: true
+  // False until a sample reports gpuTotal. The header keeps the daemon sensor until then.
+  property bool processGpuKnown: false
   property bool uiReady: false
   property bool showBarHeld: false
   property bool pinGroupsHeld: false
+  property bool dynamicScaleHeld: false
+  property bool textFollowHeld: false
+  property bool textSizeHeld: false
+  property bool lcdBackgroundHeld: false
+  property bool lcdSecondsHeld: false
+  property bool lcdThemeSyncHeld: false
   property var curvePack: ({})
   property bool modesKnown: false
   property bool catalogBusy: false
@@ -123,6 +131,7 @@ Item {
   property bool defaultsPlanted: false
 
   property bool stopping: false
+  readonly property bool clientRunning: client.running
   property int restartDelayMs: 2000
   property int rpcId: 1
   property var pending: ({})
@@ -198,6 +207,9 @@ Item {
   }
 
   function fail(res) {
+    // The sidecar exit already reports the connection. A dropped callback must
+    // not replace that with a second "not running" error.
+    if (res && res.dropped) return
     cancelHold()
     var status = res ? Number(res.status) || 0 : 0
     var error = res && res.error ? String(res.error) : ""
@@ -319,7 +331,10 @@ Item {
 
   function keepLcd() {
     if (stopping || !lcdBackground || connection !== "ready" || lcdKeepBusy) return
-    if (lcdFace === "picture" || lcdSeconds === 0) return
+    if (lcdFace === "picture") return
+    // Never belongs to the temperature faces. Omarchy | Time still advances
+    // once a minute, and the stored interval is left for the next face.
+    if (lcdSeconds === 0 && lcdFace !== "omarchy-time") return
     if (!lcdChannels || !lcdChannels.length) return
     var screen = lcdChannels[0]
     if (!screen || !screen.deviceUid || !screen.name) return
@@ -503,6 +518,10 @@ Item {
     }
     if (!cleaned) return false
     lastError = ""
+    // prepareSnapshot reads the mode this client still names. The daemon
+    // selects the new mode on create. Naming that uid here would make the
+    // copy look at a mode this list does not have yet and report success.
+    var previous = String(activeModeUid || "")
     // The daemon copies the live profile uids into the new mode and selects
     // it. Copy a profile another mode still stores, then save that onto this
     // mode. The mode that was running keeps the profiles it already saved.
@@ -513,16 +532,58 @@ Item {
         refresh()
         return
       }
-      prepareSnapshot(created, {}, function(ok) {
-        if (!ok) {
+      // activateModeRaw does nothing while this client still names the
+      // previous mode, so the restore posts that select itself. The new
+      // mode is removed only after the previous one is running again.
+      function undoCreated() {
+        if (!lastError) {
+          lastError = "The new mode was not saved."
+          notice = lastError
+        }
+        if (!previous) {
           refresh()
           return
         }
+        call("POST", "/modes-active/" + encodeURIComponent(previous), {}, function(back) {
+          if (!back || !back.ok) {
+            lastError = "The new mode is running. Apply the previous mode again."
+            notice = lastError
+            refresh()
+            return
+          }
+          activeModeUid = previous
+          call("DELETE", "/modes/" + encodeURIComponent(created), null, function(gone) {
+            if (!gone || !gone.ok) {
+              if (!lastError) {
+                lastError = "The new mode was not saved."
+                notice = lastError
+              }
+            }
+            refresh()
+          })
+        })
+      }
+      // The mode that was running is the one whose curves get copied.
+      // A mode event can point activeModeUid at the new mode before this
+      // callback, and that mode is not in the list yet.
+      prepareSnapshot(created, {}, function(ok) {
+        if (!ok) {
+          // A dropped reply is the sidecar exiting. It must not select
+          // another mode. A real failure puts the previous mode back.
+          if (streamHold || !client.running) return
+          undoCreated()
+          return
+        }
         call("PUT", "/modes/" + encodeURIComponent(created) + "/settings", {}, function(saved) {
-          if (!saved.ok) return fail(saved)
+          if (!saved.ok) {
+            if (saved.dropped) return
+            fail(saved)
+            undoCreated()
+            return
+          }
           refresh()
         })
-      })
+      }, previous, true)
     })
     return true
   }
@@ -558,6 +619,7 @@ Item {
     var prev = groups
     groups = Cc.cleanGroupList(nextGroups)
     dispatch({ op: "groups-set", body: { groups: groups } }, function(res) {
+      if (res && res.dropped) return
       if (res && res.ok === false) {
         groups = prev
         root.lastError = root.plainError(res.error, "Groups could not be saved.")
@@ -577,6 +639,7 @@ Item {
     var prev = links
     links = nextLinks || ({})
     dispatch({ op: "links-set", body: { links: links } }, function(res) {
+      if (res && res.dropped) return
       if (res && res.ok === false) {
         links = prev
         root.lastError = root.plainError(res.error, "Links could not be saved.")
@@ -609,6 +672,7 @@ Item {
       op: "hidden-set",
       body: { devices: hiddenDevices, channels: hiddenChannels }
     }, function(res) {
+      if (res && res.dropped) return
       if (res && res.ok === false) {
         hiddenDevices = prevDevices
         hiddenChannels = prevChannels
@@ -1006,10 +1070,14 @@ Item {
   // The daemon snapshot copies every live channel into the mode. Copy a
   // profile another mode still uses first, and skip a channel that was just
   // bound or reset. A device the daemon is not showing is left alone.
-  function prepareSnapshot(modeUid, pinned, done) {
-    var active = Cc.modeByUid(modes, activeModeUid)
+  // sourceUid is the mode whose saved channels are copied. Create passes the
+  // mode that was running. strict fails when one of those profiles is missing.
+  // A channel that was just assigned skips a missing profile and still saves.
+  function prepareSnapshot(modeUid, pinned, done, sourceUid, strict) {
+    var fromUid = sourceUid ? String(sourceUid) : String(activeModeUid || "")
+    var active = Cc.modeByUid(modes, fromUid)
     if (!active) {
-      if (done) done(true)
+      if (done) done(strict ? false : true)
       return
     }
     var groups = ({})
@@ -1037,6 +1105,12 @@ Item {
       var uid = order[index++]
       var profile = Cc.profileByUid(profiles, uid)
       if (!profile) {
+        if (strict) {
+          lastError = "That curve is not a saved profile"
+          notice = lastError
+          if (done) done(false)
+          return
+        }
         step()
         return
       }
@@ -1906,23 +1980,24 @@ Item {
     dispatch({ op: "ui-get" }, function(res) {
       if (!res || res.ok === false) return
       var body = res.body ? res.body : ({})
-      dynamicScale = body.dynamicScale === true
-      // A toggle that landed before this read must not be put back.
+      // A change that landed before this read must not be put back.
+      if (!dynamicScaleHeld) dynamicScale = body.dynamicScale === true
       if (!pinGroupsHeld) pinGroups = body.pinGroups === true
-      textFollow = body.textFollow !== false
+      if (!textFollowHeld) textFollow = body.textFollow !== false
       var size = Number(body.textSize)
-      if (isFinite(size) && size > 0) textSize = size
-      // A toggle that landed before this read must not be put back.
+      if (!textSizeHeld && isFinite(size) && size > 0) textSize = size
       if (!showBarHeld) showBar = body.showBar !== false
-      lcdBackground = body.lcdBackground !== false
+      if (!lcdBackgroundHeld) lcdBackground = body.lcdBackground !== false
       // Number(null) is 0, and 0 is the Never stop. A missing value stays at 5.
       var seconds = body.lcdSeconds
-      if (seconds === null || seconds === undefined || seconds === "") lcdSeconds = 5
-      else {
-        seconds = Number(seconds)
-        lcdSeconds = root.lcdSecondsOk(seconds) ? seconds : 5
+      if (!lcdSecondsHeld) {
+        if (seconds === null || seconds === undefined || seconds === "") lcdSeconds = 5
+        else {
+          seconds = Number(seconds)
+          lcdSeconds = root.lcdSecondsOk(seconds) ? seconds : 5
+        }
       }
-      lcdThemeSync = body.lcdThemeSync === true
+      if (!lcdThemeSyncHeld) lcdThemeSync = body.lcdThemeSync === true
       if (!pumpFloorHeld) pumpFloor = body.pumpFloor !== false
       if (!silentRampHeld) {
         silentRamp = body.silentRamp === true
@@ -1951,7 +2026,13 @@ Item {
       pinGroupsHeld: pinGroupsHeld,
       showBarHeld: showBarHeld,
       pumpFloorHeld: pumpFloorHeld,
-      silentRampHeld: silentRampHeld
+      silentRampHeld: silentRampHeld,
+      dynamicScaleHeld: dynamicScaleHeld,
+      textFollowHeld: textFollowHeld,
+      textSizeHeld: textSizeHeld,
+      lcdBackgroundHeld: lcdBackgroundHeld,
+      lcdSecondsHeld: lcdSecondsHeld,
+      lcdThemeSyncHeld: lcdThemeSyncHeld
     }
     var src = patch || ({})
     // Only the keys in this patch. A full snapshot would write defaults over a file
@@ -1994,8 +2075,14 @@ Item {
       sending = true
     }
     if (!sending) return
+    if (src.dynamicScale !== undefined) dynamicScaleHeld = true
     if (src.pinGroups !== undefined) pinGroupsHeld = true
+    if (src.textFollow !== undefined) textFollowHeld = true
+    if (src.textSize !== undefined) textSizeHeld = true
     if (src.showBar !== undefined) showBarHeld = true
+    if (src.lcdBackground !== undefined) lcdBackgroundHeld = true
+    if (src.lcdSeconds !== undefined) lcdSecondsHeld = true
+    if (src.lcdThemeSync !== undefined) lcdThemeSyncHeld = true
     if (src.pumpFloor !== undefined) pumpFloorHeld = true
     if (src.silentRamp !== undefined || src.silentRampUid !== undefined || src.silentRampBinds !== undefined)
       silentRampHeld = true
@@ -2012,6 +2099,7 @@ Item {
     if (body.silentRampUid !== undefined) silentRampUid = String(body.silentRampUid || "")
     if (body.silentRampBinds !== undefined) silentRampBinds = body.silentRampBinds || []
     dispatch({ op: "ui-set", body: body }, function(res) {
+      if (res && res.dropped) return
       if (res && res.ok === false) {
         dynamicScale = prev.dynamicScale
         pinGroups = prev.pinGroups
@@ -2029,6 +2117,12 @@ Item {
         showBarHeld = prev.showBarHeld
         pumpFloorHeld = prev.pumpFloorHeld
         silentRampHeld = prev.silentRampHeld
+        dynamicScaleHeld = prev.dynamicScaleHeld
+        textFollowHeld = prev.textFollowHeld
+        textSizeHeld = prev.textSizeHeld
+        lcdBackgroundHeld = prev.lcdBackgroundHeld
+        lcdSecondsHeld = prev.lcdSecondsHeld
+        lcdThemeSyncHeld = prev.lcdThemeSyncHeld
         root.lastError = root.plainError(res.error, "Settings could not be read.")
       } else if (res && res.ok && root.lastError === "Settings could not be read.")
         root.lastError = ""
@@ -2037,6 +2131,7 @@ Item {
 
   function loadPack() {
     dispatch({ op: "pack-get" }, function(res) {
+      if (res && res.dropped) return
       var body = res && res.body ? res.body : ({})
       curvePack = Cc.validCurvePack(body) ? body : ({})
     })
@@ -2134,6 +2229,7 @@ Item {
   // A running calibration owns the channel. The daemon rejects other writes
   // until that sweep finishes, so Apply waits.
   function finishApplyBurst(uid, expect, res, done) {
+    if (res && res.dropped) return
     if (!res || res.ok !== true) {
       fail(res || { ok: false, status: 0, error: "not connected" })
       refresh()
@@ -2471,6 +2567,13 @@ Item {
     var prevLive = lcdLive
     var prevPicture = lcdPicture
     var token = track(function(res) {
+      if (res && res.dropped) return
+      var reason = res && res.body ? res.body.reason : ""
+      if (reason === "lcd-off") {
+        root.lcdLive = false
+        root.lastError = ""
+        return
+      }
       if (res && res.ok === false) {
         root.lastError = root.lcdNote(res)
         root.lcdFace = prevFace
@@ -2565,6 +2668,7 @@ Item {
       processGpuTotal = isFinite(gpuTotal) ? gpuTotal : 0
       processCpu = body.cpu || []
       processGpuOk = body.gpuOk !== false
+      processGpuKnown = body.gpuKnown === true
       processGpu = body.gpu || []
     })
     if (accepted) processEpoch = epoch
@@ -2772,6 +2876,7 @@ Item {
       root.lastStatusMs = 0
     }
     onExited: function() {
+      var leftover = root.pending
       root.pending = ({})
       root.catalogBusy = false
       root.catalogAgain = false
@@ -2794,6 +2899,10 @@ Item {
       restart.interval = root.restartDelayMs
       root.restartDelayMs = Math.min(30000, root.restartDelayMs * 2)
       restart.start()
+      for (var id in leftover) {
+        var done = leftover[id]
+        if (done) done({ ok: false, status: 0, error: "not connected", dropped: true })
+      }
     }
   }
 
@@ -2912,7 +3021,7 @@ Item {
     id: lcdKeep
     interval: root.lcdFace === "omarchy-time" ? root.lcdClockWait : Math.max(2000, root.lcdSeconds * 1000)
     repeat: true
-    running: !root.stopping && root.lcdBackground && root.connection === "ready" && root.lcdChannels.length > 0 && root.lcdFace !== "picture" && root.lcdSeconds !== 0 && !(root.lcdFace === "omarchy" && root.lcdThemeSync)
+    running: !root.stopping && root.lcdBackground && root.connection === "ready" && root.lcdChannels.length > 0 && root.lcdFace !== "picture" && (root.lcdFace === "omarchy-time" || root.lcdSeconds !== 0) && !(root.lcdFace === "omarchy" && root.lcdThemeSync)
     onTriggered: {
       root.keepLcd()
       if (root.lcdFace === "omarchy-time") root.lcdClockWait = root.msUntilNextMinute()

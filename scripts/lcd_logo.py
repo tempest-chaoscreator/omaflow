@@ -17,6 +17,7 @@ import math
 import os
 import re
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -52,6 +53,8 @@ _FONT_CANDIDATES = (
 
 # Counts mask builds so the self-check can see a cache hit.
 mask_builds = 0
+# The window preview and the cooler upload build the same plate from two threads.
+_PLATE_LOCK = threading.Lock()
 
 _FIXTURES = {
     "tokyo-night": {
@@ -386,14 +389,22 @@ def _cached_plate(kind: str, width: int, height: int, shape: str, accent: str, c
     The cooler plate is opaque black. The preview plate is transparent so the
     window color shows through.
     """
-    from PIL import Image, ImageDraw, ImageFilter
-
     radius = _blur_radius(width, height) if kind == "blur" else 0.0
     path = _cache_path(kind, width, height, shape, accent, radius, clear)
     # A symlink or a torn PNG is a miss. The plate is rebuilt.
     cached = _load_cached(path, clear)
     if cached is not None:
         return cached
+    with _PLATE_LOCK:
+        cached = _load_cached(path, clear)
+        if cached is not None:
+            return cached
+        return _store_built_plate(kind, width, height, shape, accent, clear, path, radius)
+
+
+def _store_built_plate(kind, width, height, shape, accent, clear, path, radius):
+    from PIL import Image, ImageDraw, ImageFilter
+
     bands = band_colors(accent)
     side = _logo_side(width, height, shape)
     mask = _raster_mask(side)

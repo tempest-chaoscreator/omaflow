@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "Nav.js" as Nav
+import "Wheel.js" as Wheel
 
 // The preview and the angle dial share one stage. The preview grows with the window.
 // Round glass draws a circle. Square panels draw a square frame, and a non-square
@@ -29,6 +30,7 @@ Column {
   property bool pushAgain: false
   property int lcdPullGen: 0
   property bool viewReady: false
+  property string lastViewText: ""
   property int previewGen: 0
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
@@ -94,10 +96,12 @@ Column {
       out.push({ id: "larger", x: 1.4, y: 1 })
     }
     out.push({ id: "cw", x: 2, y: 1 })
-    out.push({ id: "sync", x: 0, y: 2 })
-    out.push({ id: "off", x: 1, y: 2 })
-    out.push({ id: "bright", x: 0, y: 3 })
-    out.push({ id: "sat", x: 1, y: 3 })
+    // The sliders sit above Sync and Off. y follows that column, so Down
+    // from the dial lands on a slider and the next Down reaches Sync.
+    out.push({ id: "bright", x: 0, y: 2 })
+    out.push({ id: "sat", x: 1, y: 2 })
+    out.push({ id: "sync", x: 0, y: 3 })
+    out.push({ id: "off", x: 1, y: 3 })
     return out
   }
 
@@ -206,6 +210,8 @@ Column {
     // A torn file is not an empty view. The first load must not save defaults
     // over it. A later complete write still applies.
     var text = String(raw || "").replace(/^\s+|\s+$/g, "")
+    // The page hears its own write. Applying that echo would put the dial back.
+    if (viewReady && text === lastViewText) return
     var obj = null
     if (text) {
       try {
@@ -274,7 +280,9 @@ Column {
       pictureScale: pictureScale
     }
     if (liveKnown) obj.live = syncOn
-    lcdFile.setText(JSON.stringify(obj))
+    var text = JSON.stringify(obj)
+    lastViewText = text
+    lcdFile.setText(text)
   }
 
   function saveView() {
@@ -323,7 +331,9 @@ Column {
       shownShape, px.w, px.h, screen.deviceName || "",
       function() {
         root.pushing = false
-        if (root.pushAgain) root.push()
+        if (root.syncOn && root.pushAgain && root.service && root.service.clientRunning)
+          root.push()
+        else root.pushAgain = false
       },
       picturePath,
       pictureScale
@@ -345,6 +355,8 @@ Column {
     var name = screen ? String(screen.deviceName || "") : ""
     service.previewLcd(name, px.w, px.h, face, hexOf(ink), function(res) {
       if (gen !== root.previewGen || !root.plateFace) return
+      if (res && res.dropped) return
+      if (res && res.body && res.body.stale) return
       if (!res || !res.ok) {
         if (root.face === "picture") {
           root.previewSource = ""
@@ -501,9 +513,13 @@ Column {
     lcdPullGen = lcdPullGen + 1
     syncOn = false
     liveKnown = true
-    saveView()
+    pushDelay.stop()
+    pushAgain = false
+    writeView()
     if (!service || !screen) return
-    service.setLcd(screen.deviceUid, screen.name, {
+    // The blank is queued behind any image already on the cooler thread.
+    if (service.showLcd) service.showLcd("off")
+    else service.setLcd(screen.deviceUid, screen.name, {
       brightness: brightness, orientation: 0, colors: [], mode: "none"
     })
   }
@@ -517,8 +533,12 @@ Column {
   }
 
   function setFace(id) {
+    if (face === id) return
     face = id
-    if (syncOn) push()
+    // The dial repaints on its own. The cooler write waits so it does not
+    // start ahead of that plate, and a second click keeps only the last face.
+    writeView()
+    if (syncOn) pushDelay.restart()
   }
 
   // One shot. Holds the preview level and saves that choice. It does not
@@ -530,8 +550,14 @@ Column {
 
   function setAngle(deg) {
     touched = true
-    angle = ((Math.round(deg) % 360) + 360) % 360
-    if (syncOn) push()
+    var next = ((Math.round(deg) % 360) + 360) % 360
+    var changed = next !== angle
+    // Turning releases the level lock, so the dial image moves with the dot
+    // before the cooler upload finishes. Zero locks the preview level again.
+    zeroOrientation = false
+    angle = next
+    writeView()
+    if (syncOn && changed) pushDelay.restart()
   }
 
   function stepAngle(delta) {
@@ -578,13 +604,7 @@ Column {
       else brightWheel = 0
     }
     if (wheel.phase === Qt.ScrollMomentum || wheel.phase === Qt.ScrollEnd) return 0
-    var angle = wheel.angleDelta ? wheel.angleDelta.y : 0
-    if (angle) return angle > 0 ? 1 : -1
-    var pixel = wheel.pixelDelta ? wheel.pixelDelta.y : 0
-    var phase = wheel.phase
-    var gesture = phase === Qt.ScrollBegin || phase === Qt.ScrollUpdate
-    if (!(gesture && pixel)) return 0
-    var next = (which === "sat" ? satWheel : brightWheel) + pixel
+    var next = (which === "sat" ? satWheel : brightWheel) + Wheel.deltaY(wheel)
     var steps = 0
     while (next >= 64) { steps += 1; next -= 64 }
     while (next <= -64) { steps -= 1; next += 64 }
@@ -679,7 +699,7 @@ Column {
 
   Timer {
     id: previewDelay
-    interval: 180
+    interval: 40
     repeat: false
     onTriggered: root.requestPreview()
   }
@@ -696,7 +716,6 @@ Column {
       if (!changed && root.previewSource !== "") return
       root.clockShown = now
       root.schedulePreview()
-      if (changed && root.syncOn && root.keepOn && root.viewReady) root.push()
     }
   }
 
@@ -1071,7 +1090,7 @@ Column {
             source: root.previewSource
             fillMode: Image.PreserveAspectFit
             smooth: true
-            mipmap: true
+            mipmap: false
             cache: false
             asynchronous: true
           }

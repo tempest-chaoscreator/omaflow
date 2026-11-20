@@ -1256,6 +1256,36 @@ function spinningChannels(channels, memberKeys) {
   return out
 }
 
+// A duty of 0 is a fan that is switched off, including a GPU fan left to its
+// own firmware. Modes still lists it so the toggle that takes the curve back
+// stays reachable. A missing duty is an unused header and stays off this list.
+// A device that already has a spinning fan is left alone, so a stopped header
+// on that device does not open the block.
+function parkedChannels(channels, memberKeys) {
+  var taken = {}
+  var keys = memberKeys || []
+  for (var i = 0; i < keys.length; i++) taken[keys[i]] = true
+  var spinningDevice = {}
+  var list = channels || []
+  var c
+  for (c = 0; c < list.length; c++) {
+    var moving = list[c]
+    if (!moving || !moving.deviceUid) continue
+    if (Number(moving.rpm) > 0) spinningDevice[moving.deviceUid] = true
+  }
+  var out = []
+  for (c = 0; c < list.length; c++) {
+    var channel = list[c]
+    if (!channel || taken[channel.key]) continue
+    if (spinningDevice[channel.deviceUid]) continue
+    if (Number(channel.rpm) > 0) continue
+    var duty = finiteNum(channel.duty)
+    if (duty === null || duty > 0) continue
+    out.push(channel)
+  }
+  return out
+}
+
 function controlledKeys(modes) {
   var out = {}
   var list = modes || []
