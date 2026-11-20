@@ -45,13 +45,14 @@ Column {
   function buildCurves() {
     if (!mode || !service) return []
     var hidden = service.hiddenDevices || ({})
+    var hiddenChannels = service.hiddenChannels || ({})
     var named = groupIndex()
     var members = Cc.modeMembers(mode, service.channels, service.profiles)
     var order = []
     var by = ({})
     for (var i = 0; i < members.length; i++) {
       var row = members[i]
-      if (hidden[String(row.deviceUid || "")] === true) continue
+      if (Cc.channelConcealed(hidden, hiddenChannels, row)) continue
       var id = row.profileUid || ("fixed:" + row.key)
       var card = by[id]
       if (!card) {

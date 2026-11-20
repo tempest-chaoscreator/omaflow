@@ -21,7 +21,7 @@ rm -rf "$share/qml" "$share/scripts" "$share/icons" "$share/app"
 cp "$root/manifest.json" "$share/manifest.json"
 cp -a "$root/qml" "$root/scripts" "$root/icons" "$root/app" "$share/"
 rm -rf "$share/scripts/__pycache__"
-chmod +x "$share/app/omaflow-standalone" "$share/scripts/open_app.sh"
+chmod +x "$share/app/omaflow-standalone" "$share/scripts/open_app.sh" "$share/scripts/install_daemon.sh"
 ln -sfn "$share/app/omaflow-standalone" "$bin/omaflow"
 
 cat > "$desk_dir/omaflow-standalone.desktop" << EOF

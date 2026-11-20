@@ -81,6 +81,8 @@ Item {
   property var groups: []
   property var links: ({})
   property var hiddenDevices: ({})
+  property var hiddenChannels: ({})
+  property var nameOverrides: ({})
   property var calibrations: []
   property var calibrationBatch: ({ active: false, started_at: "", entries: [] })
   property var calibrationStatus: ({})
@@ -364,12 +366,26 @@ Item {
     return !!(part && part.ok)
   }
 
+  function takeOverrides(part) {
+    if (!part || part.ok !== true) {
+      nameOverrides = ({})
+      return
+    }
+    var body = part.body
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      nameOverrides = ({})
+      return
+    }
+    nameOverrides = body
+  }
+
   function applyCatalog(body) {
     var parts = body || ({})
     var order = ["devices", "profiles", "modes", "modesActive", "settings", "functions", "alerts", "status"]
+    var authOrder = order.concat(["overrides"])
     var i
-    for (i = 0; i < order.length; i++) {
-      var blocked = parts[order[i]]
+    for (i = 0; i < authOrder.length; i++) {
+      var blocked = parts[authOrder[i]]
       if (!blocked) continue
       if (blocked.error === "need-token" || blocked.status === 401 || blocked.status === 403) {
         fail(blocked)
@@ -413,6 +429,7 @@ Item {
     if (devicesOk) lcdKick.restart()
     if (parts.calibrations) takeCalibrationList(parts.calibrations)
     if (parts.calibrationBatch) takeCalibrationBatch(parts.calibrationBatch)
+    if (parts.overrides) takeOverrides(parts.overrides)
     if (!devicesOk || !statusOk) {
       fail((!devicesOk ? parts.devices : parts.status) || { ok: false, status: 0, error: "" })
       return
@@ -479,12 +496,35 @@ Item {
   }
 
   function createMode(name) {
-    var trimmed = String(name || "").replace(/^\s+|\s+$/g, "")
-    if (!trimmed) return
-    call("POST", "/modes", { name: trimmed }, function(res) {
+    var cleaned = Cc.daemonName(name)
+    if (cleaned === null) {
+      lastError = "That name is not allowed."
+      return false
+    }
+    if (!cleaned) return false
+    lastError = ""
+    // The daemon copies the live profile uids into the new mode and selects
+    // it. Copy a profile another mode still stores, then save that onto this
+    // mode. The mode that was running keeps the profiles it already saved.
+    call("POST", "/modes", { name: cleaned }, function(res) {
       if (!res.ok) return fail(res)
-      refresh()
+      var created = res.body && res.body.uid ? String(res.body.uid) : ""
+      if (!created) {
+        refresh()
+        return
+      }
+      prepareSnapshot(created, {}, function(ok) {
+        if (!ok) {
+          refresh()
+          return
+        }
+        call("PUT", "/modes/" + encodeURIComponent(created) + "/settings", {}, function(saved) {
+          if (!saved.ok) return fail(saved)
+          refresh()
+        })
+      })
     })
+    return true
   }
 
   function deleteMode(uid, done) {
@@ -549,15 +589,29 @@ Item {
     dispatch({ op: "hidden-get" }, function(res) {
       if (!res || res.ok === false) return
       hiddenDevices = (res.body && res.body.devices) || ({})
+      hiddenChannels = (res.body && res.body.channels) || ({})
     })
   }
 
-  function saveHidden(nextHidden) {
-    var prev = hiddenDevices
-    hiddenDevices = nextHidden || ({})
-    dispatch({ op: "hidden-set", body: { devices: hiddenDevices } }, function(res) {
+  function copyFlags(map) {
+    var next = ({})
+    var cur = map || ({})
+    for (var k in cur) if (cur[k] === true) next[k] = true
+    return next
+  }
+
+  function saveHidden(nextDevices, nextChannels) {
+    var prevDevices = hiddenDevices
+    var prevChannels = hiddenChannels
+    hiddenDevices = nextDevices || ({})
+    hiddenChannels = nextChannels || ({})
+    dispatch({
+      op: "hidden-set",
+      body: { devices: hiddenDevices, channels: hiddenChannels }
+    }, function(res) {
       if (res && res.ok === false) {
-        hiddenDevices = prev
+        hiddenDevices = prevDevices
+        hiddenChannels = prevChannels
         root.lastError = root.plainError(res.error, "Hidden devices could not be saved.")
       } else if (res && res.ok && root.lastError === "Hidden devices could not be saved.")
         root.lastError = ""
@@ -566,12 +620,64 @@ Item {
 
   function setDeviceHidden(uid, hidden) {
     if (!uid) return
-    var next = ({})
-    var cur = hiddenDevices || ({})
-    for (var k in cur) if (cur[k] === true) next[k] = true
+    var next = copyFlags(hiddenDevices)
     if (hidden) next[uid] = true
     else delete next[uid]
-    saveHidden(next)
+    saveHidden(next, copyFlags(hiddenChannels))
+  }
+
+  function setChannelHidden(key, hidden) {
+    if (!key) return
+    var next = copyFlags(hiddenChannels)
+    if (hidden) next[key] = true
+    else delete next[key]
+    saveHidden(copyFlags(hiddenDevices), next)
+  }
+
+  function revealHidden(uids, keys) {
+    var nextDevices = copyFlags(hiddenDevices)
+    var nextChannels = copyFlags(hiddenChannels)
+    var list = uids || []
+    var i
+    for (i = 0; i < list.length; i++) delete nextDevices[list[i]]
+    list = keys || []
+    for (i = 0; i < list.length; i++) delete nextChannels[list[i]]
+    saveHidden(nextDevices, nextChannels)
+  }
+
+  // A blank name clears the override. The daemon keeps the detected name.
+  function renameDevice(uid, raw) {
+    if (!uid) return
+    var cleaned = Cc.daemonName(raw)
+    if (cleaned === null) {
+      lastError = "That name is not allowed."
+      notice = ""
+      return
+    }
+    lastError = ""
+    var body = ({})
+    body.name = cleaned === "" ? null : cleaned
+    call("PUT", "/settings/devices/" + encodeURIComponent(uid) + "/overrides", body, function(res) {
+      if (!res.ok) return fail(res)
+      refresh()
+    })
+  }
+
+  function renameChannel(uid, channel, raw) {
+    if (!uid || !channel) return
+    var cleaned = Cc.daemonName(raw)
+    if (cleaned === null) {
+      lastError = "That name is not allowed."
+      notice = ""
+      return
+    }
+    lastError = ""
+    var body = ({})
+    body.label = cleaned === "" ? null : cleaned
+    call("PUT", "/settings/devices/" + encodeURIComponent(uid) + "/channels/" + encodeURIComponent(channel) + "/overrides", body, function(res) {
+      if (!res.ok) return fail(res)
+      refresh()
+    })
   }
 
   // Only when the daemon has no modes at all. A daemon that already has
@@ -594,7 +700,14 @@ Item {
     var order = ["Hell", "Fixed", "Performance", "Silent"]
     var list = []
     for (i = 0; i < order.length; i++) if (want[order[i].toLowerCase()]) list.push(order[i])
-    plantDefaultMode(list, 0)
+    // The bar and the window each have a service. A daemon that gained a
+    // mode after this client's list was empty is left alone.
+    call("GET", "/modes", null, function(res) {
+      if (!res.ok) return fail(res)
+      var found = (res.body && res.body.modes) || []
+      if (found.length) return
+      plantDefaultMode(list, 0)
+    })
   }
 
   function plantDefaultMode(order, index) {
@@ -611,6 +724,12 @@ Item {
         plantDefaultMode(order, index + 1)
       })
     }
+    // A cooler with fans and no sensor must not snapshot the live profiles
+    // into every new mode. Those profiles would be the same uid four times.
+    if (channels.length && !temp) {
+      lastError = "No temperature source is available for a new curve"
+      return
+    }
     if (!channels.length || !temp) {
       snapshot()
       return
@@ -620,12 +739,16 @@ Item {
 
   function assignModeDefaults(modeName, channels, temp, done) {
     var fans = []
+    var gpus = []
     var pumps = []
     var i
     for (i = 0; i < channels.length; i++) {
       if (channels[i].isPump) pumps.push(channels[i])
+      else if (String(channels[i].deviceType || "") === "GPU") gpus.push(channels[i])
       else fans.push(channels[i])
     }
+    // One profile has one sensor. GPU fans cannot share the chassis curve.
+    var gpuTemp = Cc.tempSourceFor(devices, "GPU") || temp
     function plantPumps() {
       if (!pumps.length) {
         if (done) done()
@@ -635,12 +758,21 @@ Item {
         assignChannels(pumps, uid, done)
       })
     }
+    function plantGpu() {
+      if (!gpus.length) {
+        plantPumps()
+        return
+      }
+      createGraph(modeName + " gpu", Cc.modeDefaultPoints(modeName, false), gpuTemp, 0, function(uid) {
+        assignChannels(gpus, uid, plantPumps)
+      })
+    }
     if (!fans.length) {
-      plantPumps()
+      plantGpu()
       return
     }
     createGraph(modeName + " fans", Cc.modeDefaultPoints(modeName, false), temp, 0, function(uid) {
-      assignChannels(fans, uid, plantPumps)
+      assignChannels(fans, uid, plantGpu)
     })
   }
 
@@ -692,8 +824,13 @@ Item {
   }
 
   function renameGroup(id, name) {
-    var trimmed = String(name || "").replace(/^\s+|\s+$/g, "")
-    if (!id || !trimmed) return
+    var cleaned = Cc.daemonName(name)
+    if (cleaned === null) {
+      lastError = "That name is not allowed."
+      return
+    }
+    if (!id || !cleaned) return
+    lastError = ""
     var next = []
     for (var i = 0; i < groups.length; i++) {
       var group = groups[i]
@@ -702,7 +839,7 @@ Item {
         continue
       }
       var copy = Cc.copyMap(group)
-      copy.name = trimmed
+      copy.name = cleaned
       next.push(copy)
     }
     saveGroups(next)
@@ -715,7 +852,8 @@ Item {
       var group = groups[i]
       var list = group.members || []
       for (var m = 0; m < list.length; m++) if (list[m] !== key) members.push(list[m])
-      if (members.length > 1) {
+      // A group of one still has a curve. It goes away only when nothing is left.
+      if (members.length >= 1) {
         var copy = Cc.copyMap(group)
         copy.members = members
         next.push(copy)
@@ -729,9 +867,14 @@ Item {
       lastError = "No temperature source is available for a new curve"
       return
     }
+    var cleaned = Cc.daemonName(name)
+    if (cleaned === null) {
+      lastError = "That name is not allowed."
+      return
+    }
     var uid = newUid()
     var pace = functionUid ? String(functionUid) : "0"
-    var draft = { uid: uid, name: name, function_uid: pace, p_type: "Graph", speed_profile: points }
+    var draft = { uid: uid, name: cleaned, function_uid: pace, p_type: "Graph", speed_profile: points }
     var shaped = Cc.withGraphPoints(draft, points, minDuty)
     shaped.temp_source = tempSource
     shaped.temp_min = 0
@@ -742,25 +885,220 @@ Item {
     })
   }
 
-  function snapshotMode(modeUid, done, clearNotice) {
-    call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
-      if (!saved.ok) return fail(saved)
-      if (clearNotice) notice = ""
-      refresh()
-      if (done) done()
+  function devicePresent(deviceUid) {
+    var id = String(deviceUid || "")
+    if (!id) return false
+    var list = devices || []
+    var i
+    for (i = 0; i < list.length; i++) if (list[i] && String(list[i].uid || "") === id) return true
+    var rows = channels || []
+    for (i = 0; i < rows.length; i++) if (rows[i] && String(rows[i].deviceUid || "") === id) return true
+    return false
+  }
+
+  function functionName(uid) {
+    var id = String(uid || "")
+    if (!id || id === "0") return ""
+    var list = functions || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].uid || "") === id) return String(list[i].name || "")
+    }
+    return ""
+  }
+
+  // Silent keeps its pace. Any other mode gets a plain curve, so a snapshot
+  // cannot carry the Silent ramp onto Performance, Fixed, or Hell.
+  function rampFunctionFor(modeUid, profile) {
+    var fn = profile ? String(profile.function_uid || "0") : "0"
+    if (!fn) fn = "0"
+    var mode = Cc.modeByUid(modes, modeUid)
+    var name = mode && mode.name ? String(mode.name).replace(/^\s+|\s+$/g, "").toLowerCase() : ""
+    if (name === "silent") return fn
+    if (fn === "0") return "0"
+    var ramp = String(silentRampUid || "")
+    if ((ramp && fn === ramp) || functionName(fn) === "Omaflow silent ramp") return "0"
+    return fn
+  }
+
+  function cloneLabel(modeUid, profile) {
+    var mode = Cc.modeByUid(modes, modeUid)
+    var modeName = mode && mode.name ? String(mode.name) : "Mode"
+    var raw = (modeName + " " + String(profile && profile.name || "curve")).replace(/[<>]/g, "")
+    raw = raw.replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
+    if (raw.length > 50) raw = raw.slice(0, 50).replace(/\s+$/, "")
+    var cleaned = Cc.daemonName(raw)
+    if (cleaned) return cleaned
+    var fallback = modeName.replace(/[<>]/g, "").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
+    if (fallback.length > 50) fallback = fallback.slice(0, 50).replace(/\s+$/, "")
+    return Cc.daemonName(fallback) || "curve"
+  }
+
+  // A new profile with the stored points. The paint grid is not written back.
+  function cloneProfile(profile, modeUid, done) {
+    if (!profile) {
+      lastError = "That curve is not a saved profile"
+      notice = lastError
+      return
+    }
+    var draft = JSON.parse(JSON.stringify(profile))
+    var cloneUid = newUid()
+    draft.uid = cloneUid
+    draft.name = cloneLabel(modeUid, profile)
+    draft.function_uid = rampFunctionFor(modeUid, profile)
+    if (!draft.p_type) draft.p_type = "Graph"
+    call("POST", "/profiles", draft, function(res) {
+      if (!res.ok) {
+        fail(res)
+        if (done) done("")
+        return
+      }
+      if (done) done(cloneUid)
+    })
+  }
+
+  // A uid another mode still stores has to be copied before this mode keeps it.
+  function privatizeUid(modeUid, profileUid, done) {
+    var uid = String(profileUid || "")
+    if (!uid || uid === "0" || !Cc.otherModeUsesProfile(modes, uid, modeUid)) {
+      if (done) done(uid)
+      return
+    }
+    var profile = Cc.profileByUid(profiles, uid)
+    if (!profile) {
+      lastError = "That curve is not a saved profile"
+      notice = lastError
+      return
+    }
+    cloneProfile(profile, modeUid, done)
+  }
+
+  function assignPresent(list, profileUid, done) {
+    var index = 0
+    var rows = list || []
+    function step() {
+      if (index >= rows.length) {
+        if (done) done(true)
+        return
+      }
+      var channel = rows[index++]
+      if (!channel || !channel.deviceUid || !channel.name || !devicePresent(channel.deviceUid)) {
+        step()
+        return
+      }
+      call("PUT", deviceSettingPath(channel.deviceUid, channel.name, "profile"), { profile_uid: profileUid }, function(res) {
+        if (!res.ok) {
+          var detail = res && res.error ? String(res.error) : ""
+          if (Number(res.status) === 404 || /device not found/i.test(detail)) {
+            step()
+            return
+          }
+          fail(res)
+          if (done) done(false)
+          return
+        }
+        step()
+      })
+    }
+    step()
+  }
+
+  // The daemon snapshot copies every live channel into the mode. Copy a
+  // profile another mode still uses first, and skip a channel that was just
+  // bound or reset. A device the daemon is not showing is left alone.
+  function prepareSnapshot(modeUid, pinned, done) {
+    var active = Cc.modeByUid(modes, activeModeUid)
+    if (!active) {
+      if (done) done(true)
+      return
+    }
+    var groups = ({})
+    var order = []
+    Cc.eachModeSetting(active, function(deviceUid, setting) {
+      if (!setting || !setting.channel_name) return
+      var key = String(deviceUid || "") + "/" + String(setting.channel_name)
+      if (pinned && pinned[key]) return
+      if (!devicePresent(deviceUid)) return
+      var uid = String(setting.profile_uid || "")
+      if (!uid || uid === "0") return
+      if (!Cc.otherModeUsesProfile(modes, uid, modeUid)) return
+      if (!groups[uid]) {
+        groups[uid] = []
+        order.push(uid)
+      }
+      groups[uid].push({ deviceUid: String(deviceUid), name: String(setting.channel_name) })
+    })
+    var index = 0
+    function step() {
+      if (index >= order.length) {
+        if (done) done(true)
+        return
+      }
+      var uid = order[index++]
+      var profile = Cc.profileByUid(profiles, uid)
+      if (!profile) {
+        step()
+        return
+      }
+      cloneProfile(profile, modeUid, function(cloneUid) {
+        if (!cloneUid) {
+          if (done) done(false)
+          return
+        }
+        assignPresent(groups[uid], cloneUid, function(ok) {
+          if (!ok) {
+            if (done) done(false)
+            return
+          }
+          step()
+        })
+      })
+    }
+    step()
+  }
+
+  function snapshotMode(modeUid, done, clearNotice, pinned) {
+    prepareSnapshot(modeUid, pinned || ({}), function(ok) {
+      if (!ok) return
+      call("PUT", "/modes/" + encodeURIComponent(modeUid) + "/settings", {}, function(saved) {
+        if (!saved.ok) return fail(saved)
+        if (clearNotice) notice = ""
+        // The group save has to be queued before the groups read, or the
+        // read of the old file lands last and the new group disappears.
+        if (done) done()
+        refresh()
+      })
     })
   }
 
   function bindChannel(modeUid, deviceUid, channel, profileUid, done) {
-    call("PUT", deviceSettingPath(deviceUid, channel, "profile"), { profile_uid: profileUid }, function(res) {
-      if (!res.ok) return fail(res)
-      snapshotMode(modeUid, done, true)
+    privatizeUid(modeUid, profileUid, function(uid) {
+      if (!uid) return
+      call("PUT", deviceSettingPath(deviceUid, channel, "profile"), { profile_uid: uid }, function(res) {
+        if (!res.ok) return fail(res)
+        var pinned = ({})
+        pinned[String(deviceUid || "") + "/" + String(channel || "")] = true
+        snapshotMode(modeUid, done, true, pinned)
+      })
     })
   }
 
   function bindMany(modeUid, members, profileUid, done) {
-    assignChannels(members, profileUid, function() {
-      snapshotMode(modeUid, done)
+    privatizeUid(modeUid, profileUid, function(uid) {
+      if (!uid) return
+      assignChannels(members, uid, function() {
+        var pinned = ({})
+        var list = members || []
+        var i
+        for (i = 0; i < list.length; i++) {
+          var member = list[i]
+          if (!member) continue
+          if (member.key) pinned[String(member.key)] = true
+          var name = member.name || member.channel
+          if (member.deviceUid && name) pinned[String(member.deviceUid) + "/" + String(name)] = true
+        }
+        snapshotMode(modeUid, done, false, pinned)
+      })
     })
   }
 
@@ -768,7 +1106,9 @@ Item {
     call("PUT", deviceSettingPath(deviceUid, channel, "reset"), {}, function(res) {
       if (!res.ok) return fail(res)
       if (after) after()
-      snapshotMode(modeUid)
+      var pinned = ({})
+      pinned[String(deviceUid || "") + "/" + String(channel || "")] = true
+      snapshotMode(modeUid, null, false, pinned)
     })
   }
 
@@ -963,9 +1303,16 @@ Item {
       if (!row) continue
       var prev = findStoredBind(stored, row)
       var profileUid = String(row.profileUid || "")
+      var cloneUid = String(row.cloneUid || "")
       var prevFunction = String(row.prevFunction || "0")
       if (prev) {
         if (!profileUid && prev.profileUid) profileUid = String(prev.profileUid)
+        // A second pass sees the clone as an ordinary Silent curve. Keep the
+        // saved original so turning the pace off can put that curve back.
+        if (!cloneUid && prev.cloneUid) {
+          cloneUid = String(prev.cloneUid)
+          if (prev.profileUid) profileUid = String(prev.profileUid)
+        }
         if ((!prevFunction || prevFunction === "0") && prev.prevFunction && String(prev.prevFunction) !== "0")
           prevFunction = String(prev.prevFunction)
       }
@@ -973,7 +1320,7 @@ Item {
         deviceUid: String(row.deviceUid || ""),
         channel: String(row.channel || ""),
         profileUid: profileUid,
-        cloneUid: String(row.cloneUid || ""),
+        cloneUid: cloneUid,
         prevFunction: prevFunction || "0"
       })
     }
@@ -1852,6 +2199,8 @@ Item {
         return
       }
       var next = Cc.withGraphPoints(profile, job.points, job.minDuty)
+      // An untouched curve already has these points. Leave that profile alone.
+      if (Cc.sameGraph(next.speed_profile, profile.speed_profile)) continue
       steps.push({ method: "PUT", path: "/profiles", body: next })
       expect.push({ profileUid: String(next.uid || job.profileUid), points: next.speed_profile })
     }
@@ -1893,9 +2242,12 @@ Item {
       var cloneUid = newUid()
       draft.uid = cloneUid
       var copyName = (modeName + " " + (sharedProfile.name || "curve") + " " + cloneUid.slice(0, 4)).replace(/\s+/g, " ")
-      draft.name = String(copyName).slice(0, 48)
+      var named = Cc.daemonName(String(copyName).slice(0, 50))
+      if (named === null) named = Cc.cloneLabel(uid, sharedProfile)
+      draft.name = named || "curve"
       var shaped = Cc.withGraphPoints(draft, sharedJob.points, sharedJob.minDuty)
       shaped.uid = cloneUid
+      shaped.function_uid = rampFunctionFor(uid, sharedProfile)
       steps.push({ method: "POST", path: "/profiles", body: shaped })
       expect.push({ profileUid: cloneUid, points: shaped.speed_profile, channels: present })
       for (c = 0; c < present.length; c++) {
@@ -2315,13 +2667,15 @@ Item {
       rebuild()
       return
     }
+    // The signature matches the maps just stored. An empty one makes the next
+    // catalog rebuild assign those same maps again.
     if (liveDiffer(patch.live)) {
       channelLive = patch.live
-      channelLiveSig = ""
+      channelLiveSig = JSON.stringify(patch.live)
     }
     if (tempsDiffer(patch.temps)) {
       temps = patch.temps
-      tempsSig = ""
+      tempsSig = JSON.stringify(patch.temps)
     }
   }
 
@@ -2425,6 +2779,10 @@ Item {
       root.skipNextUp = false
       root.sawHello = false
       root.lcdKeepBusy = false
+      if (root.silentRampBusy) {
+        root.silentRampBusy = false
+        root.silentRampNote = "The Silent pace did not finish."
+      }
       if (root.stopping) return
       if (root.connection === "ready" || root.streamHold)
         root.beginHold("coolercontrold is not running")
@@ -2461,21 +2819,19 @@ Item {
   }
 
   // Install asks once, the same way Start with the PC asks before enable.
-  // pkexec is what shows the password dialog from the panel. The package is
-  // AUR-only, so the command is `omarchy pkg aur add coolercontrold`.
-  // pkexec is root, and yay will not build as root, so the shell puts the
-  // approving account in SUDO_USER and HOME before that command runs.
+  // pkexec is what shows the password dialog from the panel. The script
+  // uses the pacman repositories when they have coolercontrold. Until
+  // they do, it installs the Arch extra file coolercontrold 5.1.1-2.
+  // It does not enable or start the service, and it leaves an installed
+  // package.
   Process {
     id: daemonInstall
-    command: [
-      "pkexec", "/usr/bin/bash", "-c",
-      "uid=${PKEXEC_UID:-}; user=$(id -nu \"$uid\"); home=$(getent passwd \"$user\" | cut -d: -f6); [[ -n $user && -d $home ]] || { echo 'Could not identify the account that approved the prompt.' >&2; exit 1; }; export SUDO_USER=$user HOME=$home USER=$user LOGNAME=$user; cd \"$home\" && exec /usr/share/omarchy/bin/omarchy pkg aur add coolercontrold"
-    ]
+    command: ["pkexec", "/usr/bin/bash", Repo.rootFile("scripts/install_daemon.sh")]
     stderr: SplitParser {
       onRead: function(line) { root.daemonNote = String(line || "") }
     }
     onExited: function(code) {
-      root.finishDaemonAction(code, "Omaflow could not install coolercontrold. In a terminal: omarchy pkg aur add coolercontrold")
+      root.finishDaemonAction(code, "Omaflow could not install coolercontrold. In a terminal: pkexec bash scripts/install_daemon.sh")
     }
   }
 

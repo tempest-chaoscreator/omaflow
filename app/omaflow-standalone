@@ -34,11 +34,23 @@ for name in os.listdir("/proc"):
     if name.isdigit() and is_app(cmdline(int(name))):
         pids.append(int(name))
 
+clients_ok = False
+clients = []
 try:
-    clients = json.loads(subprocess.check_output(["hyprctl", "clients", "-j"], text=True))
+    parsed = json.loads(subprocess.check_output(["hyprctl", "clients", "-j"], text=True))
+    if isinstance(parsed, list):
+        clients = parsed
+        clients_ok = True
 except Exception:
-    clients = []
+    clients_ok = False
 
+# A failed client list must not be treated as "no window", or a mapped
+# Omaflow gets signaled and a second copy starts.
+if not clients_ok:
+    print("unknown" if pids else "absent")
+    raise SystemExit
+
+mapped = []
 for client in clients:
     pid = client.get("pid")
     if not pid or not is_app(cmdline(int(pid))):
@@ -46,6 +58,7 @@ for client in clients:
     addr = str(client.get("address") or "")
     if not addr:
         continue
+    mapped.append(int(pid))
     result = subprocess.run(
         ["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{addr}" }})'],
         stdout=subprocess.DEVNULL,
@@ -55,6 +68,11 @@ for client in clients:
         print("focused")
         raise SystemExit
 
+if mapped:
+    print("mapped")
+    raise SystemExit
+
+# Only a process with no window is stopped. A listed window stays up.
 for pid in pids:
     try:
         os.kill(pid, signal.SIGTERM)
@@ -72,7 +90,7 @@ for pid in pids:
 print("clear")
 PY
 )
-if [[ "$action" == "focused" ]]; then
+if [[ "$action" == "focused" || "$action" == "mapped" || "$action" == "unknown" ]]; then
   exit 0
 fi
 exec quickshell -n -p "$root/qml/OmaflowApp.qml"

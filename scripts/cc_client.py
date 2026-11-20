@@ -616,8 +616,8 @@ def read_links() -> dict | None:
     return {"links": clean}
 
 
-def _clean_hidden(raw: object) -> dict:
-    """Device uids the user hid. Absent means shown."""
+def _clean_hidden(raw: object, limit: int = 80) -> dict:
+    """True flags only. A device uid fits in 80. A channel key is uid/name."""
     if not isinstance(raw, dict):
         return {}
     clean = {}
@@ -626,7 +626,7 @@ def _clean_hidden(raw: object) -> dict:
         examined += 1
         if examined > 200:
             break
-        if not isinstance(key, str) or not key or len(key) > 80:
+        if not isinstance(key, str) or not key or len(key) > limit:
             continue
         if value is True:
             clean[key] = True
@@ -637,12 +637,22 @@ def read_hidden() -> dict | None:
     data, state = _stored_dict(HIDDEN_PATH)
     if state == "unreadable" or not isinstance(data, dict):
         return None
-    return {"devices": _clean_hidden(data.get("devices"))}
+    return {
+        "devices": _clean_hidden(data.get("devices")),
+        "channels": _clean_hidden(data.get("channels"), 160),
+    }
 
 
 def write_hidden(data: dict) -> None:
-    raw = data.get("devices") if isinstance(data, dict) else None
-    payload = json.dumps({"devices": _clean_hidden(raw)}, indent=2).encode("utf-8")
+    raw_devices = data.get("devices") if isinstance(data, dict) else None
+    raw_channels = data.get("channels") if isinstance(data, dict) else None
+    payload = json.dumps(
+        {
+            "devices": _clean_hidden(raw_devices),
+            "channels": _clean_hidden(raw_channels, 160),
+        },
+        indent=2,
+    ).encode("utf-8")
     _write_private(HIDDEN_PATH, payload)
 
 
@@ -860,6 +870,12 @@ def write_pack(data: dict) -> None:
 
 
 def clear_pack() -> None:
+    try:
+        info = PACK_PATH.lstat()
+    except OSError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return
     try:
         PACK_PATH.unlink()
     except OSError:
@@ -1262,6 +1278,18 @@ def _picture_fd(raw: object) -> tuple[int, str, int] | None:
             pass
 
 
+def _picture_ident(raw: object) -> str:
+    """Identity of one picture. The descriptor from the checked open is closed here."""
+    opened = _picture_fd(raw)
+    if not opened:
+        return ""
+    fd, ident, _size = opened
+    try:
+        return ident
+    finally:
+        os.close(fd)
+
+
 def _load_picture(raw: object) -> tuple[bytes, str] | None:
     """Read the checked size. A later stat would follow a growth of that same file."""
     opened = _picture_fd(raw)
@@ -1294,8 +1322,22 @@ def _picture_scale(value: object) -> int:
     return max(50, min(300, number))
 
 
-def _render_picture_png(blob: bytes, width: int, height: int, shape: str, angle: int, scale_pct: int = 100) -> bytes:
-    """Place the image on the AIO LCD, centered. Round glass is masked. The dial angle is baked in."""
+def _render_picture_png(
+    blob: bytes,
+    width: int,
+    height: int,
+    shape: str,
+    angle: int,
+    scale_pct: int = 100,
+    clear: bool = False,
+) -> bytes:
+    """Place the image on the AIO LCD, centered. Round glass is masked. The dial angle is baked in.
+
+    The cooler plate is opaque. `clear` is the window preview: the square corners
+    outside round glass are transparent so the page background shows, and a
+    square panel stays the reported rectangle. Unequal pixel sizes are that
+    rectangle. The cooler upload does not use `clear`.
+    """
     from PIL import Image, ImageDraw
 
     Image.MAX_IMAGE_PIXELS = 24_000_000
@@ -1320,24 +1362,44 @@ def _render_picture_png(blob: bytes, width: int, height: int, shape: str, angle:
     canvas = Image.new("RGB", (w, h), _LCD_BG)
     canvas.paste(fitted, ((w - fitted.width) // 2, (h - fitted.height) // 2))
     fitted.close()
+    fill = _LCD_BG
     if str(shape or "round") != "square":
         mask = Image.new("L", (w, h), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, w - 1, h - 1), fill=255)
-        masked = Image.new("RGB", (w, h), _LCD_BG)
-        masked.paste(canvas, mask=mask)
-        canvas.close()
-        mask.close()
-        canvas = masked
-    return lcd_logo.bake_png(canvas, angle, _LCD_BG, optimize=True)
+        if clear:
+            shown = canvas.convert("RGBA")
+            canvas.close()
+            shown.putalpha(mask)
+            mask.close()
+            canvas = shown
+            fill = (0, 0, 0, 0)
+        else:
+            masked = Image.new("RGB", (w, h), _LCD_BG)
+            masked.paste(canvas, mask=mask)
+            canvas.close()
+            mask.close()
+            canvas = masked
+    return lcd_logo.bake_png(canvas, angle, fill, optimize=True)
 
 
-def render_picture_png(path: str, width: int, height: int, shape: str, angle: int, scale: object = None) -> tuple[bytes, str] | None:
+def render_picture_png(
+    path: str,
+    width: int,
+    height: int,
+    shape: str,
+    angle: int,
+    scale: object = None,
+    clear: bool = False,
+) -> tuple[bytes, str] | None:
     loaded = _load_picture(path)
     if not loaded:
         return None
     blob, ident = loaded
     try:
-        return _render_picture_png(blob, width, height, shape, angle, _picture_scale(scale)), ident
+        return (
+            _render_picture_png(blob, width, height, shape, angle, _picture_scale(scale), clear),
+            ident,
+        )
     except Exception as err:  # noqa: BLE001 — a bad image must not stop the helper
         sys.stderr.write("omaflow lcd picture: %s\n" % type(err).__name__)
         sys.stderr.flush()
@@ -1558,6 +1620,22 @@ def lcd_release(mark: str) -> None:
     _with_lcd_lease(update)
 
 
+def lcd_restore(previous: str, mark: str) -> None:
+    """Put the last good stamp back when this show did not upload.
+
+    Only the stamp this show wrote is replaced. A newer stamp from the other
+    process stays.
+    """
+    def update(prev: dict):
+        if str(prev.get("mark") or "") != mark:
+            return None
+        if previous and previous != mark:
+            return {"mark": previous, "at": time.time()}
+        return {"mark": "", "at": 0}
+
+    _with_lcd_lease(update)
+
+
 def lcd_current_mark() -> str:
     prev = _with_lcd_lease(lambda _prev: None)
     if isinstance(prev, dict):
@@ -1704,6 +1782,15 @@ def lcd_keep(msg: dict, shown: bool = False) -> dict:
     shape = detect_shape(device_name, width, height)
     if face == "picture" and not shown:
         return _lcd_skip("still")
+    picture_path = ""
+    picture_scale = None
+    picture_id = ""
+    if face == "picture":
+        picture_path = str(view.get("picture") or "")
+        picture_scale = _picture_scale(view.get("pictureScale"))
+        picture_id = _picture_ident(picture_path)
+        if not picture_id:
+            return {"ok": False, "status": 0, "error": "picture unreadable", "body": None}
     primary, secondary = _face_text(face, msg.get("cpu"), msg.get("gpu"), msg.get("coolant"))
     if not shown and face not in _STILL_FACES:
         if primary == "—":
@@ -1715,22 +1802,34 @@ def lcd_keep(msg: dict, shown: bool = False) -> dict:
     ink2 = _deepen_hex(second or accent, saturation) if (second or accent) else ""
     mark = _upload_mark(
         shape, width, height, face, ink, ink2, primary, secondary, brightness, angle,
+        picture_id, picture_scale,
     )
     # A still plate stays up until its mark changes. Temperature faces still
     # refresh on the interval so a quiet sensor does not look frozen.
     # An explicit show uploads anyway, including after the screen was blanked.
     if not shown and face in _STILL_FACES and lcd_current_mark() == mark:
         return _lcd_skip("fresh")
+    previous = lcd_current_mark() if shown else ""
     if shown:
         lcd_remember(mark)
     elif not lcd_claim(mark, _lcd_seconds(msg.get("interval"))):
         return _lcd_skip("fresh")
-    result = push_lcd_image(
-        device, channel, brightness, face, angle, ink, ink2, primary, secondary,
-        shape, width, height, device_name,
-    )
+    try:
+        result = push_lcd_image(
+            device, channel, brightness, face, angle, ink, ink2, primary, secondary,
+            shape, width, height, device_name, picture_path, picture_scale,
+        )
+    except Exception as err:
+        if shown:
+            lcd_restore(previous, mark)
+        else:
+            lcd_release(mark)
+        return {"ok": False, "status": 0, "error": str(err), "body": None}
     if not result.get("ok"):
-        lcd_release(mark)
+        if shown:
+            lcd_restore(previous, mark)
+        else:
+            lcd_release(mark)
     return result
 
 
@@ -1860,6 +1959,7 @@ def lcd_preview(msg: dict) -> dict:
                 shape,
                 0,
                 msg.get("scale"),
+                clear=True,
             )
             if not rendered:
                 return {"ok": False, "status": 0, "error": "picture unreadable", "body": None}
@@ -2398,9 +2498,9 @@ def _history_temps(row: dict) -> list:
     return temps if isinstance(temps, list) else []
 
 
-def _labeled_temps(device: dict, samples: list) -> list[tuple[str, float]]:
+def _labeled_temps(device: dict, samples: list) -> list[tuple[str, str, float]]:
     info = ((device.get("info") or {}).get("temps") or {}) if isinstance(device, dict) else {}
-    out: list[tuple[str, float]] = []
+    out: list[tuple[str, str, float]] = []
     for sample in samples:
         if not isinstance(sample, dict):
             continue
@@ -2411,39 +2511,51 @@ def _labeled_temps(device: dict, samples: list) -> list[tuple[str, float]]:
         name = str(sample.get("name") or "")
         meta = info.get(name) if isinstance(info, dict) else None
         label = str(meta.get("label") or "") if isinstance(meta, dict) else ""
-        out.append((label or name, temp))
+        out.append((label or name, name, temp))
     return out
 
 
-def _match_temp(rows: list[tuple[str, float]], pattern: str):
+def _sensor_text(shown: str, name: str) -> str:
+    """Same string as CcMap.sensorText: name, or name plus a different label."""
+    if not shown or shown == name:
+        return name
+    return name + " " + shown
+
+
+def _match_temp(rows: list[tuple[str, str, float]], pattern: str):
     rx = re.compile(pattern, re.I)
-    for name, temp in rows:
-        if rx.search(name):
+    for shown, name, temp in rows:
+        if rx.search(_sensor_text(shown, name)):
             return temp
     return None
 
 
-def _pick_temp(rows: list[tuple[str, float]], pattern: str):
+def _pick_temp(rows: list[tuple[str, str, float]], pattern: str):
     found = _match_temp(rows, pattern)
     if found is not None:
         return found
     if not rows:
         return None
-    return max(temp for _, temp in rows)
+    return max(temp for _shown, _name, temp in rows)
 
 
-def _gpu_edge(rows: list[tuple[str, float]]):
-    """Edge temperature. Hotspot loses to any other GPU sensor."""
+def _gpu_edge(rows: list[tuple[str, str, float]]):
+    """Edge temperature. Hotspot loses to any other GPU sensor.
+
+    A hotspot name stays last even when its label ends in "GPU Temp".
+    """
     best = None
     rank = -1
-    for name, temp in rows:
-        score = 1
-        if re.search(r"hotspot|hot spot", name, re.I):
+    for shown, name, temp in rows:
+        blob = name + "\n" + shown
+        if re.search(r"hotspot|hot spot", blob, re.I):
             score = 0
-        if re.search(r"edge", name, re.I):
-            score = 3
-        if re.search(r"gpu temp$", name, re.I):
+        elif re.search(r"gpu temp$", name, re.I) or re.search(r"gpu temp$", shown, re.I):
             score = 4
+        elif re.search(r"edge", blob, re.I):
+            score = 3
+        else:
+            score = 1
         if score > rank:
             rank = score
             best = temp
@@ -2479,8 +2591,10 @@ def _screen_numbers(face: str, devices: list, status: dict) -> tuple[str, str]:
             cpu = _pick_temp(labeled, r"package|tctl|tdie")
         elif kind == "GPU":
             gpu = _gpu_edge(labeled)
-        for name, temp in labeled:
-            if re.search(r"liquid|coolant|water", name, re.I):
+        for shown, name, temp in labeled:
+            # Water counts only on the sensor name. A label of "Water" does not.
+            label = "" if shown == name else shown
+            if re.search(r"liquid|coolant|water", name, re.I) or re.search(r"liquid|coolant", label, re.I):
                 coolant = temp
     if face in ("cpu", "cpu-gpu", "cpu-liquid"):
         primary = _whole(cpu)
@@ -2766,6 +2880,7 @@ _CATALOG = (
     ("status", "/status"),
     ("calibrations", "/calibrations"),
     ("calibrationBatch", "/calibrations/batch"),
+    ("overrides", "/settings/overrides"),
 )
 
 

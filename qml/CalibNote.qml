@@ -14,6 +14,7 @@ Item {
   property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
+  property int indent: Style.space(16)
 
   readonly property string deviceUid: channel && channel.deviceUid ? String(channel.deviceUid) : ""
   readonly property string channelName: channel && channel.name ? String(channel.name) : ""
@@ -36,7 +37,7 @@ Item {
 
   Column {
     id: inner
-    x: Style.space(16)
+    x: root.indent
     width: Math.max(0, root.width - x - Style.space(4))
     spacing: Style.space(4)
     visible: root.hasContent

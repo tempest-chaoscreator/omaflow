@@ -20,6 +20,8 @@ Item {
   Behavior on shown { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
   onShownChanged: dial.requestPaint()
   onTextScaleChanged: dial.requestPaint()
+  onForegroundChanged: dial.requestPaint()
+  onAccentChanged: dial.requestPaint()
   onWidthChanged: dial.requestPaint()
   onHeightChanged: dial.requestPaint()
   Component.onCompleted: dial.requestPaint()

@@ -19,7 +19,6 @@ Item {
   property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   readonly property string fanGlyph: "\uDB80\uDE10"
-  readonly property bool hovered: hit.containsMouse
   readonly property bool hot: selected || hit.containsMouse || (stick && open)
   readonly property bool words: label !== "" && (stick ? open : (!reveal || hit.containsMouse || selected))
   signal clicked()

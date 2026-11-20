@@ -1,6 +1,6 @@
 # Omaflow
 
-Omaflow 0.7 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
+Omaflow 0.8 is the cooling window and the Omarchy bar chip. Both are clients of [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s `coolercontrold` at `127.0.0.1:11987`. Open the chip and choose **Install coolercontrold** or **Start coolercontrold** after you approve it, or install and start the daemon yourself. **Start with the PC** stays off until you turn it on. Fan writes and sensor polls stay on that daemon's `poll_rate`. Omaflow does not read sysfs, does not run `liquidctl`, does not install the CoolerControl desktop package, and does not store the CoolerControl password.
 
 ![Omaflow](screenshots/presentation.png)
 
@@ -23,12 +23,12 @@ The first time the chip loads, it copies the window launcher into place. `omarch
 - `~/.local/share/applications/omaflow-standalone.desktop` is the launcher entry.
 - `~/.config/omaflow/` holds the token and the other settings, written by the running program.
 
-That copy does not install `coolercontrold`. Open the chip. If `coolercontrold` is missing, choose **Install coolercontrold**. That asks for your password and runs `omarchy pkg aur add coolercontrold`. It does not install the CoolerControl desktop package. If the package is already installed and the service is stopped, choose **Start coolercontrold**. That asks for your password and runs `systemctl start`. It does not enable the service at boot, and Omaflow does not run as root.
+That copy does not install `coolercontrold`. Open the chip. If `coolercontrold` is missing, choose **Install coolercontrold**. That asks for your password and runs `scripts/install_daemon.sh`. The script installs the package from the Omarchy repositories when it is there. Until that snapshot has it, the script runs `pacman -U --needed` on the Arch extra file `coolercontrold-5.1.1-2-x86_64.pkg.tar.zst`. That file stays 5.1.1-2. `pacman -Syu` upgrades it once a configured repository lists `coolercontrold`. The script does not install the CoolerControl desktop package. If the package is already installed and the service is stopped, choose **Start coolercontrold**. That asks for your password and runs `systemctl start`. It does not enable the service at boot, and Omaflow does not run as root.
 
 To start the daemon with the PC, open Omaflow and turn on **Start with the PC** in Settings. That stays off until you turn it on. The same two steps from a terminal:
 
 ```bash
-omarchy pkg aur add coolercontrold
+pkexec bash ~/.config/omarchy/plugins/tempest-chaoscreator.omaflow/scripts/install_daemon.sh
 sudo systemctl enable --now coolercontrold
 ```
 
@@ -49,10 +49,16 @@ cd omaflow
 omaflow
 ```
 
-Install and start the daemon from those buttons, or from a terminal. Install runs `omarchy pkg aur add coolercontrold` and does not install the CoolerControl desktop package. Start runs `systemctl start` and does not enable the service at boot. **Start with the PC** in Settings stays off until you turn it on.
+Install and start the daemon from those buttons, or from a terminal. Install runs `scripts/install_daemon.sh`. Until the Omarchy repositories list `coolercontrold`, that is the same package as:
 
 ```bash
-omarchy pkg aur add coolercontrold
+sudo pacman -U --needed https://geo.mirror.pkgbuild.com/extra/os/x86_64/coolercontrold-5.1.1-2-x86_64.pkg.tar.zst
+```
+
+The script does not install the CoolerControl desktop package. Start runs `systemctl start` and does not enable the service at boot. **Start with the PC** in Settings stays off until you turn it on.
+
+```bash
+pkexec bash scripts/install_daemon.sh
 sudo systemctl enable --now coolercontrold
 ```
 

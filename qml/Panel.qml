@@ -34,7 +34,6 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color accent: Commons.Color.accent
   readonly property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
-  readonly property color rule: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   readonly property real hottest: {
     var sample = service && service.temps ? service.temps : null
     // Number(null) is 0. A missing sensor must stay missing, while a real 0° stays 0.
@@ -159,9 +158,21 @@ Panel {
     for (i = 0; i < members.length; i++) {
       var row = members[i]
       if (!row.profileUid || seen[row.profileUid]) continue
-      if (!row.points || row.points.length < 2) continue
+      var packed = Cc.packPoints(
+        service.curvePack,
+        mode.name,
+        row.deviceName,
+        row.name,
+        row.deviceUid
+      )
+      var points = packed && packed.length > 1 ? packed : null
+      if (!points) {
+        var profile = Cc.profileByUid(service.profiles, row.profileUid)
+        points = Cc.rawGraphPoints(profile)
+      }
+      if (!points || points.length < 2) continue
       seen[row.profileUid] = true
-      jobs.push({ profileUid: row.profileUid, points: row.points, minDuty: row.minDuty || 0 })
+      jobs.push({ profileUid: row.profileUid, points: points, minDuty: row.minDuty || 0 })
     }
     return jobs
   }
@@ -659,50 +670,9 @@ Panel {
             height: root.modeH
             visible: root.ready && root.modes.length > 0
 
-            Button {
-              id: applyBtn
-              anchors.right: parent.right
-              visible: root.mode !== null
-              width: root.modeH
-              height: root.modeH
-              opacity: root.calibrationBusy ? 0.45 : 1
-              iconText: root.modeApplied ? "\uf058" : "\uf05d"
-              iconSize: Style.space(15)
-              bordered: true
-              hasCursor: root.aim("apply", "")
-              selected: false
-              background: root.modeApplied ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22) : "transparent"
-              foreground: root.fg
-              accent: root.accent
-              fontFamily: root.fontFamily
-              horizontalPadding: 0
-              verticalPadding: 0
-              tooltipText: root.calibrationBusy
-                ? "A fan is being calibrated. Apply waits until that sweep finishes."
-                : (root.modeApplied
-                  ? (root.mode.name + " is running")
-                  : ("Run " + (root.mode ? root.mode.name : "")))
-              onClicked: root.applySelected()
-            }
-
-            Rectangle {
-              id: modeSep
-              anchors.right: applyBtn.left
-              anchors.rightMargin: Style.space(6)
-              anchors.verticalCenter: parent.verticalCenter
-              width: 1
-              height: parent.height
-              visible: root.mode !== null
-              color: root.rule
-            }
-
             Row {
               id: modeButtons
-              anchors.left: parent.left
-              anchors.right: modeSep.left
-              anchors.rightMargin: Style.space(6)
-              anchors.verticalCenter: parent.verticalCenter
-              height: parent.height
+              anchors.fill: parent
               spacing: Style.space(6)
 
               Repeater {
@@ -715,12 +685,12 @@ Panel {
                   readonly property bool hell: /hell/i.test(String(modelData.name || ""))
                   readonly property int slot: {
                     var count = root.modes.length
-                    if (count < 1) return 0
-                    var gaps = modeButtons.spacing * Math.max(0, count - 1)
-                    var base = Math.floor((modeButtons.width - gaps) / count)
-                    if (index === count - 1)
-                      return Math.max(1, modeButtons.width - gaps - base * Math.max(0, count - 1))
-                    return Math.max(1, base)
+                    if (count < 1 || modeButtons.width < 1) return 0
+                    var gap = modeButtons.spacing
+                    var room = modeButtons.width - root.modeH - gap * count
+                    var base = Math.floor(room / Math.max(1, count))
+                    var extra = room - base * count
+                    return Math.max(1, base + (index === count - 1 ? extra : 0))
                   }
                   width: slot
                   height: root.modeH
@@ -731,7 +701,7 @@ Panel {
                   selected: chosen
                   hasCursor: root.aim("mode", modelData.uid)
                   bordered: true
-                  foreground: running ? (hell ? Commons.Color.urgent : root.accent) : root.fg
+                  foreground: root.fg
                   accent: hell ? Commons.Color.urgent : root.accent
                   fontFamily: root.fontFamily
                   fontSize: Style.font.caption
@@ -739,6 +709,34 @@ Panel {
                   tooltipText: running ? "Running" : "Select this mode"
                   onClicked: root.pickMode(modelData.uid)
                 }
+              }
+
+              Button {
+                id: applyBtn
+                visible: root.mode !== null
+                width: root.modeH
+                height: root.modeH
+                opacity: root.calibrationBusy ? 0.45 : 1
+                iconText: root.modeApplied ? "\uf058" : "\uf05d"
+                iconSize: Style.space(15)
+                bordered: true
+                hasCursor: root.aim("apply", "")
+                selected: false
+                background: root.modeApplied ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22) : "transparent"
+                foreground: root.fg
+                accent: root.accent
+                fontFamily: root.fontFamily
+                horizontalPadding: 0
+                verticalPadding: 0
+                tooltipText: {
+                  if (root.calibrationBusy) return "A fan is being calibrated. Apply waits until that sweep finishes."
+                  if (!root.mode) return ""
+                  var members = root.service ? Cc.modeMembers(root.mode, root.service.channels, root.service.profiles) : []
+                  if (!members.length) return "Add a channel before applying"
+                  if (root.modeApplied) return "Save curves. " + root.mode.name + " is running"
+                  return "Save curves and run " + root.mode.name
+                }
+                onClicked: root.applySelected()
               }
             }
           }

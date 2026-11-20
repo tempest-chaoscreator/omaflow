@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Horizontal LED row. Unlit squares stay dim. The residual square is the one
 // the parent holds above the live fill.
@@ -7,6 +8,7 @@ Item {
   id: meter
 
   property var palette: []
+  property color foreground: Commons.Color.foreground
   property int squares: 12
   property int lit: 0
   property int hold: -1
@@ -20,7 +22,7 @@ Item {
 
   function colorAt(index) {
     var list = palette || []
-    if (!list.length) return "#888888"
+    if (!list.length) return foreground
     var slot = Math.floor(index * list.length / Math.max(1, squares))
     if (slot < 0) slot = 0
     if (slot >= list.length) slot = list.length - 1

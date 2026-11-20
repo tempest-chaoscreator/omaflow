@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -8,7 +7,6 @@ import qs.Commons as Commons
 import qs.Ui
 import "Marks.js" as Marks
 import "Nav.js" as Nav
-import "RepoPath.js" as Repo
 import "Wheel.js" as Wheel
 
 // Omaflow. Monitoring opens first.
@@ -241,11 +239,24 @@ Item {
     shellFile.reload()
   }
 
+  function textFocused(item) {
+    var name = String(item || "")
+    return name.indexOf("TextField") >= 0 || name.indexOf("TextInput") >= 0
+  }
+
   function handleKey(event) {
     var item = window.activeFocusItem
-    var typing = item && (String(item).indexOf("TextField") >= 0 || String(item).indexOf("TextInput") >= 0)
+    var typing = textFocused(item)
+    var host = promptKeyed ? daemonPrompt : activePage()
+    var editing = !!(host && host.editingName && host.editingName())
     if (event.key === Qt.Key_Escape) {
-      if (!typing && zone === "page" && activePage() && activePage().takeEscape && activePage().takeEscape()) {
+      if (editing && host.takeEscape) host.takeEscape()
+      // A text field owns Escape. It cancels a rename and does not close the window.
+      if (editing || typing) {
+        event.accepted = true
+        return
+      }
+      if (zone === "page" && activePage() && activePage().takeEscape && activePage().takeEscape()) {
         event.accepted = true
         return
       }
@@ -253,7 +264,12 @@ Item {
       event.accepted = true
       return
     }
-    if (typing) return
+    if (editing && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && host.takeEnter) {
+      host.takeEnter()
+      event.accepted = true
+      return
+    }
+    if (editing || typing) return
     if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
       zone = zone === "rail" ? "page" : "rail"
       event.accepted = true
@@ -271,7 +287,6 @@ Item {
       if (down || up || left || right) event.accepted = true
       return
     }
-    var host = promptKeyed ? daemonPrompt : activePage()
     if (!host) return
     var dx = right ? 1 : (left ? -1 : 0)
     var dy = down ? 1 : (up ? -1 : 0)
@@ -364,67 +379,21 @@ Item {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.topMargin: Style.space(12)
-            anchors.leftMargin: Style.space(12)
+            anchors.leftMargin: Style.space(12) + Style.space(8)
             anchors.rightMargin: Style.space(12)
-            height: brandRow.height
-            readonly property real brandGap: Style.space(8)
+            height: brandWord.implicitHeight
 
-            TextMetrics {
-              id: wordMetrics
+            Text {
+              id: brandWord
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
               text: "OMAFLOW"
+              color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.space(15)
               font.bold: true
               font.letterSpacing: 1.3
-            }
-
-            Item {
-              id: brandRow
-              x: Math.round((parent.width - width) / 2)
-              y: 0
-              width: brandMark.width + wordmark.brandGap + wordMetrics.width
-              height: brandMark.height
-
-              Item {
-                id: brandMark
-                width: Style.space(40)
-                height: width
-
-                Image {
-                  id: brandSource
-                  anchors.fill: parent
-                  source: "file://" + Repo.rootFile("icons/omaflow-icon-currentcolor-tight.svg")
-                  fillMode: Image.PreserveAspectFit
-                  mipmap: true
-                  sourceSize.width: 256
-                  sourceSize.height: 256
-                  visible: false
-                  layer.enabled: true
-                  asynchronous: true
-                }
-
-                MultiEffect {
-                  anchors.fill: brandSource
-                  source: brandSource
-                  // currentColor paints black. Qt tints by luminance, so lift it first.
-                  brightness: 1.0
-                  colorization: 1.0
-                  colorizationColor: root.fg
-                }
-              }
-
-              Text {
-                id: brandWord
-                x: brandMark.width + wordmark.brandGap
-                y: (brandRow.height - height) / 2
-                textFormat: Text.PlainText
-                text: wordMetrics.text
-                color: root.fg
-                font.family: wordMetrics.font.family
-                font.pixelSize: wordMetrics.font.pixelSize
-                font.bold: true
-                font.letterSpacing: wordMetrics.font.letterSpacing
-              }
             }
           }
 

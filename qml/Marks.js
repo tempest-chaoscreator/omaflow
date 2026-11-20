@@ -12,9 +12,9 @@ var fan = g(0xF0210)
 var cpu = g(0xF4BC)
 var gpu = g(0xE266)
 var liquid = g(0xF1A86)
-// fa-line_chart. The monitoring rail used this before the material set.
+// fa-line_chart. The monitoring rail still uses this Font Awesome mark.
 var monitor = g(0xF201)
-// fa-chart_area. The modes rail used this before the sine wave.
+// fa-chart_area. The modes rail still uses this Font Awesome mark.
 var modes = g(0xF1FE)
 var curve = g(0xF095B)
 var lcd = g(0xF0379)

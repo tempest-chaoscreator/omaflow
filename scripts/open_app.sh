@@ -5,7 +5,7 @@
 set -euo pipefail
 
 status=$(python3 - << 'PY'
-import json, os, subprocess
+import json, os, signal, subprocess, time
 
 def cmdline(pid):
     try:
@@ -21,24 +21,36 @@ def is_app(cmd):
         and "/usr/share/omarchy/shell" not in cmd
     )
 
-running = False
+pids = []
 for name in os.listdir("/proc"):
     if name.isdigit() and is_app(cmdline(int(name))):
-        running = True
-        break
+        pids.append(int(name))
 
+clients_ok = False
+clients = []
 try:
-    clients = json.loads(subprocess.check_output(["hyprctl", "clients", "-j"], text=True))
+    parsed = json.loads(subprocess.check_output(["hyprctl", "clients", "-j"], text=True))
+    if isinstance(parsed, list):
+        clients = parsed
+        clients_ok = True
 except Exception:
-    clients = []
+    clients_ok = False
 
+# A failed client list must not be treated as "no window", or a mapped
+# Omaflow gets signaled and a second copy starts.
+if not clients_ok:
+    print("unknown" if pids else "absent")
+    raise SystemExit
+
+mapped = []
 for client in clients:
     pid = client.get("pid")
-    if not pid or not is_app(cmdline(pid)):
+    if not pid or not is_app(cmdline(int(pid))):
         continue
     addr = str(client.get("address") or "")
     if not addr:
         continue
+    mapped.append(int(pid))
     result = subprocess.run(
         ["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{addr}" }})'],
         stdout=subprocess.DEVNULL,
@@ -47,13 +59,35 @@ for client in clients:
     if result.returncode == 0:
         print("focused")
         raise SystemExit
-print("running" if running else "absent")
+
+if mapped:
+    print("mapped")
+    raise SystemExit
+
+# A windowless OmaflowApp makes `quickshell -n` exit and leaves nothing to
+# focus. Stop it before any launch path, including the raw quickshell fallback.
+# The shell process is excluded by is_app. A listed window is not signaled.
+for pid in pids:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+deadline = time.time() + 2
+while time.time() < deadline and any(os.path.exists(f"/proc/{pid}") for pid in pids):
+    time.sleep(0.05)
+for pid in pids:
+    if os.path.exists(f"/proc/{pid}"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+print("running" if pids else "absent")
 PY
 )
 
 # "running" has no window. Fall through so the launcher can replace it.
 # Treating that as success is why the chip did nothing after Escape.
-if [[ "$status" == "focused" ]]; then
+if [[ "$status" == "focused" || "$status" == "mapped" || "$status" == "unknown" ]]; then
   exit 0
 fi
 
@@ -80,6 +114,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source "$root/scripts/qml_imports.sh"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 export QML_IMPORT_PATH="$(qml_import_path)${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+export QS_APP_ID="${QS_APP_ID:-omaflow-standalone}"
 launcher="$root/app/omaflow-standalone"
 # setsid -f leaves the window in its own session, so closing the bar does not close it.
 if [[ -x "$launcher" ]]; then

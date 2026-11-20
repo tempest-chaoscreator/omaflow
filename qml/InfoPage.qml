@@ -1,5 +1,5 @@
 import QtQuick
-import Quickshell
+import QtQuick.Effects
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
@@ -11,13 +11,12 @@ import "RepoPath.js" as Repo
 Column {
   id: root
 
-  property bool keyed: false
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
   property color muted: Qt.darker(fg, 1.4)
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
   property string fontFamily: Style.font.family
-  property string version: "0.7.0"
+  property string version: "0.8.0"
   property string author: "Tempest"
   property string homepage: "https://github.com/tempest-chaoscreator/omaflow"
   readonly property int capH: Style.space(22)
@@ -70,6 +69,7 @@ Column {
     id: box
     property string heading: ""
     property string mark: ""
+    property Component corner: null
     default property alias body: bodyCol.data
     width: parent ? parent.width : 0
     implicitHeight: layout.implicitHeight + Style.space(20)
@@ -114,30 +114,77 @@ Column {
         spacing: Style.space(8)
       }
     }
+
+    Loader {
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      active: box.corner !== null
+      sourceComponent: box.corner
+      z: 2
+    }
+  }
+
+  Component {
+    id: brandMark
+
+    Item {
+      width: Style.space(40)
+      height: width
+
+      Image {
+        id: brandSource
+        anchors.fill: parent
+        source: "file://" + Repo.rootFile("icons/omaflow-icon-currentcolor-tight.svg")
+        fillMode: Image.PreserveAspectFit
+        mipmap: true
+        sourceSize.width: 256
+        sourceSize.height: 256
+        visible: false
+        layer.enabled: true
+        asynchronous: true
+      }
+
+      MultiEffect {
+        anchors.fill: brandSource
+        source: brandSource
+        // currentColor paints black. Qt tints by luminance, so lift it first.
+        brightness: 1.0
+        colorization: 1.0
+        colorizationColor: root.fg
+      }
+    }
   }
 
   InfoBox {
     heading: "Omaflow"
     mark: Marks.fan
+    corner: brandMark
 
-    Text {
-      width: parent.width
-      wrapMode: Text.WordWrap
-      text: "Version " + root.version + "  ·  " + root.author
-      textFormat: Text.PlainText
-      color: root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.space(13)
-    }
+    Column {
+      id: versionCol
+      width: parent.width - Style.space(40) - Style.space(8)
+      spacing: Style.space(8)
 
-    Text {
-      width: parent.width
-      wrapMode: Text.WrapAnywhere
-      text: root.homepage
-      textFormat: Text.PlainText
-      color: root.muted
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+        Text {
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: "Version " + root.version + "  ·  " + root.author
+          textFormat: Text.PlainText
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(13)
+        }
+
+        Text {
+          width: parent.width
+          wrapMode: Text.WrapAnywhere
+          text: root.homepage
+          textFormat: Text.PlainText
+          color: root.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
     }
   }
 
@@ -161,7 +208,6 @@ Column {
       delegate: Column {
         id: keyCol
         required property var modelData
-        required property int index
         width: Math.max(1, Math.floor((parent.width - Style.space(24)) / 2))
         spacing: Style.space(4)
 
@@ -170,7 +216,6 @@ Column {
           delegate: Item {
             id: keySlot
             required property var modelData
-            required property int index
             readonly property bool heading: modelData.heading !== undefined
             width: keyCol.width
             height: heading ? root.capH : root.capH + Style.space(4)
@@ -233,7 +278,7 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
-    text: "Enter runs the highlighted control. The eye hides a device from Monitoring and the bar. A group made of only that device hides with it. The link beside a Modes name shares one curve. The pump keeps its own. The axis lock on LCD zeroes the preview and saves it. Left and right change a slider when the arrow has nowhere else to go, and the wheel does the same. Saturation deepens the theme colors and keeps their hue."
+    text: "Enter runs the highlighted control. An eye on a device hides that device from Monitoring and the bar. An eye on a channel hides only that channel. A group hides when each of its channels is hidden, and a group can be a single channel. A hidden block folds until you open it. A Modes block whose fans all sit in another group folds to the end of the list. The link beside a Modes name shares one curve. The pump keeps its own. The axis lock on LCD zeroes the preview and saves it. Left and right change a slider when the arrow has nowhere else to go, and the wheel does the same. Saturation deepens the theme colors and keeps their hue."
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

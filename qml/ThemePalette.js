@@ -63,20 +63,72 @@ function ramp(raw, accent, urgent) {
   return out
 }
 
-// Same device and group keys on Devices and Modes, so both tabs pick the same square.
-function keysOf(channels, groups) {
-  var keys = []
+// Modes and Devices bars. Named inks from the theme that is loaded now.
+// Brown stays last. swatch holds it for one leftover block and leaves it
+// out of the repeat, because it reads as mud next to the others.
+function blockInks(raw) {
+  var parsed = parse(raw)
+  var colors = take(parsed, ["red", "yellow", "orange", "green", "cyan", "blue", "magenta"])
+  if (!colors.length) return ramp(raw)
+  if (parsed.brown) colors.push(parsed.brown)
+  return colors
+}
+
+// Same order as the Devices list, so both tabs paint one color per block.
+// Hidden blocks sit at the end, then names. Groups lead when they are pinned.
+function blockKeys(channels, groups, hiddenDevices, hiddenChannels, pinGroups) {
+  var byKey = ({})
   var list = channels || []
   var i
-  for (i = 0; i < list.length; i++) {
-    var uid = list[i] && list[i].deviceUid
-    if (uid) keys.push("d:" + uid)
+  for (i = 0; i < list.length; i++) if (list[i] && list[i].key) byKey[list[i].key] = list[i]
+  function concealed(channel) {
+    if (!channel) return false
+    var uid = channel.deviceUid
+    if (uid && hiddenDevices && hiddenDevices[uid] === true) return true
+    var key = channel.key
+    return !!(key && hiddenChannels && hiddenChannels[key] === true)
   }
+  var devices = []
+  var seen = ({})
+  for (i = 0; i < list.length; i++) {
+    var channel = list[i]
+    if (!channel || !channel.deviceUid || seen[channel.deviceUid]) continue
+    seen[channel.deviceUid] = true
+    devices.push({
+      key: "d:" + channel.deviceUid,
+      name: String(channel.deviceName || "Device"),
+      hidden: !!(hiddenDevices && hiddenDevices[channel.deviceUid] === true)
+    })
+  }
+  devices.sort(function(a, b) {
+    if (a.hidden !== b.hidden) return a.hidden ? 1 : -1
+    return a.name.localeCompare(b.name)
+  })
+  var cards = []
   var saved = groups || []
   for (i = 0; i < saved.length; i++) {
-    var id = saved[i] && saved[i].id
-    if (id) keys.push("g:" + id)
+    var group = saved[i]
+    if (!group || !group.id) continue
+    var members = group.members || []
+    var any = false
+    var hidden = true
+    var m
+    for (m = 0; m < members.length; m++) {
+      var row = byKey[members[m]]
+      if (!row) continue
+      any = true
+      if (!concealed(row)) hidden = false
+    }
+    if (!any) continue
+    cards.push({ key: "g:" + group.id, name: String(group.name || "Group"), hidden: hidden })
   }
+  cards.sort(function(a, b) {
+    if (a.hidden !== b.hidden) return a.hidden ? 1 : -1
+    return a.name.localeCompare(b.name)
+  })
+  var rows = pinGroups ? cards.concat(devices) : devices.concat(cards)
+  var keys = []
+  for (i = 0; i < rows.length; i++) keys.push(rows[i].key)
   return keys
 }
 
@@ -92,7 +144,6 @@ function swatch(palette, keys, key) {
     seen[item] = true
     sorted.push(item)
   }
-  sorted.sort()
   var at = 0
   var want = String(key || "")
   for (i = 0; i < sorted.length; i++) {
@@ -101,5 +152,15 @@ function swatch(palette, keys, key) {
       break
     }
   }
-  return list[at % list.length]
+  // A full named set ends in brown. Use it only when exactly one block is
+  // left after the other inks. More blocks than that repeat those inks.
+  var cycle = list
+  var reserved = ""
+  if (list.length >= 8) {
+    reserved = list[list.length - 1]
+    cycle = list.slice(0, list.length - 1)
+  }
+  var n = sorted.length
+  if (reserved && n === cycle.length + 1 && at === n - 1) return reserved
+  return cycle[at % cycle.length]
 }

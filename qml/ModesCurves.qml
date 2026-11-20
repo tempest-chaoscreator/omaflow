@@ -23,7 +23,6 @@ Column {
   property color fg: Commons.Color.foreground
   property color accent: Commons.Color.accent
   property color line: Qt.rgba(fg.r, fg.g, fg.b, 0.22)
-  property color rule: Qt.rgba(fg.r, fg.g, fg.b, 0.16)
   property color muted: Qt.darker(fg, 1.4)
   property string fontFamily: Style.font.family
 
@@ -31,14 +30,25 @@ Column {
   property string memberKey: ""
   property var picked: ({})
   property string groupName: ""
-  property string modeName: ""
   property bool keyed: false
   property int navIndex: 0
   property var drafts: ({})
   property var curveHistory: ({})
   property string renamingId: ""
   property string renameText: ""
+  property string renameDraft: ""
+  property int renameEpoch: 0
   property var palette: []
+  // One key list per status shape. A swatch then only looks up its color.
+  readonly property var blockKeyList: ThemePalette.blockKeys(
+    service && service.channels ? service.channels : [],
+    service && service.groups ? service.groups : [],
+    service && service.hiddenDevices,
+    service && service.hiddenChannels,
+    service && service.pinGroups === true
+  )
+  // A shelved card starts folded. Opening it does not change the sort.
+  property var shelfOpen: ({})
 
   width: parent ? parent.width : 0
   spacing: Style.space(10)
@@ -156,14 +166,43 @@ Column {
     }
     for (var n = 0; n < out.length; n++) out[n].order = n
     out.sort(function(a, b) {
-      var ah = cardConcealed(a) ? 1 : 0
-      var bh = cardConcealed(b) ? 1 : 0
+      function rank(card) {
+        if (cardConcealed(card)) return 2
+        if (cardShelved(card)) return 1
+        return 0
+      }
+      var ah = rank(a)
+      var bh = rank(b)
       if (ah !== bh) return ah - bh
       return a.order - b.order
     })
     return out
   }
   property var stableBoard: []
+  // One grid cell is an open card, or up to two collapsed cards stacked.
+  // Opening one of the pair takes the cell and the other moves to the next cell.
+  readonly property var boardSlots: {
+    var cards = stableBoard || []
+    var slots = []
+    var pending = null
+    var i
+    for (i = 0; i < cards.length; i++) {
+      var card = cards[i]
+      if (!cardFolded(card)) {
+        // An opened card keeps this cell. A collapsed partner waits for the next one.
+        slots.push({ cards: [card] })
+        continue
+      }
+      if (!pending) {
+        pending = card
+        continue
+      }
+      slots.push({ cards: [pending, card] })
+      pending = null
+    }
+    if (pending) slots.push({ cards: [pending] })
+    return slots
+  }
   readonly property string boardSig: {
     var parts = []
     var saved = service && service.groups ? service.groups : []
@@ -191,23 +230,24 @@ Column {
     for (var hk in hidden) if (hidden[hk] === true) hiddenKeys.push(hk)
     hiddenKeys.sort()
     parts.push("h:" + hiddenKeys.join(","))
+    var hiddenChannels = service && service.hiddenChannels ? service.hiddenChannels : ({})
+    var channelKeys = []
+    for (var ck in hiddenChannels) if (hiddenChannels[ck] === true) channelKeys.push(ck)
+    channelKeys.sort()
+    parts.push("c:" + channelKeys.join(","))
     return parts.join("|")
   }
-  readonly property int slotRows: {
-    var max = 1
-    for (var i = 0; i < boardGroups.length; i++) {
-      var n = boardGroups[i].rows ? boardGroups[i].rows.length : 0
-      var lines = Math.max(1, Math.ceil(n / 2))
-      if (lines > max) max = lines
-    }
-    return max
-  }
   readonly property int fanRowH: Style.space(40)
+  // nf-md-pencil U+F03EB, same mark as the Devices rename control.
+  readonly property string pencil: "\uDB80\uDFEB"
   // nf-md-link_variant U+F0339, nf-md-link_variant_off U+F033A
   readonly property string linkOn: "\uDB80\uDF39"
   readonly property string linkOff: "\uDB80\uDF3A"
   // nf-md-eye_off_outline U+F06D1
   readonly property string eyeOff: "\uDB81\uDED1"
+  // nf-md-chevron_right U+F0142, nf-md-chevron_down U+F0140
+  readonly property string chevronRight: "\uDB80\uDD42"
+  readonly property string chevronDown: "\uDB80\uDD40"
   // nf-md-trash_can_outline U+F0A7A
   readonly property string trash: "\uDB82\uDE7A"
   // nf-md-undo U+F054C, nf-md-redo U+F044E
@@ -229,45 +269,66 @@ Column {
     return open.concat(used)
   }
   readonly property var linkMap: service && service.links ? service.links : ({})
-  readonly property int cardH: Style.space(12) + Style.space(22) + Style.space(8)
-    + slotRows * fanRowH
-    + Math.max(0, slotRows - 1) * Style.space(4)
-    + Style.space(10)
+  readonly property int shelfH: Style.space(8) + Style.space(22) + Style.space(8)
   readonly property var navItems: {
     var out = []
     var i
     for (i = 0; i < modeList.length; i++) out.push({ kind: "mode", uid: modeList[i].uid, x: i, y: 0 })
     if (mode) out.push({ kind: "apply", x: modeList.length, y: 0 })
     var cols = columnCount(width)
-    for (var g = 0; g < boardGroups.length; g++) {
-      var list = boardGroups[g].rows || []
-      var cardCol = g % cols
-      var cardRow = Math.floor(g / cols)
-      for (var r = 0; r < list.length; r++) {
-        if (boardGroups[g].kind === "device" && sharedFor(list[r].key)) continue
-        out.push({
-          kind: "channel",
-          key: list[r].key,
-          x: cardCol * 2 + (r % 2),
-          y: 1 + cardRow * (slotRows + 1) + Math.floor(r / 2)
-        })
+    var slots = boardSlots
+    for (var s = 0; s < slots.length; s++) {
+      var pile = slots[s].cards || []
+      var cardCol = s % cols
+      var cardRow = Math.floor(s / cols)
+      for (var c = 0; c < pile.length; c++) {
+        var card = pile[c]
+        var list = card.rows || []
+        var folded = cardFolded(card)
+        var baseY = 1 + cardRow * 6 + c * 3
+        if (cardShelved(card)) {
+          out.push({
+            kind: "shelf",
+            key: shelfKey(card),
+            x: cardCol * 2 + (folded ? 0 : 0.25),
+            y: folded ? baseY : baseY - 0.4
+          })
+        }
+        if (!folded) {
+          for (var r = 0; r < list.length; r++) {
+            if (card.kind === "device" && sharedFor(list[r].key)) continue
+            out.push({
+              kind: "channel",
+              key: list[r].key,
+              x: cardCol * 2 + (r % 2),
+              y: baseY + Math.floor(r / 2)
+            })
+          }
+        }
+        // Groups exist to share one curve, so they have no link control.
+        if (card.kind === "device") {
+          out.push({
+            kind: "link",
+            uid: card.uid,
+            x: cardCol * 2 + 1.5,
+            y: baseY
+          })
+        }
       }
-      out.push({
-        kind: "link",
-        uid: boardGroups[g].uid,
-        x: cardCol * 2 + 1.5,
-        y: 1 + cardRow * (slotRows + 1)
-      })
     }
+    var floorY = 0
+    var t
+    for (t = 0; t < out.length; t++) if (out[t].y > floorY) floorY = out[t].y
+    var toolY = floorY + 2
     var saved = listedGroups
     for (var s = 0; s < saved.length; s++)
-      out.push({ kind: "drop-group", id: saved[s].id, x: saved.length - 1 - s, y: 40 })
+      out.push({ kind: "drop-group", id: saved[s].id, x: saved.length - 1 - s, y: toolY + 1 })
     for (var n = 0; n < customModes.length; n++)
-      out.push({ kind: "drop-mode", uid: customModes[n].uid, x: customModes.length - 1 - n, y: 41 })
+      out.push({ kind: "drop-mode", uid: customModes[n].uid, x: customModes.length - 1 - n, y: toolY + 2 })
     if (graphLive && graphHistKey) {
-      out.push({ kind: "undo", x: 0, y: 36 })
-      out.push({ kind: "redo", x: 1, y: 36 })
-      out.push({ kind: "reset", x: 2, y: 36 })
+      out.push({ kind: "undo", x: 0, y: toolY })
+      out.push({ kind: "redo", x: 1, y: toolY })
+      out.push({ kind: "reset", x: 2, y: toolY })
     }
     return out
   }
@@ -329,31 +390,29 @@ Column {
     var entry = graphHistKey ? curveHistory[graphHistKey] : null
     return !!(entry && entry.steps && entry.index < entry.steps.length - 1)
   }
+  // Reset is a draft the user made. The paint grid is not a draft, so an
+  // unedited pump curve does not offer Reset just because it draws smoother.
   readonly property bool canReset: {
     if (!graphLive || !graphHistKey) return false
     var base = baselinePoints()
     if (!base || base.length < 2) return false
-    return !Cc.samePointList(graphPoints, base)
+    var parts = graphHistKey.split("\n")
+    var i
+    for (i = 1; i < parts.length; i++) {
+      var key = draftKey(parts[i])
+      var draft = key && drafts[key]
+      if (draft && draft.length > 1 && !Cc.samePointList(draft, base)) return true
+    }
+    return false
   }
   readonly property int modeH: Style.space(32)
-  readonly property int applyWidth: modeH + Style.space(20)
   readonly property bool modeApplied: mode && service && mode.uid === service.activeModeUid
   readonly property bool calibrationBusy: !!(service && service.calibrationBusy)
-  readonly property int modeSlot: {
-    var count = modeList.length
-    // Width is 0 before the page is laid out. A 1px slot there flashes.
-    if (!count || width < 1) return Style.space(72)
-    var gaps = Style.space(6) * Math.max(0, count - 1)
-    var room = width - applyWidth - gaps
-    if (room < count) return 1
-    return Math.floor(room / count)
-  }
+
 
   function groupSwatch(card) {
     var key = (card && card.kind === "shared" ? "g:" : "d:") + (card ? card.uid : "")
-    var channels = service && service.channels ? service.channels : []
-    var saved = service && service.groups ? service.groups : []
-    return ThemePalette.swatch(palette, ThemePalette.keysOf(channels, saved), key)
+    return ThemePalette.swatch(palette, blockKeyList, key)
   }
 
   function rowByKey(key) {
@@ -415,6 +474,50 @@ Column {
 
   function selectRow(key) {
     memberKey = key
+  }
+
+  // A click on the card, not only on one channel, selects that block.
+  // The channel already on the graph stays. Otherwise the first fan in the
+  // mode, then any fan, then the pump.
+  function selectCard(card) {
+    if (!card) return
+    var list = card.rows || []
+    var i
+    for (i = 0; i < list.length; i++) {
+      var current = list[i]
+      if (!current || current.key !== memberKey) continue
+      if (card.kind === "device" && sharedFor(current.key)) continue
+      return
+    }
+    var pick = null
+    var pump = null
+    for (i = 0; i < list.length; i++) {
+      var row = list[i]
+      if (!row) continue
+      if (card.kind === "device" && sharedFor(row.key)) continue
+      if (row.isPump) {
+        if (!pump) pump = row
+        continue
+      }
+      if (row.inMode) {
+        pick = row
+        break
+      }
+      if (!pick) pick = row
+    }
+    if (!pick) pick = pump
+    if (pick) selectRow(pick.key)
+  }
+
+  function modeButtonWidth(index) {
+    var count = modeList.length
+    if (!count || width < 1) return Style.space(72)
+    var gap = Style.space(6)
+    var room = width - modeH - gap * count
+    if (room < count) return 1
+    var base = Math.floor(room / count)
+    var extra = room - base * count
+    return base + (index === count - 1 ? extra : 0)
   }
 
   function groupedKey(key) {
@@ -514,12 +617,17 @@ Column {
   function makeGroup() {
     if (!service || !mode) return
     var chosen = pickedMembers()
-    if (chosen.length < 2) {
-      service.lastError = "Check at least two channels to group them"
+    if (!chosen.length) {
+      service.lastError = "Check a channel to group it"
       return
     }
-    var name = groupName.replace(/^\s+|\s+$/g, "")
-    if (!name) name = "Group"
+    var cleaned = Cc.daemonName(groupName)
+    if (cleaned === null) {
+      service.lastError = "That name is not allowed."
+      return
+    }
+    var name = cleaned || "Group"
+    service.lastError = ""
     var floor = 0
     for (var i = 0; i < chosen.length; i++) floor = Math.max(floor, chosen[i].minDuty || 0)
     var temp = sourceFor(chosen)
@@ -530,6 +638,7 @@ Column {
         service.rememberGroup({ id: service.newUid(), name: name, profileUid: uid, members: keys })
         picked = ({})
         groupName = ""
+        groupField.text = ""
       })
     }, silentPace(anyPump(chosen)))
   }
@@ -570,7 +679,8 @@ Column {
       service && service.curvePack,
       mode && mode.name,
       row && row.deviceName,
-      row && row.name
+      row && row.name,
+      row && row.deviceUid
     )
     if (packed && packed.length > 1) return packed
     if (row && row.points && row.points.length) return row.points
@@ -592,6 +702,26 @@ Column {
     drafts = next
   }
 
+  // Apply writes a draft, an imported curve, or the stored points.
+  // The on-screen grid is the paint path and is not sent.
+  function applyPoints(row) {
+    var uid = profileUidFor(row)
+    var key = draftKey(uid)
+    if (key && drafts[key] && drafts[key].length > 1) return drafts[key]
+    var packed = Cc.packPoints(
+      service && service.curvePack,
+      mode && mode.name,
+      row && row.deviceName,
+      row && row.name,
+      row && row.deviceUid
+    )
+    if (packed && packed.length > 1) return packed
+    var profile = uid && service ? Cc.profileByUid(service.profiles, uid) : null
+    var raw = Cc.rawGraphPoints(profile)
+    if (raw.length > 1) return raw
+    return []
+  }
+
   function curveJobs() {
     var jobs = []
     var seen = ({})
@@ -599,7 +729,7 @@ Column {
       var row = members[i]
       var uid = profileUidFor(row)
       if (!uid || seen[uid]) continue
-      var pts = pointsFor(row)
+      var pts = applyPoints(row)
       if (!pts || pts.length < 2) continue
       seen[uid] = true
       jobs.push({ profileUid: uid, points: pts, minDuty: rowFloor(row) })
@@ -659,11 +789,84 @@ Column {
     })
   }
 
+  function ownCardH(card) {
+    var n = card && card.rows ? card.rows.length : 0
+    var lines = Math.max(1, Math.ceil(n / 2))
+    return Style.space(12) + Style.space(22) + Style.space(8)
+      + lines * fanRowH
+      + Math.max(0, lines - 1) * Style.space(4)
+      + Style.space(10)
+  }
+
+  // An open card is as tall as its own fan rows. On a row with a taller open
+  // card, it grows to that height. Folded cards and other rows stay slim.
+  function heightForCard(card) {
+    if (!card || cardFolded(card)) return shelfH
+    var own = ownCardH(card)
+    var slots = boardSlots || []
+    var cols = columnCount(width)
+    if (cols < 1) cols = 1
+    var slotIndex = -1
+    var s
+    var c
+    for (s = 0; s < slots.length && slotIndex < 0; s++) {
+      var pile = slots[s] && slots[s].cards ? slots[s].cards : []
+      for (c = 0; c < pile.length; c++) {
+        var other = pile[c]
+        if (other && other.kind === card.kind && String(other.uid) === String(card.uid)) {
+          slotIndex = s
+          break
+        }
+      }
+    }
+    if (slotIndex < 0) return own
+    var rowStart = Math.floor(slotIndex / cols) * cols
+    var rowEnd = Math.min(slots.length, rowStart + cols)
+    var maxH = own
+    for (s = rowStart; s < rowEnd; s++) {
+      var mates = slots[s] && slots[s].cards ? slots[s].cards : []
+      if (mates.length !== 1) continue
+      var mate = mates[0]
+      if (!mate || cardFolded(mate)) continue
+      var h = ownCardH(mate)
+      if (h > maxH) maxH = h
+    }
+    return maxH
+  }
+
+  function captureBoard() {
+    stableBoard = boardGroups
+  }
+
+  function editingName() {
+    return renamingId !== ""
+  }
+
+  function beginGroupRename(id, name) {
+    if (!id) return
+    if (renamingId && renamingId !== id) commitRename()
+    renameEpoch = renameEpoch + 1
+    renamingId = id
+    renameText = name || ""
+    renameDraft = name || ""
+  }
+
   function commitRename() {
     var id = renamingId
-    var name = renameText
+    var cleaned = Cc.daemonName(renameDraft)
+    if (cleaned === null) {
+      if (service) service.lastError = "That name is not allowed."
+      return
+    }
+    renameEpoch = renameEpoch + 1
     renamingId = ""
-    if (service && id) service.renameGroup(id, name)
+    if (!service || !id || !cleaned) return
+    var current = ""
+    var groups = service.groups || []
+    var i
+    for (i = 0; i < groups.length; i++) if (groups[i].id === id) current = groups[i].name || ""
+    if (cleaned === (Cc.daemonName(current) || "")) return
+    service.renameGroup(id, cleaned)
   }
 
   function columnCount(avail) {
@@ -699,6 +902,8 @@ Column {
       selectRow(item.key)
     } else if (item.kind === "link") {
       toggleLink(item.uid)
+    } else if (item.kind === "shelf") {
+      toggleShelf(item.key)
     } else if (item.kind === "apply") {
       applyMode()
     } else if (item.kind === "drop-group") {
@@ -712,7 +917,14 @@ Column {
 
   function takeEscape() {
     if (!renamingId) return false
+    renameEpoch = renameEpoch + 1
     renamingId = ""
+    return true
+  }
+
+  function takeEnter() {
+    if (!renamingId) return false
+    commitRename()
     return true
   }
 
@@ -729,6 +941,11 @@ Column {
   function aimLink(uid) {
     var item = navAt()
     return keyed && item && item.kind === "link" && item.uid === uid
+  }
+
+  function aimShelf(key) {
+    var item = navAt()
+    return keyed && item && item.kind === "shelf" && item.key === key
   }
 
   function aimDropGroup(id) {
@@ -762,32 +979,90 @@ Column {
     return !!(map && map[uid] === true)
   }
 
-  // A device card hides with that device. A group hides when every fan in it
-  // belongs to a hidden device, which covers a group of one.
+  function channelConcealed(row) {
+    return Cc.channelConcealed(
+      service && service.hiddenDevices,
+      service && service.hiddenChannels,
+      row
+    )
+  }
+
+  function shelfKey(card) {
+    if (!card) return ""
+    return (card.kind || "card") + ":" + (card.uid || "")
+  }
+
+  function toggleShelf(key) {
+    if (!key) return
+    var next = Cc.copyMap(shelfOpen)
+    next[key] = next[key] !== true
+    shelfOpen = next
+  }
+
+  function cardFolded(card) {
+    return cardShelved(card) && shelfOpen[shelfKey(card)] !== true
+  }
+
+  // A card hides when every channel on it is hidden. That includes a group of one.
   function cardConcealed(card) {
     if (!card) return false
     var rows = card.rows || []
     if (!rows.length) return false
     var seen = false
     for (var i = 0; i < rows.length; i++) {
-      var uid = rows[i] && rows[i].deviceUid
-      if (!uid) continue
+      var row = rows[i]
+      if (!row || !row.deviceUid) continue
       seen = true
-      if (!deviceConcealed(uid)) return false
+      if (!channelConcealed(row)) return false
     }
     return seen
+  }
+
+  // Hidden cards fold. A device card also folds when every fan is in another
+  // group and at most one channel, usually the pump, is still its own.
+  function cardShelved(card) {
+    if (cardConcealed(card)) return true
+    if (!card || card.kind !== "device") return false
+    var rows = card.rows || []
+    var fans = 0
+    var local = 0
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i]
+      if (!row) continue
+      if (row.isPump) {
+        local++
+        continue
+      }
+      if (sharedFor(row.key)) fans++
+      else return false
+    }
+    return fans > 0 && local <= 1
   }
 
   function revealCard(card) {
     if (!service || !card) return
     var rows = card.rows || []
-    var seen = ({})
+    var uids = []
+    var keys = []
+    var seenUid = ({})
+    var seenKey = ({})
     for (var i = 0; i < rows.length; i++) {
-      var uid = rows[i] && rows[i].deviceUid
-      if (!uid || seen[uid] || !deviceConcealed(uid)) continue
-      seen[uid] = true
-      service.setDeviceHidden(uid, false)
+      var row = rows[i]
+      if (!row) continue
+      var uid = row.deviceUid
+      if (uid && !seenUid[uid] && deviceConcealed(uid)) {
+        seenUid[uid] = true
+        uids.push(uid)
+      }
+      var key = row.key
+      var channels = service.hiddenChannels
+      if (key && !seenKey[key] && channels && channels[key] === true) {
+        seenKey[key] = true
+        keys.push(key)
+      }
     }
+    if (!uids.length && !keys.length) return
+    service.revealHidden(uids, keys)
   }
 
   function cardLinked(card) {
@@ -866,8 +1141,8 @@ Column {
     service.setCardLink(uid, !cardLinked(card))
   }
 
-  // Imported points win. Otherwise the curve saved on this mode, then the
-  // built-in fan or pump curve. Reset does not write coolercontrold.
+  // Imported points win. Otherwise the stored curve, not the paint grid.
+  // Reset does not write coolercontrold.
   function baselinePoints() {
     var row = graphSubject
     if (!row) return []
@@ -875,9 +1150,13 @@ Column {
       service && service.curvePack,
       mode && mode.name,
       row.deviceName,
-      row.name
+      row.name,
+      row.deviceUid
     )
-    if (packed && packed.length > 1) return packed
+    if (packed && packed.length > 1) return Cc.copyPointList(packed)
+    var profile = row.profileUid && service ? Cc.profileByUid(service.profiles, row.profileUid) : null
+    var raw = Cc.rawGraphPoints(profile)
+    if (raw.length > 1) return raw
     if (row.points && row.points.length > 1) return row.points
     return Cc.defaultPoints(!!row.isPump)
   }
@@ -990,11 +1269,11 @@ Column {
   }
 
   onModeListChanged: ensureMode()
-  onBoardSigChanged: stableBoard = boardGroups
+  onBoardSigChanged: Qt.callLater(root.captureBoard)
   Component.onCompleted: {
     ensureMode()
-    stableBoard = boardGroups
-    if (!palette.length) palette = ThemePalette.ramp("", accent, Commons.Color.urgent)
+    captureBoard()
+    if (!palette.length) palette = ThemePalette.blockInks("")
   }
   onRowsChanged: {
     if (rowByKey(memberKey)) return
@@ -1013,6 +1292,8 @@ Column {
     height: root.modeH
 
     Row {
+      id: modeButtons
+      width: parent.width
       spacing: Style.space(6)
       height: parent.height
 
@@ -1020,7 +1301,8 @@ Column {
         model: root.modeList
         delegate: Button {
           required property var modelData
-          width: root.modeSlot
+          required property int index
+          width: root.modeButtonWidth(index)
           height: root.modeH
           verticalPadding: Style.space(2)
           text: modelData.name
@@ -1041,45 +1323,34 @@ Column {
           }
         }
       }
-    }
 
-    Rectangle {
-      anchors.right: applyBtn.left
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-      width: 1
-      height: parent.height
-      visible: root.mode !== null
-      color: root.rule
-    }
-
-    Button {
-      id: applyBtn
-      anchors.right: parent.right
-      visible: root.mode !== null
-      width: root.modeH
-      height: root.modeH
-      opacity: root.calibrationBusy ? 0.45 : 1
-      iconText: root.modeApplied ? "\uf058" : "\uf05d"
-      iconSize: Style.space(15)
-      bordered: true
-      hasCursor: root.keyed && root.navAt() && root.navAt().kind === "apply"
-      selected: false
-      background: root.modeApplied ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22) : "transparent"
-      foreground: root.fg
-      accent: root.accent
-      fontFamily: root.fontFamily
-      horizontalPadding: 0
-      verticalPadding: 0
-      tooltipText: root.calibrationBusy
-        ? "A fan is being calibrated. Apply waits until that sweep finishes."
-        : (!root.mode ? ""
-          : (root.members.length === 0
-            ? "Add a channel before applying"
-            : (root.modeApplied
-              ? "Save curves. " + root.mode.name + " is running"
-              : "Save curves and run " + root.mode.name)))
-      onClicked: root.applyMode()
+      Button {
+        id: applyBtn
+        visible: root.mode !== null
+        width: root.modeH
+        height: root.modeH
+        opacity: root.calibrationBusy ? 0.45 : 1
+        iconText: root.modeApplied ? "\uf058" : "\uf05d"
+        iconSize: Style.space(15)
+        bordered: true
+        hasCursor: root.keyed && root.navAt() && root.navAt().kind === "apply"
+        selected: false
+        background: root.modeApplied ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22) : "transparent"
+        foreground: root.fg
+        accent: root.accent
+        fontFamily: root.fontFamily
+        horizontalPadding: 0
+        verticalPadding: 0
+        tooltipText: root.calibrationBusy
+          ? "A fan is being calibrated. Apply waits until that sweep finishes."
+          : (!root.mode ? ""
+            : (root.members.length === 0
+              ? "Add a channel before applying"
+              : (root.modeApplied
+                ? "Save curves. " + root.mode.name + " is running"
+                : "Save curves and run " + root.mode.name)))
+        onClicked: root.applyMode()
+      }
     }
   }
 
@@ -1089,8 +1360,24 @@ Column {
     spacing: Style.space(8)
 
     Repeater {
-      model: root.stableBoard
-      delegate: boardCard
+      model: root.boardSlots
+      delegate: Item {
+        id: spot
+        required property var modelData
+        width: root.cardWidth(root.width)
+        height: spotCol.implicitHeight
+
+        Column {
+          id: spotCol
+          width: parent.width
+          spacing: Style.space(4)
+
+          Repeater {
+            model: spot.modelData.cards
+            delegate: boardCard
+          }
+        }
+      }
     }
   }
 
@@ -1243,7 +1530,6 @@ Column {
     Rectangle {
       id: card
       required property var modelData
-      required property int index
       readonly property bool holdsSelection: {
         var list = modelData.rows || []
         for (var i = 0; i < list.length; i++) {
@@ -1252,15 +1538,36 @@ Column {
         }
         return false
       }
+      readonly property bool holdsAim: {
+        if (!root.keyed) return false
+        var list = modelData.rows || []
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].sharedHost !== true && root.sharedFor(list[i].key)) continue
+          if (root.aimChannel(list[i].key)) return true
+        }
+        return false
+      }
       readonly property bool concealed: root.cardConcealed(modelData)
+      readonly property bool shelved: root.cardShelved(modelData)
+      readonly property bool folded: root.cardFolded(modelData)
+      readonly property string shelfId: root.shelfKey(modelData)
       width: root.cardWidth(root.width)
-      height: root.cardH
+      height: root.heightForCard(modelData)
       radius: 0
       color: "transparent"
       opacity: concealed ? 0.38 : 1
       border.width: 1
-      border.color: holdsSelection ? root.accent : root.line
+      border.color: holdsSelection || holdsAim ? root.groupSwatch(modelData) : root.line
       clip: true
+
+      MouseArea {
+        id: cardMouse
+        anchors.fill: parent
+        z: -1
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.selectCard(card.modelData)
+      }
 
       Rectangle {
         anchors.left: parent.left
@@ -1283,20 +1590,10 @@ Column {
           width: parent.width
           height: Style.space(22)
 
-          Rectangle {
-            id: colorDot
-            width: Style.space(8)
-            height: Style.space(8)
-            radius: 0
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            color: root.groupSwatch(card.modelData)
-          }
-
           Item {
             id: hideHit
             anchors.right: linkHit.left
-            anchors.rightMargin: card.concealed ? Style.space(2) : 0
+            anchors.rightMargin: card.concealed ? Style.space(4) : 0
             anchors.verticalCenter: parent.verticalCenter
             width: card.concealed ? Style.space(22) : 0
             height: Style.space(22)
@@ -1332,7 +1629,58 @@ Column {
 
             PanelToolTip {
               visible: hideMouse.containsMouse
-              text: "Hidden. Click to show it on Monitoring again."
+              text: "Hidden. Click to show it on Monitoring and the bar again."
+              fontFamily: root.fontFamily
+              panelBackground: Commons.Color.background
+              panelForeground: Commons.Color.foreground
+              panelBorder: Commons.Color.accent
+            }
+          }
+
+          Item {
+            id: shelfHit
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: card.shelved
+            width: visible ? Style.space(22) : 0
+            height: Style.space(22)
+
+            Rectangle {
+              anchors.fill: parent
+              visible: card.shelved
+              radius: 0
+              color: root.aimShelf(card.shelfId)
+                ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                : (shelfMouse.containsMouse ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
+              border.width: 1
+              border.color: root.aimShelf(card.shelfId) || shelfMouse.containsMouse
+                ? root.accent
+                : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
+            }
+
+            OpticalGlyph {
+              anchors.centerIn: parent
+              visible: card.shelved
+              width: Style.space(16)
+              height: Style.space(16)
+              text: card.folded ? root.chevronRight : root.chevronDown
+              fontFamily: root.fontFamily
+              fontSize: Style.space(16)
+              color: root.aimShelf(card.shelfId) || shelfMouse.containsMouse ? root.accent : root.fg
+            }
+
+            MouseArea {
+              id: shelfMouse
+              anchors.fill: parent
+              enabled: card.shelved
+              hoverEnabled: true
+              cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onClicked: root.toggleShelf(card.shelfId)
+            }
+
+            PanelToolTip {
+              visible: card.shelved && shelfMouse.containsMouse
+              text: card.folded ? "Show the channels in this block." : "Fold this block."
               fontFamily: root.fontFamily
               panelBackground: Commons.Color.background
               panelForeground: Commons.Color.foreground
@@ -1342,9 +1690,11 @@ Column {
 
           Item {
             id: linkHit
-            anchors.right: parent.right
+            anchors.right: shelfHit.left
+            anchors.rightMargin: visible && shelfHit.visible ? Style.space(4) : 0
             anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(22)
+            visible: card.modelData.kind === "device"
+            width: visible ? Style.space(22) : 0
             height: Style.space(22)
 
             Rectangle {
@@ -1389,28 +1739,72 @@ Column {
             }
           }
 
-          Text {
+          Item {
+            id: nameSlot
             visible: root.renamingId !== card.modelData.uid
-            anchors.left: colorDot.right
-            anchors.leftMargin: Style.space(8)
+            anchors.left: parent.left
             anchors.right: hideHit.left
             anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            text: card.modelData.kind === "shared" ? card.modelData.name : String(card.modelData.name || "Device").toUpperCase()
-            textFormat: Text.PlainText
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(13)
-            font.bold: true
-            elide: Text.ElideRight
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
 
-            MouseArea {
-              anchors.fill: parent
+            HoverHandler {
+              id: nameHover
               enabled: card.modelData.kind === "shared"
-              cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-              onClicked: {
-                root.renamingId = card.modelData.uid
-                root.renameText = card.modelData.name || ""
+            }
+
+            Text {
+              id: titleText
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: {
+                var pen = titlePen.visible ? titlePen.width + Style.space(4) : 0
+                return Math.max(0, Math.min(implicitWidth, Math.max(0, nameSlot.width - pen)))
+              }
+              text: card.modelData.kind === "shared" ? card.modelData.name : String(card.modelData.name || "Device").toUpperCase()
+              textFormat: Text.PlainText
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(13)
+              font.bold: true
+              elide: Text.ElideRight
+            }
+
+            Item {
+              id: titlePen
+              visible: card.modelData.kind === "shared" && nameHover.hovered
+              anchors.left: titleText.right
+              anchors.leftMargin: visible ? Style.space(4) : 0
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(22)
+              height: Style.space(22)
+
+              OpticalGlyph {
+                anchors.centerIn: parent
+                width: Style.space(14)
+                height: Style.space(14)
+                text: root.pencil
+                fontFamily: root.fontFamily
+                fontSize: Style.space(14)
+                color: penMouse.containsMouse ? root.accent : root.muted
+              }
+
+              MouseArea {
+                id: penMouse
+                anchors.fill: parent
+                enabled: titlePen.visible
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.beginGroupRename(card.modelData.uid, card.modelData.name || "")
+              }
+
+              PanelToolTip {
+                visible: penMouse.containsMouse
+                text: "Rename this group."
+                fontFamily: root.fontFamily
+                panelBackground: Commons.Color.background
+                panelForeground: Commons.Color.foreground
+                panelBorder: Commons.Color.accent
               }
             }
           }
@@ -1418,10 +1812,10 @@ Column {
           Loader {
             active: card.modelData.kind === "shared" && root.renamingId === card.modelData.uid
             visible: active
-            anchors.left: colorDot.right
-            anchors.leftMargin: Style.space(8)
+            focus: active
+            anchors.left: parent.left
             anchors.right: hideHit.left
-            anchors.rightMargin: Style.space(4)
+            anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             height: Style.space(22)
             sourceComponent: renameField
@@ -1430,6 +1824,7 @@ Column {
 
         Grid {
           id: fanGrid
+          visible: !card.folded
           width: parent.width
           columns: 2
           columnSpacing: Style.space(8)
@@ -1453,18 +1848,51 @@ Column {
               }
               readonly property bool chosen: !claimed && (root.memberKey === modelData.key || linkedMate)
               readonly property var claim: claimed ? root.sharedFor(modelData.key) : null
+              // A pump stays on its own curve, so it never grows an unlinked mark.
+              function linkableAt(at) {
+                var rows = card.modelData.rows || []
+                var row = rows[at]
+                if (!row || row.isPump) return false
+                if (card.modelData.kind === "device" && root.sharedFor(row.key)) return false
+                return true
+              }
+              readonly property bool unlinkedFan: card.modelData.kind === "device"
+                && !root.cardLinked(card.modelData)
+                && fanCell.linkableAt(index)
+              readonly property bool splitLeft: unlinkedFan && (index % 2 === 1) && fanCell.linkableAt(index - 1)
+              readonly property bool splitTop: unlinkedFan && index >= 2 && fanCell.linkableAt(index - 2)
               width: Math.max(1, Math.floor((fanGrid.width - fanGrid.columnSpacing) / 2))
               height: root.fanRowH
-              opacity: claimed ? 0.38 : 1
+              opacity: fanCell.claimed || (root.channelConcealed(fanCell.modelData) && !card.concealed) ? 0.38 : 1
 
               Rectangle {
                 anchors.fill: parent
                 radius: 0
-                color: fanCell.chosen || root.aimChannel(fanCell.modelData.key)
+                color: !fanCell.claimed && root.aimChannel(fanCell.modelData.key)
                   ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
                   : (fanMouse.containsMouse && !fanCell.claimed
                     ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
                     : "transparent")
+              }
+
+              Rectangle {
+                visible: fanCell.splitLeft
+                width: 1
+                height: Style.space(16)
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left
+                anchors.leftMargin: -Math.round(fanGrid.columnSpacing / 2)
+                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.45)
+              }
+
+              Rectangle {
+                visible: fanCell.splitTop
+                height: 1
+                width: Style.space(28)
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.topMargin: -Math.round(fanGrid.rowSpacing / 2)
+                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.45)
               }
 
               Column {
@@ -1480,7 +1908,7 @@ Column {
                   width: fanLabel.width
                   text: root.chipText(fanCell.modelData)
                   textFormat: Text.PlainText
-                  color: fanCell.claimed ? root.muted : (fanCell.chosen ? root.accent : root.fg)
+                  color: fanCell.claimed ? root.muted : (fanCell.chosen ? root.groupSwatch(card.modelData) : root.fg)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -1506,7 +1934,7 @@ Column {
                 visible: fanCell.showSwitch
                 on: fanCell.modelData.inMode === true
                 foreground: root.fg
-                accent: root.accent
+                accent: root.groupSwatch(card.modelData)
                 onClicked: {
                   if (card.modelData.kind === "shared") root.toggleGrouped(fanCell.modelData)
                   else root.toggleChannel(fanCell.modelData)
@@ -1548,20 +1976,36 @@ Column {
   Component {
     id: renameField
     TextField {
+      id: groupRename
+      property int epoch: 0
+      focus: true
       width: parent ? parent.width : Style.space(140)
-      text: root.renameText
       placeholderText: "Group name"
       foreground: root.fg
       accent: root.accent
       font.pixelSize: Style.font.caption
       verticalPadding: Style.space(2)
-      onTextEdited: root.renameText = text
-      onAccepted: root.commitRename()
-      Keys.onEscapePressed: function(event) {
-        root.renamingId = ""
-        event.accepted = true
+      onTextEdited: if (epoch === root.renameEpoch) root.renameDraft = text
+      onTextChanged: if (epoch === root.renameEpoch) root.renameDraft = text
+      Keys.priority: Keys.BeforeItem
+      Keys.onPressed: function(event) {
+        if (epoch !== root.renameEpoch) return
+        if (event.key === Qt.Key_Escape) {
+          root.takeEscape()
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+          root.renameDraft = text
+          root.commitRename()
+          event.accepted = true
+        }
       }
-      Component.onCompleted: forceActiveFocus()
+      Component.onCompleted: {
+        epoch = root.renameEpoch
+        text = root.renameText
+        forceActiveFocus()
+      }
     }
   }
 
@@ -1576,7 +2020,7 @@ Column {
   Text {
     width: parent.width
     wrapMode: Text.WordWrap
-    text: "Check two or more channels in this mode. They then share one curve."
+    text: "Check a channel in this mode. It can stand alone, or share one curve with others."
     color: root.muted
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -1619,8 +2063,6 @@ Column {
       placeholderText: "Group name"
       foreground: root.fg
       accent: root.accent
-      text: root.groupName
-      onTextEdited: root.groupName = text
       onAccepted: {
         root.groupName = text
         root.makeGroup()
@@ -1635,12 +2077,15 @@ Column {
       height: groupField.height
       text: "Group"
       bordered: true
-      enabled: root.members.length > 1
+      enabled: root.members.length > 0
       foreground: root.fg
       accent: root.accent
       fontFamily: root.fontFamily
       fontSize: Style.font.body
-      onClicked: root.makeGroup()
+      onClicked: {
+        root.groupName = groupField.text
+        root.makeGroup()
+      }
     }
 
     Flow {
@@ -1736,11 +2181,8 @@ Column {
       placeholderText: "Mode name"
       foreground: root.fg
       accent: root.accent
-      text: root.modeName
-      onTextEdited: root.modeName = text
       onAccepted: {
-        if (root.service) root.service.createMode(modeField.text)
-        root.modeName = ""
+        if (root.service && root.service.createMode(modeField.text)) modeField.text = ""
       }
     }
 
@@ -1757,8 +2199,7 @@ Column {
       fontFamily: root.fontFamily
       fontSize: Style.font.body
       onClicked: {
-        if (root.service) root.service.createMode(modeField.text)
-        root.modeName = ""
+        if (root.service && root.service.createMode(modeField.text)) modeField.text = ""
       }
     }
 
@@ -1829,7 +2270,7 @@ Column {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: true
     printErrors: false
-    onLoaded: root.palette = ThemePalette.ramp(text(), root.accent, Commons.Color.urgent)
+    onLoaded: root.palette = ThemePalette.blockInks(text())
     onFileChanged: reload()
   }
 }

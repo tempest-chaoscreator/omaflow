@@ -227,11 +227,12 @@ function pickTemp(candidates, pattern) {
 function gpuSensorRank(name, label) {
   var primary = String(name || "")
   var secondary = label === undefined || label === null || label === "" ? primary : String(label)
-  var score = 1
-  if (/hotspot|hot spot/i.test(primary) || /hotspot|hot spot/i.test(secondary)) score = 0
-  if (/edge/i.test(primary) || /edge/i.test(secondary)) score = 3
-  if (/gpu temp$/i.test(primary) || /gpu temp$/i.test(secondary)) score = 4
-  return score
+  // Hotspot stays last. A later "GPU Temp" or "edge" match must not promote it
+  // when the other field is the edge name and this field says hotspot.
+  if (/hotspot|hot spot/i.test(primary) || /hotspot|hot spot/i.test(secondary)) return 0
+  if (/gpu temp$/i.test(primary) || /gpu temp$/i.test(secondary)) return 4
+  if (/edge/i.test(primary) || /edge/i.test(secondary)) return 3
+  return 1
 }
 
 // GPU edge. Callers pass the daemon sensor name and, when they have it, the label.
@@ -677,25 +678,27 @@ function missingDefaultModes(modes) {
 }
 
 function defaultPoints(isPump) {
-  if (isPump) return spreadPoints([[0, 50], [45, 65], [60, 80], [100, 100]], 50)
-  return spreadPoints([[0, 25], [50, 45], [70, 70], [100, 100]], 0)
+  if (isPump) return [[0, 75], [69, 75], [70, 90], [89, 90], [90, 100], [100, 100]]
+  return [[0, 33], [7, 33], [14, 33], [21, 33], [29, 33], [36, 38], [43, 44], [50, 50], [57, 58], [64, 66], [71, 74], [79, 85], [86, 92], [93, 96], [100, 96]]
 }
 
 // Shipped shapes for a daemon that has no modes yet. These are not a
-// machine's saved curves. Pumps stay at or above 50%.
+// machine's devices or saved mode ids. Each mode has its own fan curve
+// and its own pump curve. The points are the curve. They are not resampled
+// onto the paint grid.
 function modeDefaultPoints(name, isPump) {
   var key = String(name || "").replace(/^\s+|\s+$/g, "").toLowerCase()
   if (isPump) {
-    if (key === "silent") return spreadPoints([[0, 50], [60, 58], [80, 70], [100, 80]], 50)
-    if (key === "performance") return spreadPoints([[0, 55], [45, 70], [70, 85], [100, 100]], 50)
-    if (key === "fixed") return spreadPoints([[0, 60], [100, 60]], 50)
-    if (key === "hell") return spreadPoints([[0, 70], [40, 85], [70, 100], [100, 100]], 50)
+    if (key === "silent") return [[0, 75], [69, 75], [70, 90], [89, 90], [90, 100], [100, 100]]
+    if (key === "performance") return [[0, 75], [59, 75], [60, 90], [74, 90], [75, 100], [100, 100]]
+    if (key === "fixed") return [[0, 75], [100, 75]]
+    if (key === "hell") return [[0, 75], [54, 75], [55, 90], [64, 90], [65, 100], [100, 100]]
     return defaultPoints(true)
   }
-  if (key === "silent") return spreadPoints([[0, 20], [50, 28], [70, 40], [100, 65]], 0)
-  if (key === "performance") return spreadPoints([[0, 30], [40, 50], [60, 75], [100, 100]], 0)
-  if (key === "fixed") return spreadPoints([[0, 50], [100, 50]], 0)
-  if (key === "hell") return spreadPoints([[0, 45], [35, 70], [55, 100], [100, 100]], 0)
+  if (key === "silent") return [[0, 33], [7, 33], [14, 33], [21, 33], [29, 33], [36, 38], [43, 44], [50, 50], [57, 58], [64, 66], [71, 74], [79, 85], [86, 92], [93, 96], [100, 96]]
+  if (key === "performance") return [[0, 31], [7, 31], [14, 31], [21, 33], [29, 36], [36, 45], [43, 57], [50, 71], [57, 84], [64, 95], [71, 99], [79, 100], [86, 100], [93, 100], [100, 100]]
+  if (key === "fixed") return [[0, 65], [100, 65]]
+  if (key === "hell") return [[0, 69], [7, 69], [14, 69], [21, 69], [29, 70], [36, 73], [43, 76], [50, 81], [57, 87], [64, 91], [71, 91], [79, 93], [86, 95], [93, 98], [100, 100]]
   return defaultPoints(false)
 }
 
@@ -723,6 +726,7 @@ function speedChannels(devices, pumpMin) {
       out.push({
         deviceUid: dev.uid,
         name: name,
+        deviceType: dev.type || "",
         isPump: pump,
         minDuty: pump ? Math.max(deviceMin, floor) : deviceMin
       })
@@ -862,12 +866,22 @@ function appliedCurvesMatch(mode, profiles, jobs) {
   return true
 }
 
-function matchChannel(channels, deviceName, channelName) {
-  var wantDevice = String(deviceName || "").toLowerCase()
+function matchChannel(channels, deviceName, channelName, deviceUid) {
   var wantChannel = String(channelName || "").toLowerCase()
-  if (!wantDevice || !wantChannel) return null
+  var wantUid = String(deviceUid || "")
   var list = channels || []
   var i
+  if (wantUid && wantChannel) {
+    for (i = 0; i < list.length; i++) {
+      var hit = list[i]
+      if (!hit || String(hit.deviceUid || "") !== wantUid) continue
+      var hitChannel = String(hit.name || "").toLowerCase()
+      var hitLabel = String(hit.label || "").toLowerCase()
+      if (hitChannel === wantChannel || hitLabel === wantChannel) return hit
+    }
+  }
+  var wantDevice = String(deviceName || "").toLowerCase()
+  if (!wantDevice || !wantChannel) return null
   for (i = 0; i < list.length; i++) {
     var row = list[i]
     if (!row) continue
@@ -903,6 +917,26 @@ function plainLabel(value, fallback) {
   return text
 }
 
+// CoolerControl stores a display override of at most 50 characters and rejects
+// a tag. Empty clears the override. null means the name is refused.
+function daemonName(value) {
+  var text = String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, "")
+  text = text.replace(/^\s+|\s+$/g, "")
+  if (!text) return ""
+  if (text.length > 50 || /[<>]/.test(text)) return null
+  return text
+}
+
+// A hidden device hides every channel on it. A channel key hides only that one.
+function channelConcealed(hiddenDevices, hiddenChannels, channel) {
+  if (!channel) return false
+  var uid = channel.deviceUid
+  if (uid && hiddenDevices && hiddenDevices[uid] === true) return true
+  var key = channel.key
+  if (!key || !hiddenChannels) return false
+  return hiddenChannels[key] === true
+}
+
 function cleanGroupList(groups) {
   var list = Array.isArray(groups) ? groups : []
   var out = []
@@ -917,11 +951,15 @@ function cleanGroupList(groups) {
   return out
 }
 
-function packPoints(pack, modeName, deviceName, channelName) {
+function packPoints(pack, modeName, deviceName, channelName, deviceUid) {
   if (!pack || pack.kind !== "omaflow-curves") return null
   var want = String(modeName || "").toLowerCase()
   var modes = boundedArray(pack.modes, PACK_MODE_CAP)
   if (!modes) return null
+  var wantUid = String(deviceUid || "")
+  var wantDevice = String(deviceName || "").toLowerCase()
+  var wantChannel = String(channelName || "").toLowerCase()
+  var fallback = null
   var i
   var c
   for (i = 0; i < modes.length; i++) {
@@ -932,14 +970,16 @@ function packPoints(pack, modeName, deviceName, channelName) {
     for (c = 0; c < rows.length; c++) {
       var row = rows[c]
       if (!row) continue
-      if (String(row.deviceName || "").toLowerCase() !== String(deviceName || "").toLowerCase()) continue
-      var channel = String(channelName || "").toLowerCase()
-      if (String(row.channel || "").toLowerCase() !== channel && String(row.label || "").toLowerCase() !== channel) continue
+      var channel = String(row.channel || "").toLowerCase()
+      var label = String(row.label || "").toLowerCase()
+      if (channel !== wantChannel && label !== wantChannel) continue
       var points = boundedArray(row.points, PACK_POINT_CAP)
-      return points && points.length > 1 ? points : null
+      if (!points || points.length < 2) continue
+      if (wantUid && String(row.deviceUid || "") === wantUid) return points
+      if (!fallback && String(row.deviceName || "").toLowerCase() === wantDevice) fallback = points
     }
   }
-  return null
+  return fallback
 }
 
 function copyPointList(points) {
@@ -1023,6 +1063,14 @@ function pushCurveHistory(entry, before, after, limit) {
   return { steps: steps, index: index }
 }
 
+function fixedPair(duty) {
+  var level = Math.round(Number(duty))
+  if (!isFinite(level)) return []
+  if (level < 0) level = 0
+  if (level > 100) level = 100
+  return [[0, level], [100, level]]
+}
+
 function buildCurvePack(modes, channels, profiles, groups) {
   var byKey = {}
   var list = channels || []
@@ -1033,21 +1081,26 @@ function buildCurvePack(modes, channels, profiles, groups) {
   for (i = 0; i < modeList.length; i++) {
     var mode = modeList[i]
     if (!mode || !mode.name) continue
-    var members = modeMembers(mode, channels, profiles)
     var rows = []
-    var m
-    for (m = 0; m < members.length; m++) {
-      var member = members[m]
-      if (!member.points || member.points.length < 2) continue
+    eachModeSetting(mode, function(deviceUid, setting) {
+      if (!assigned(setting) || !setting.channel_name) return
+      var key = String(deviceUid || "") + "/" + String(setting.channel_name)
+      var channel = byKey[key]
+      var profile = setting.profile_uid ? profileByUid(profiles, setting.profile_uid) : null
+      var points = rawGraphPoints(profile)
+      if (points.length < 2 && setting.speed_fixed !== undefined && setting.speed_fixed !== null)
+        points = fixedPair(setting.speed_fixed)
+      if (points.length < 2) return
       rows.push({
-        deviceName: member.deviceName || "",
-        channel: member.name || "",
-        label: member.label || "",
-        points: member.points,
-        minDuty: Number(member.minDuty) || 0,
-        profileName: member.profileName || ""
+        deviceUid: String(deviceUid || ""),
+        deviceName: channel ? (channel.deviceName || "") : "",
+        channel: String(setting.channel_name),
+        label: channel ? (channel.label || "") : String(setting.channel_name),
+        points: copyPointList(points),
+        minDuty: channel ? (Number(channel.minDuty) || 0) : 0,
+        profileName: profile ? (profile.name || "") : ""
       })
-    }
+    })
     modeOut.push({ name: mode.name, channels: rows })
   }
   var groupOut = []
@@ -1059,15 +1112,30 @@ function buildCurvePack(modes, channels, profiles, groups) {
     var keys = group.members || []
     var k
     for (k = 0; k < keys.length; k++) {
-      var channel = byKey[keys[k]]
-      if (!channel) continue
+      var memberKey = String(keys[k] || "")
+      if (!memberKey) continue
+      var known = byKey[memberKey]
+      if (known) {
+        membersOut.push({
+          deviceUid: String(known.deviceUid || ""),
+          deviceName: known.deviceName || "",
+          channel: known.name || "",
+          label: known.label || ""
+        })
+        continue
+      }
+      var slash = memberKey.indexOf("/")
+      if (slash <= 0 || slash >= memberKey.length - 1) continue
+      var uid = memberKey.slice(0, slash)
+      var chName = memberKey.slice(slash + 1)
       membersOut.push({
-        deviceName: channel.deviceName || "",
-        channel: channel.name || "",
-        label: channel.label || ""
+        deviceUid: uid,
+        deviceName: "",
+        channel: chName,
+        label: chName
       })
     }
-    if (membersOut.length < 2) continue
+    if (!membersOut.length) continue
     groupOut.push({ name: group.name || "Group", members: membersOut })
   }
   return { kind: "omaflow-curves", version: 1, modes: modeOut, groups: groupOut }
@@ -1119,11 +1187,19 @@ function remapGroups(pack, channels, newId) {
     if (!rows) continue
     for (k = 0; k < rows.length; k++) {
       var row = rows[k]
-      var channel = matchChannel(channels, row && row.deviceName, row && (row.channel || row.label))
-      if (!channel || !channel.key) continue
-      if (members.indexOf(channel.key) < 0) members.push(channel.key)
+      if (!row || typeof row !== "object") continue
+      var channel = matchChannel(channels, row.deviceName, row.channel || row.label, row.deviceUid)
+      if (channel && channel.key) {
+        if (members.indexOf(channel.key) < 0) members.push(channel.key)
+        continue
+      }
+      var uid = String(row.deviceUid || "")
+      var ch = String(row.channel || "")
+      if (!uid || !ch || uid.indexOf("/") >= 0 || ch.indexOf("/") >= 0) continue
+      var kept = uid + "/" + ch
+      if (members.indexOf(kept) < 0) members.push(kept)
     }
-    if (members.length < 2) continue
+    if (!members.length) continue
     out.push({
       id: newId ? newId() : ("group-" + i),
       name: plainLabel(group.name, "Group"),
@@ -1401,10 +1477,11 @@ function silentRampFunction(uid) {
 
 function rampCloneName(name) {
   var suffix = " omaflow"
-  var base = String(name || "curve").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
+  var base = String(name || "curve").replace(/[<>]/g, "").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
   if (!base) base = "curve"
-  if (base.length + suffix.length <= 48) return base + suffix
-  return base.slice(0, 48 - suffix.length) + suffix
+  if (base.length + suffix.length > 50) base = base.slice(0, 50 - suffix.length).replace(/\s+$/, "")
+  var named = daemonName(base + suffix)
+  return named || "curve"
 }
 
 // Fan graphs on Silent. Pumps, fixed duties, and the default profile stay put.
@@ -1438,13 +1515,14 @@ function planSilentRamp(mode, modes, profiles, channels, rampUid) {
     var shared = otherModeUsesProfile(modes, profile.uid, mode && mode.uid)
     var fn = String(profile.function_uid || "0")
     var ours = ramp !== "" && fn === ramp
-    var cloneNamed = / omaflow$/i.test(pname)
     if (ours && !shared) {
+      // The name is not what makes a curve a clone. An exclusive curve keeps
+      // its profile uid, and the saved binds still know a real copy.
       already.push({
         deviceUid: String(deviceUid || ""),
         channel: channelName,
-        profileUid: cloneNamed ? "" : String(profile.uid || ""),
-        cloneUid: cloneNamed ? String(profile.uid || "") : "",
+        profileUid: String(profile.uid || ""),
+        cloneUid: "",
         prevFunction: "0"
       })
       return

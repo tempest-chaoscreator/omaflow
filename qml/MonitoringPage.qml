@@ -164,11 +164,6 @@ Column {
     var members = Cc.modeMembers(activeMode(), channels, profiles)
     var byKey = ({})
     var order = []
-    function deviceConcealed(uid) {
-      var map = service && service.hiddenDevices ? service.hiddenDevices : ({})
-      return map[String(uid || "")] === true
-    }
-
     // A header we are driving that never reports a tach is empty. A GPU fan
     // at 0% is stopped by the card and spins up with load, so it stays.
     function presentOnBoard(src) {
@@ -183,7 +178,7 @@ Column {
 
     function keep(src) {
       if (!src || !src.key || byKey[src.key]) return
-      if (deviceConcealed(src.deviceUid)) return
+      if (Cc.channelConcealed(service && service.hiddenDevices, service && service.hiddenChannels, src)) return
       if (!presentOnBoard(src)) return
       byKey[src.key] = {
         key: src.key,
@@ -297,37 +292,36 @@ Column {
     return room > base ? room : base
   }
 
-  function gaugeWeight(card) {
-    var n = card && card.rows ? card.rows.length : 0
-    return Math.max(2, n)
-  }
-
-  function gaugeCardWidth(avail, index, cards) {
+  // One diameter for every speedometer. A card is only as wide as its gauges,
+  // so a single gauge stays slim and extra gauges widen that card. A narrow
+  // row, such as the chip, shrinks every gauge by the same amount.
+  function gaugeSideFor(avail, cards) {
     var list = cards || []
     var count = list.length
-    if (!count) return Math.max(1, avail)
-    var gap = Style.space(8)
-    var room = Math.max(1, avail - gap * Math.max(0, count - 1))
-    var span = 0
+    if (!count) return gaugeNatural
+    var fans = 0
     var i
-    for (i = 0; i < count; i++) span += gaugeWeight(list[i])
-    if (span < 1) span = count
-    var used = 0
     for (i = 0; i < count; i++) {
-      var w = i === count - 1 ? room - used : Math.floor(room * gaugeWeight(list[i]) / span)
-      if (i === index) return Math.max(1, w)
-      used += w
+      var n = list[i] && list[i].rows ? list[i].rows.length : 0
+      fans += Math.max(1, n)
     }
-    return Math.max(1, Math.floor(room / count))
+    if (fans < 1) fans = count
+    var cardGap = Style.space(8)
+    var fanGap = Style.space(6)
+    var pad = Style.space(10) * 2
+    var chrome = pad * count + fanGap * Math.max(0, fans - count) + cardGap * Math.max(0, count - 1)
+    var room = (avail > 0 ? avail : 0) - chrome
+    if (room < fans) return 1
+    var fit = Math.floor(room / fans)
+    if (fit < 1) fit = 1
+    return Math.min(gaugeNatural, fit)
   }
 
-  function gaugeSide(cardWidth, fans) {
-    var pad = Style.space(16)
-    var gap = Style.space(6)
+  function gaugeCardWidth(side, fans) {
     var n = Math.max(1, fans)
-    var inner = Math.max(1, cardWidth - pad)
-    var fit = Math.floor((inner - gap * Math.max(0, n - 1)) / n)
-    return Math.max(Style.space(36), Math.min(gaugeNatural, fit))
+    var pad = Style.space(10) * 2
+    var gap = Style.space(6)
+    return pad + n * side + gap * Math.max(0, n - 1)
   }
 
   function pushWatch() {
@@ -383,9 +377,7 @@ Column {
     if (n < 10) {
       var tenth = Math.round(n * 10) / 10
       if (tenth <= 0) return "0%"
-      var text = String(tenth)
-      if (text.indexOf(".") < 0) return text + "%"
-      return text + "%"
+      return String(tenth) + "%"
     }
     return Math.round(n) + "%"
   }
@@ -827,10 +819,9 @@ Column {
       delegate: Rectangle {
         id: gaugeCard
         required property var modelData
-        required property int index
         readonly property int fans: Math.max(1, (modelData.rows || []).length)
-        readonly property int side: root.gaugeSide(width, fans)
-        width: root.gaugeCardWidth(gaugeRow.width, index, root.stableGauges)
+        readonly property int side: root.gaugeSideFor(gaugeRow.width, root.stableGauges)
+        width: root.gaugeCardWidth(side, fans)
         implicitHeight: gaugeCol.implicitHeight + Style.space(20)
         height: implicitHeight
         radius: 0
@@ -898,7 +889,7 @@ Column {
 
                   Item {
                     width: gaugeCard.side
-                    height: root.gaugeNatural
+                    height: gaugeCard.side
 
                     SpeedGauge {
                       anchors.centerIn: parent

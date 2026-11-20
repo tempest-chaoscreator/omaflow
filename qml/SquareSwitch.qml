@@ -25,11 +25,12 @@ Item {
     id: track
     anchors.fill: parent
     radius: 0
-    color: root.on && root.switchEnabled
+    opacity: root.switchEnabled ? 1 : 0.45
+    color: root.on
       ? root.accent
-      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, root.switchEnabled ? 0.16 : 0.08)
+      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.16)
     border.width: 1
-    border.color: root.on && root.switchEnabled
+    border.color: root.on
       ? root.accent
       : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
 
@@ -38,10 +39,10 @@ Item {
       height: width
       radius: 0
       anchors.verticalCenter: parent.verticalCenter
-      x: root.on && root.switchEnabled
+      x: root.on
         ? track.width - width - Math.round((track.height - height) / 2)
         : Math.round((track.height - height) / 2)
-      color: root.on && root.switchEnabled
+      color: root.on
         ? Commons.Color.background
         : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
       Behavior on x { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }

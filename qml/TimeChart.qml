@@ -11,6 +11,7 @@ Item {
   property string fontFamily: Style.font.family
 
   onSeriesChanged: canvas.requestPaint()
+  onForegroundChanged: canvas.requestPaint()
   onWidthChanged: canvas.requestPaint()
   onHeightChanged: canvas.requestPaint()
 
@@ -72,7 +73,7 @@ Item {
         for (var i = 0; i < values.length; i++) {
           var n = root.sampleNum(values[i])
           if (!isFinite(n)) { started = false; continue }
-          var x = values.length === 1 ? 0 : (i / (values.length - 1)) * width
+          var x = (i / (values.length - 1)) * width
           var yv = height - ((n - span.lo) / (span.hi - span.lo)) * height
           if (!started) { ctx.moveTo(x, yv); started = true }
           else ctx.lineTo(x, yv)
